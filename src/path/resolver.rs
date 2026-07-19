@@ -1,0 +1,174 @@
+use crate::error::{AppError, AppResult};
+
+#[derive(Debug, Clone)]
+pub enum PathSegment {
+    Field(String),
+    Index(usize),
+}
+
+#[derive(Debug, Clone)]
+pub enum ResolvedPath {
+    Presentation {
+        remaining: Vec<PathSegment>,
+    },
+    Slide {
+        slide_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
+    Shape {
+        slide_idx: usize,
+        shape_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
+}
+
+pub fn parse_path(path_str: &str) -> AppResult<Vec<PathSegment>> {
+    let raw = path_str.strip_prefix('p').unwrap_or(path_str);
+    let raw = raw.strip_prefix('.').unwrap_or(raw);
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut segments = Vec::new();
+    let mut rest = raw;
+
+    while !rest.is_empty() {
+        if let Some(name_end) = rest.find(['.', '[']) {
+            let field = &rest[..name_end];
+            if !field.is_empty() {
+                segments.push(PathSegment::Field(field.to_string()));
+            }
+            if rest.as_bytes()[name_end] == b'.' {
+                rest = &rest[name_end + 1..];
+            } else if rest.as_bytes()[name_end] == b'[' {
+                rest = &rest[name_end..];
+            }
+        } else {
+            segments.push(PathSegment::Field(rest.to_string()));
+            break;
+        }
+
+        if rest.starts_with('[') {
+            let close = rest
+                .find(']')
+                .ok_or_else(|| AppError::PathParse("Unclosed bracket".to_string()))?;
+            let idx_str = &rest[1..close];
+            let idx: usize = idx_str
+                .parse()
+                .map_err(|_| AppError::PathParse(format!("Invalid index '{idx_str}'")))?;
+            segments.push(PathSegment::Index(idx));
+            rest = &rest[close + 1..];
+            if rest.starts_with('.') {
+                rest = &rest[1..];
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
+    if segments.is_empty() {
+        return Ok(ResolvedPath::Presentation {
+            remaining: Vec::new(),
+        });
+    }
+
+    let first = &segments[0];
+    match first {
+        PathSegment::Field(name) if name == "slides" => {
+            let tail = &segments[1..];
+            if tail.is_empty() {
+                return Ok(ResolvedPath::Slide {
+                    slide_idx: None,
+                    remaining: Vec::new(),
+                });
+            }
+            match &tail[0] {
+                PathSegment::Index(idx) => {
+                    let after_idx = &tail[1..];
+                    if after_idx.is_empty() {
+                        return Ok(ResolvedPath::Slide {
+                            slide_idx: Some(*idx),
+                            remaining: Vec::new(),
+                        });
+                    }
+                    match &after_idx[0] {
+                        PathSegment::Field(name) if name == "shapes" => {
+                            let tail2 = &after_idx[1..];
+                            if tail2.is_empty() {
+                                return Ok(ResolvedPath::Shape {
+                                    slide_idx: *idx,
+                                    shape_idx: None,
+                                    remaining: Vec::new(),
+                                });
+                            }
+                            match &tail2[0] {
+                                PathSegment::Index(shape_idx) => Ok(ResolvedPath::Shape {
+                                    slide_idx: *idx,
+                                    shape_idx: Some(*shape_idx),
+                                    remaining: tail2[1..].to_vec(),
+                                }),
+                                _ => Err(AppError::PathParse(
+                                    "Expected shape index after shapes".to_string(),
+                                )),
+                            }
+                        }
+                        PathSegment::Field(_) => Ok(ResolvedPath::Slide {
+                            slide_idx: Some(*idx),
+                            remaining: after_idx.to_vec(),
+                        }),
+                        _ => Err(AppError::PathParse(
+                            "Expected field after slide index".to_string(),
+                        )),
+                    }
+                }
+                PathSegment::Field(name) if name == "shapes" => Ok(ResolvedPath::Shape {
+                    slide_idx: 0,
+                    shape_idx: None,
+                    remaining: Vec::new(),
+                }),
+                PathSegment::Field(_) => Ok(ResolvedPath::Slide {
+                    slide_idx: None,
+                    remaining: tail.to_vec(),
+                }),
+            }
+        }
+        PathSegment::Field(_) => Ok(ResolvedPath::Presentation {
+            remaining: segments.to_vec(),
+        }),
+        _ => Err(AppError::PathParse(format!(
+            "Unexpected path segment {:?}",
+            first
+        ))),
+    }
+}
+
+impl ResolvedPath {
+    pub fn remaining_segments(&self) -> &[PathSegment] {
+        match self {
+            ResolvedPath::Presentation { remaining } => remaining,
+            ResolvedPath::Slide { remaining, .. } => remaining,
+            ResolvedPath::Shape { remaining, .. } => remaining,
+        }
+    }
+
+    pub fn slide_index(&self) -> AppResult<usize> {
+        match self {
+            ResolvedPath::Shape { slide_idx, .. } => Ok(*slide_idx),
+            ResolvedPath::Slide {
+                slide_idx: Some(i), ..
+            } => Ok(*i),
+            _ => Err(AppError::PathParse("No slide index in path".to_string())),
+        }
+    }
+
+    pub fn shape_index(&self) -> AppResult<usize> {
+        match self {
+            ResolvedPath::Shape {
+                shape_idx: Some(i), ..
+            } => Ok(*i),
+            _ => Err(AppError::PathParse("No shape index in path".to_string())),
+        }
+    }
+}

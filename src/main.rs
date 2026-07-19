@@ -1,0 +1,63 @@
+mod cli;
+mod commands;
+mod dto;
+mod engine;
+mod error;
+mod model;
+mod opc;
+mod path;
+
+use clap::Parser;
+use cli::Commands;
+use error::AppResult;
+
+fn main() -> AppResult<()> {
+    let cli = cli::Cli::parse();
+
+    match cli.command {
+        Commands::Query { input, path, media } => {
+            commands::query::execute(&input, &path, media.as_deref())?;
+        }
+        Commands::Add {
+            input,
+            path,
+            value,
+            output,
+        } => {
+            commands::add::execute(&input, &path, &value, &output)?;
+        }
+        Commands::Remove {
+            input,
+            path,
+            output,
+        } => {
+            commands::remove::execute(&input, &path, &output)?;
+        }
+        Commands::Replace {
+            input,
+            path,
+            value,
+            output,
+        } => {
+            commands::replace::execute(&input, &path, &value, &output)?;
+        }
+        Commands::Move {
+            input,
+            from,
+            to,
+            output,
+        } => {
+            commands::copy_move::move_shape(&input, &from, &to, &output)?;
+        }
+        Commands::Copy {
+            input,
+            from,
+            to,
+            output,
+        } => {
+            commands::copy_move::copy_shape(&input, &from, &to, &output)?;
+        }
+    }
+
+    Ok(())
+}
