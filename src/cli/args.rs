@@ -24,6 +24,10 @@ pub enum Commands {
         /// Directory to extract media files into
         #[arg(long)]
         media: Option<String>,
+
+        /// Pretty-print JSON output
+        #[arg(long)]
+        pretty: bool,
     },
     /// Insert a new element
     Add {

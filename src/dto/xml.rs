@@ -124,10 +124,17 @@ fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
             writer
                 .write_event(Event::Start(BytesStart::new("a:lnSpc")))
                 .ok();
-            let mut pts = BytesStart::new("a:spcPts");
-            let val = (ls * 100.0).round() as i64;
-            pts.push_attribute(("val", val.to_string().as_str()));
-            writer.write_event(Event::Empty(pts)).ok();
+            if (0.5..=10.0).contains(&ls) {
+                let mut pct = BytesStart::new("a:spcPct");
+                let val = (ls * 100000.0).round() as i64;
+                pct.push_attribute(("val", val.to_string().as_str()));
+                writer.write_event(Event::Empty(pct)).ok();
+            } else {
+                let mut pts = BytesStart::new("a:spcPts");
+                let val = (ls * 100.0).round() as i64;
+                pts.push_attribute(("val", val.to_string().as_str()));
+                writer.write_event(Event::Empty(pts)).ok();
+            }
             writer
                 .write_event(Event::End(BytesEnd::new("a:lnSpc")))
                 .ok();
@@ -164,9 +171,11 @@ fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
         write_run(r, writer);
     }
 
-    if let Some(last_run) = p.runs.last()
-        && let Some(ref font) = last_run.font
-    {
+    let end_font = p
+        .font
+        .as_ref()
+        .or_else(|| p.runs.last().and_then(|r| r.font.as_ref()));
+    if let Some(font) = end_font {
         writer
             .write_event(Event::Start(BytesStart::new("a:endParaRPr")))
             .ok();

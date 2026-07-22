@@ -155,6 +155,8 @@ pub struct ParagraphDto {
     pub space_before: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_after: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<FontDto>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -11,21 +11,16 @@ use crate::path;
 
 fn build_image_map(
     rels: Option<&HashMap<String, crate::opc::Relationship>>,
-    media_dir: Option<&str>,
 ) -> HashMap<String, String> {
     let mut image_map = HashMap::new();
     if let Some(rels) = rels {
         for (r_id, rel) in rels {
             if rel.rel_type.contains("image") {
-                let image_path = if let Some(dir) = media_dir {
-                    Path::new(dir)
-                        .join(&rel.target)
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    rel.target.clone()
-                };
-                image_map.insert(r_id.clone(), image_path);
+                let filename = Path::new(&rel.target)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| rel.target.clone());
+                image_map.insert(r_id.clone(), filename);
             }
         }
     }
@@ -41,7 +36,7 @@ fn parse_shapes(
         .get_part(uri)
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
     let rels = pkg.get_rels(uri);
-    let image_map = build_image_map(rels, media_dir);
+    let image_map = build_image_map(rels);
     let shapes = slide::parse_slide_shapes(part_data, &image_map)?;
 
     if let Some(dir) = media_dir
@@ -51,7 +46,10 @@ fn parse_shapes(
             if rel.rel_type.contains("image")
                 && let Some(data) = pkg.get_part(&format!("ppt/{}", rel.target))
             {
-                let target_path = Path::new(dir).join(&rel.target);
+                let filename = Path::new(&rel.target)
+                    .file_name()
+                    .unwrap_or(rel.target.as_ref());
+                let target_path = Path::new(dir).join(filename);
                 if let Some(parent) = target_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -83,7 +81,12 @@ fn navigate_json(
     Ok(current)
 }
 
-pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResult<()> {
+pub fn execute(
+    input: &str,
+    path_str: &str,
+    media_dir: Option<&str>,
+    pretty: bool,
+) -> AppResult<()> {
     let pkg = Package::open(Path::new(input))?;
 
     let pres_part = pkg
@@ -156,7 +159,12 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
     };
 
     let result = navigate_json(&value, resolved.remaining_segments())?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    let output = if pretty {
+        serde_json::to_string_pretty(&result)?
+    } else {
+        serde_json::to_string(&result)?
+    };
+    println!("{output}");
 
     Ok(())
 }

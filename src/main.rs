@@ -15,8 +15,13 @@ fn main() -> AppResult<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        Commands::Query { input, path, media } => {
-            commands::query::execute(&input, &path, media.as_deref())?;
+        Commands::Query {
+            input,
+            path,
+            media,
+            pretty,
+        } => {
+            commands::query::execute(&input, &path, media.as_deref(), pretty)?;
         }
         Commands::Add {
             input,

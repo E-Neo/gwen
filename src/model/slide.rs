@@ -22,6 +22,7 @@ fn fresh_para() -> ParagraphDto {
         line_spacing: None,
         space_before: None,
         space_after: None,
+        font: None,
     }
 }
 
@@ -104,6 +105,7 @@ pub fn parse_slide_shapes(
     let mut in_run_props = false;
     let mut run_font: Option<FontDto> = None;
     let mut in_solid_fill = false;
+    let mut in_end_para_rpr = false;
 
     let mut in_para_props = false;
     let mut in_ln_spc = false;
@@ -425,6 +427,37 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:endParaRPr" if in_paragraph => {
+                        run_font = Some(fresh_font());
+                        in_run_props = true;
+                        in_end_para_rpr = true;
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"sz" => {
+                                    if let Some(ref mut font) = run_font {
+                                        font.size = String::from_utf8_lossy(&a.value).parse().ok();
+                                    }
+                                }
+                                b"b" | b"i" => {
+                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    if let Some(ref mut font) = run_font {
+                                        if a.key.as_ref() == b"b" {
+                                            font.bold = Some(v);
+                                        } else {
+                                            font.italic = Some(v);
+                                        }
+                                    }
+                                }
+                                b"u" => {
+                                    if let Some(ref mut font) = run_font {
+                                        font.underline =
+                                            Some(String::from_utf8_lossy(&a.value) != "none");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     b"a:solidFill" if in_run_props => {
                         in_solid_fill = true;
                     }
@@ -651,6 +684,36 @@ pub fn parse_slide_shapes(
                             r_id,
                         });
                     }
+                    b"a:endParaRPr" if in_paragraph => {
+                        let mut font = fresh_font();
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"sz" => font.size = String::from_utf8_lossy(&a.value).parse().ok(),
+                                b"b" | b"i" => {
+                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    if a.key.as_ref() == b"b" {
+                                        font.bold = Some(v);
+                                    } else {
+                                        font.italic = Some(v);
+                                    }
+                                }
+                                b"u" => {
+                                    font.underline =
+                                        Some(String::from_utf8_lossy(&a.value) != "none");
+                                }
+                                _ => {}
+                            }
+                        }
+                        if font.name.is_some()
+                            || font.size.is_some()
+                            || font.bold.is_some()
+                            || font.italic.is_some()
+                            || font.underline.is_some()
+                            || font.color.is_some()
+                        {
+                            para.font = Some(font);
+                        }
+                    }
                     b"a:solidFill" if in_run_props => {
                         in_solid_fill = true;
                     }
@@ -744,6 +807,15 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:spcPct" if in_ln_spc => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                let raw: f64 =
+                                    String::from_utf8_lossy(&a.value).parse().unwrap_or(0.0);
+                                para.line_spacing = Some(raw / 100000.0);
+                            }
+                        }
+                    }
                     b"a:spcPts" if in_spc_bef => {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"val" {
@@ -796,6 +868,7 @@ pub fn parse_slide_shapes(
                         in_run_props = false;
                         run_font = None;
                         in_solid_fill = false;
+                        in_end_para_rpr = false;
                         in_para_props = false;
                         in_ln_spc = false;
                         in_spc_bef = false;
@@ -840,6 +913,14 @@ pub fn parse_slide_shapes(
                         }
                         in_run_props = false;
                         in_solid_fill = false;
+                    }
+                    b"a:endParaRPr" if in_end_para_rpr => {
+                        if let Some(font) = run_font.take() {
+                            para.font = Some(font);
+                        }
+                        in_run_props = false;
+                        in_solid_fill = false;
+                        in_end_para_rpr = false;
                     }
                     b"a:solidFill" if in_solid_fill => {
                         in_solid_fill = false;

@@ -23,9 +23,6 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
     let segments = path::parse_path(path_str)?;
     let resolved = path::resolve_path(&segments)?;
 
-    let add_shape: AddShape = serde_json::from_str(value)
-        .map_err(|e| AppError::InvalidValue(format!("Invalid JSON: {}", e)))?;
-
     let slide_idx = resolved.slide_index()?;
     let slide_uri = pres
         .slide_uris
@@ -37,16 +34,39 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         .ok_or_else(|| AppError::PartNotFound(slide_uri.to_string()))?
         .to_vec();
 
-    let max_id = factory::find_max_shape_id(&part_data);
-    let new_id = add_shape.shape_id.unwrap_or(max_id + 1);
+    let remaining = resolved.remaining_segments();
 
-    let new_shape_xml = factory::generate_shape_xml(&add_shape, new_id)?;
+    if remaining.len() >= 2
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "text_frame")
+    {
+        // Add to text_frame: paragraphs or runs
+        let shape_idx = resolved.shape_index()?;
+        let new_data = editor::add_to_text_frame(&part_data, shape_idx, remaining, value)?;
+        pkg.set_part(slide_uri, new_data);
+    } else if remaining.is_empty() {
+        // Add shape
+        let add_shape: AddShape = serde_json::from_str(value)
+            .map_err(|e| AppError::InvalidValue(format!("Invalid JSON: {}", e)))?;
 
-    let shape_idx = resolved.shape_index()?;
+        let max_id = factory::find_max_shape_id(&part_data);
+        let new_id = add_shape.shape_id.unwrap_or(max_id + 1);
 
-    let new_data = editor::insert_shape_after(&part_data, shape_idx, &new_shape_xml)?;
+        let new_shape_xml = factory::generate_shape_xml(&add_shape, new_id)?;
 
-    pkg.set_part(slide_uri, new_data);
+        let shape_idx = match resolved.shape_index() {
+            Ok(idx) => idx,
+            Err(_) => max_id as usize,
+        };
+
+        let new_data = editor::insert_shape_after(&part_data, shape_idx, &new_shape_xml)?;
+        pkg.set_part(slide_uri, new_data);
+    } else {
+        return Err(AppError::PathParse(format!(
+            "add does not support path: {}",
+            path_str
+        )));
+    }
+
     pkg.save(Path::new(output))?;
 
     Ok(())
