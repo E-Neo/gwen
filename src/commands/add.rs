@@ -39,9 +39,14 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
     if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "text_frame")
     {
-        // Add to text_frame: paragraphs or runs
         let shape_idx = resolved.shape_index()?;
         let new_data = editor::add_to_text_frame(&part_data, shape_idx, remaining, value)?;
+        pkg.set_part(slide_uri, new_data);
+    } else if remaining.len() >= 2
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        let shape_idx = resolved.shape_index()?;
+        let new_data = editor::add_to_table(&part_data, shape_idx, remaining, value)?;
         pkg.set_part(slide_uri, new_data);
     } else if remaining.is_empty() {
         // Add shape

@@ -1,5 +1,6 @@
 use quick_xml::Writer;
 use std::io::Cursor;
+use std::io::Write;
 
 use crate::dto::{AddShape, ShapeTypeInput};
 use crate::error::AppResult;
@@ -8,7 +9,168 @@ pub fn generate_shape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     match shape.shape_type {
         ShapeTypeInput::Textbox => generate_textbox_xml(shape, new_id),
         ShapeTypeInput::Picture => generate_picture_xml(shape, new_id),
+        ShapeTypeInput::Table => generate_table_xml(shape, new_id),
+        ShapeTypeInput::Chart => generate_chart_xml(shape, new_id),
     }
+}
+
+fn generate_table_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
+    let left = shape.left.unwrap_or(0);
+    let top = shape.top.unwrap_or(0);
+    let width = shape.width.unwrap_or(6096000);
+    let height = shape.height.unwrap_or(3048000);
+    let name = format!("Table {}", new_id);
+    let table = shape.table.as_ref().ok_or_else(|| {
+        crate::error::AppError::InvalidValue("table definition required".to_string())
+    })?;
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    write_open_tag(&mut writer, "p:graphicFrame", &[]);
+
+    write_open_tag(&mut writer, "p:nvGraphicFramePr", &[]);
+    write_empty_tag(
+        &mut writer,
+        "p:cNvPr",
+        &[("id", &new_id.to_string()), ("name", &name)],
+    );
+    write_empty_tag(&mut writer, "p:cNvGraphicFramePr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvGraphicFramePr");
+
+    write_open_tag(&mut writer, "p:xfrm", &[]);
+    write_empty_tag(
+        &mut writer,
+        "a:off",
+        &[("x", &left.to_string()), ("y", &top.to_string())],
+    );
+    write_empty_tag(
+        &mut writer,
+        "a:ext",
+        &[("cx", &width.to_string()), ("cy", &height.to_string())],
+    );
+    write_close_tag(&mut writer, "p:xfrm");
+
+    write_open_tag(&mut writer, "a:graphic", &[]);
+    write_open_tag(
+        &mut writer,
+        "a:graphicData",
+        &[(
+            "uri",
+            "http://schemas.openxmlformats.org/drawingml/2006/table",
+        )],
+    );
+    write_open_tag(&mut writer, "a:tbl", &[]);
+
+    write_open_tag(&mut writer, "a:tblPr", &[]);
+    write_empty_tag(&mut writer, "a:noFill", &[]);
+    write_close_tag(&mut writer, "a:tblPr");
+
+    write_open_tag(&mut writer, "a:tblGrid", &[]);
+    for col in &table.grid {
+        write_empty_tag(&mut writer, "a:gridCol", &[("w", &col.width.to_string())]);
+    }
+    write_close_tag(&mut writer, "a:tblGrid");
+
+    for row in &table.rows {
+        let h_str = row.height.map(|h| h.to_string());
+        let mut row_attrs: Vec<(&str, &str)> = Vec::new();
+        if let Some(ref h) = h_str {
+            row_attrs.push(("h", h));
+        }
+        write_open_tag(&mut writer, "a:tr", &row_attrs);
+        for cell in &row.cells {
+            let rs_str = cell.row_span.map(|v| v.to_string());
+            let gs_str = cell.grid_span.map(|v| v.to_string());
+            let mut cell_attrs: Vec<(&str, &str)> = Vec::new();
+            if let Some(ref rs) = rs_str {
+                cell_attrs.push(("rowSpan", rs));
+            }
+            if let Some(ref gs) = gs_str {
+                cell_attrs.push(("gridSpan", gs));
+            }
+            write_open_tag(&mut writer, "a:tc", &cell_attrs);
+            if let Some(ref tf) = cell.text_frame {
+                writer
+                    .get_mut()
+                    .write_all(b"<a:txBody>")
+                    .map_err(crate::error::AppError::Io)?;
+                let txbody = crate::dto::xml::txbody_to_xml(tf);
+                writer
+                    .get_mut()
+                    .write_all(txbody.as_bytes())
+                    .map_err(crate::error::AppError::Io)?;
+                writer
+                    .get_mut()
+                    .write_all(b"</a:txBody>")
+                    .map_err(crate::error::AppError::Io)?;
+            } else {
+                write_open_tag(&mut writer, "a:txBody", &[]);
+                write_empty_tag(&mut writer, "a:bodyPr", &[]);
+                write_open_tag(&mut writer, "a:p", &[]);
+                write_close_tag(&mut writer, "a:p");
+                write_close_tag(&mut writer, "a:txBody");
+            }
+            write_close_tag(&mut writer, "a:tc");
+        }
+        write_close_tag(&mut writer, "a:tr");
+    }
+
+    write_close_tag(&mut writer, "a:tbl");
+    write_close_tag(&mut writer, "a:graphicData");
+    write_close_tag(&mut writer, "a:graphic");
+    write_close_tag(&mut writer, "p:graphicFrame");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
+}
+
+fn generate_chart_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
+    let left = shape.left.unwrap_or(0);
+    let top = shape.top.unwrap_or(0);
+    let width = shape.width.unwrap_or(6096000);
+    let height = shape.height.unwrap_or(3048000);
+    let name = format!("Chart {}", new_id);
+    let r_id = shape.r_id.as_deref().unwrap_or("rId1");
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    write_open_tag(&mut writer, "p:graphicFrame", &[]);
+    write_open_tag(&mut writer, "p:nvGraphicFramePr", &[]);
+    write_empty_tag(
+        &mut writer,
+        "p:cNvPr",
+        &[("id", &new_id.to_string()), ("name", &name)],
+    );
+    write_empty_tag(&mut writer, "p:cNvGraphicFramePr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvGraphicFramePr");
+    write_open_tag(&mut writer, "p:xfrm", &[]);
+    write_empty_tag(
+        &mut writer,
+        "a:off",
+        &[("x", &left.to_string()), ("y", &top.to_string())],
+    );
+    write_empty_tag(
+        &mut writer,
+        "a:ext",
+        &[("cx", &width.to_string()), ("cy", &height.to_string())],
+    );
+    write_close_tag(&mut writer, "p:xfrm");
+    write_open_tag(&mut writer, "a:graphic", &[]);
+    write_open_tag(
+        &mut writer,
+        "a:graphicData",
+        &[(
+            "uri",
+            "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        )],
+    );
+    write_empty_tag(&mut writer, "c:chart", &[("r:id", r_id)]);
+    write_close_tag(&mut writer, "a:graphicData");
+    write_close_tag(&mut writer, "a:graphic");
+    write_close_tag(&mut writer, "p:graphicFrame");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
 }
 
 fn generate_textbox_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {

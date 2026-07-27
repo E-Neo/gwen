@@ -126,6 +126,22 @@ pub fn parse_slide_shapes(
     let mut para = fresh_para();
     let mut paragraphs: Vec<ParagraphDto> = Vec::new();
 
+    // Table/chart parsing state
+    let mut in_table = false;
+    let mut in_tr = false;
+    let mut in_tc = false;
+    let mut in_cell_text = false;
+    let mut in_graphic_data = false;
+    let mut table_grid: Vec<GridColDto> = Vec::new();
+    let mut current_cells: Vec<TableCellDto> = Vec::new();
+    let mut table_rows: Vec<TableRowDto> = Vec::new();
+    let mut tc_row_span: Option<u32> = None;
+    let mut tc_grid_span: Option<u32> = None;
+    let mut tc_h_merge: Option<bool> = None;
+    let mut tc_v_merge: Option<bool> = None;
+    let mut current_row_height: Option<i64> = None;
+    let mut cell_paragraphs: Vec<ParagraphDto> = Vec::new();
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
@@ -133,13 +149,17 @@ pub fn parse_slide_shapes(
                 let tag = ename.as_ref();
                 match tag {
                     b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame" => {
-                        let st = match tag {
+                        let mut st = match tag {
                             b"p:pic" => ShapeType::Picture,
                             b"p:cxnSp" => ShapeType::Line,
                             b"p:grpSp" => ShapeType::Group,
                             b"p:graphicFrame" => ShapeType::Chart,
                             _ => ShapeType::AutoShape,
                         };
+                        let is_gf = tag == b"p:graphicFrame";
+                        if is_gf {
+                            st = ShapeType::AutoShape; // will be corrected by a:graphicData handler
+                        }
                         current_shape = Some(ShapeDto {
                             shape_id: 0,
                             name: None,
@@ -155,6 +175,8 @@ pub fn parse_slide_shapes(
                             auto_shape_type: None,
                             text_frame: None,
                             image: None,
+                            table: None,
+                            chart: None,
                             shapes: None,
                         });
                         is_textbox = false;
@@ -166,6 +188,14 @@ pub fn parse_slide_shapes(
                         para = fresh_para();
                         paragraphs = Vec::new();
                         in_xfrm = false;
+                        in_table = false;
+                        in_tr = false;
+                        in_tc = false;
+                        in_cell_text = false;
+                        in_graphic_data = false;
+                        table_grid.clear();
+                        current_cells.clear();
+                        table_rows.clear();
                     }
                     b"p:ph" => {
                         if let Some(ref mut shape) = current_shape {
@@ -342,7 +372,7 @@ pub fn parse_slide_shapes(
                     b"a:noAutofit" if in_body_pr => {
                         body_pr_auto_size = Some(MsoAutoSize::None);
                     }
-                    b"a:p" if in_text_frame => {
+                    b"a:p" if in_text_frame || in_cell_text => {
                         in_paragraph = true;
                         para = fresh_para();
                     }
@@ -502,6 +532,79 @@ pub fn parse_slide_shapes(
                                 }
                             }
                         }
+                    }
+                    b"a:graphicData" if current_shape.is_some() => {
+                        in_graphic_data = true;
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"uri" {
+                                let uri = String::from_utf8_lossy(&a.value);
+                                if uri.contains("table") {
+                                    in_table = true;
+                                    if let Some(ref mut shape) = current_shape {
+                                        shape.shape_type = ShapeType::Table;
+                                    }
+                                } else if uri.contains("chart")
+                                    && let Some(ref mut shape) = current_shape
+                                {
+                                    shape.shape_type = ShapeType::Chart;
+                                }
+                            }
+                        }
+                    }
+                    b"a:tbl" if in_table => {
+                        table_grid.clear();
+                        table_rows.clear();
+                    }
+                    b"a:tblGrid" if in_table => {}
+                    b"a:gridCol" if in_table => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"w" {
+                                let w: i64 = String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                                table_grid.push(GridColDto { width: w });
+                            }
+                        }
+                    }
+                    b"a:tr" if in_table => {
+                        in_tr = true;
+                        current_cells.clear();
+                        current_row_height = None;
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"h" {
+                                current_row_height = String::from_utf8_lossy(&a.value).parse().ok();
+                            }
+                        }
+                    }
+                    b"a:tc" if in_tr => {
+                        in_tc = true;
+                        tc_row_span = None;
+                        tc_grid_span = None;
+                        tc_h_merge = None;
+                        tc_v_merge = None;
+                        cell_paragraphs.clear();
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"rowSpan" => {
+                                    tc_row_span = String::from_utf8_lossy(&a.value).parse().ok()
+                                }
+                                b"gridSpan" => {
+                                    tc_grid_span = String::from_utf8_lossy(&a.value).parse().ok()
+                                }
+                                b"hMerge" => {
+                                    tc_h_merge = Some(String::from_utf8_lossy(&a.value) == "1")
+                                }
+                                b"vMerge" => {
+                                    tc_v_merge = Some(String::from_utf8_lossy(&a.value) == "1")
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"a:txBody" if in_tc => {
+                        in_cell_text = true;
+                        cell_paragraphs.clear();
+                    }
+                    b"a:bodyPr" if in_cell_text => {
+                        in_body_pr = true;
                     }
                     _ => {}
                 }
@@ -768,6 +871,28 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:gridCol" if in_table => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"w" {
+                                let w: i64 = String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                                table_grid.push(GridColDto { width: w });
+                            }
+                        }
+                    }
+                    b"c:chart" if in_graphic_data => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"r:id" || a.key.as_ref().ends_with(b":id") {
+                                let r_id = String::from_utf8_lossy(&a.value).to_string();
+                                if let Some(ref mut shape) = current_shape {
+                                    shape.chart = Some(ChartDto {
+                                        chart_type: None,
+                                        r_id: Some(r_id),
+                                        series: Vec::new(),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     b"a:schemeClr" if in_solid_fill => {
                         if let Some(ref mut font) = run_font {
                             for a in e.attributes().flatten() {
@@ -830,6 +955,13 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:txBody" if in_tc => {
+                        in_cell_text = true;
+                        cell_paragraphs.clear();
+                    }
+                    b"a:bodyPr" if in_cell_text => {
+                        in_body_pr = true;
+                    }
                     _ => {}
                 }
             }
@@ -874,6 +1006,14 @@ pub fn parse_slide_shapes(
                         in_spc_bef = false;
                         in_spc_aft = false;
                         in_body_pr = false;
+                        in_table = false;
+                        in_tr = false;
+                        in_tc = false;
+                        in_cell_text = false;
+                        in_graphic_data = false;
+                        table_grid.clear();
+                        current_cells.clear();
+                        table_rows.clear();
                     }
                     b"a:xfrm" | b"p:xfrm" => {
                         in_xfrm = false;
@@ -933,7 +1073,11 @@ pub fn parse_slide_shapes(
                             text_buf.clear();
                             in_run = false;
                         }
-                        paragraphs.push(para);
+                        if in_cell_text {
+                            cell_paragraphs.push(para);
+                        } else {
+                            paragraphs.push(para);
+                        }
                         para = fresh_para();
                         in_paragraph = false;
                     }
@@ -950,6 +1094,67 @@ pub fn parse_slide_shapes(
                             para = fresh_para();
                         }
                         in_text_frame = false;
+                    }
+                    b"a:txBody" if in_cell_text => {
+                        if in_paragraph {
+                            if in_run {
+                                run.text = text_buf.trim().to_string();
+                                para.runs.push(run);
+                                run = fresh_run();
+                                text_buf.clear();
+                                in_run = false;
+                            }
+                            cell_paragraphs.push(para);
+                            para = fresh_para();
+                            in_paragraph = false;
+                        }
+                        in_cell_text = false;
+                        in_body_pr = false;
+                    }
+                    b"a:tc" if in_tc => {
+                        let cell = TableCellDto {
+                            row_span: tc_row_span.take(),
+                            grid_span: tc_grid_span.take(),
+                            h_merge: tc_h_merge.take(),
+                            v_merge: tc_v_merge.take(),
+                            text_frame: if cell_paragraphs.is_empty() {
+                                None
+                            } else {
+                                Some(TextFrameDto {
+                                    paragraphs: std::mem::take(&mut cell_paragraphs),
+                                    auto_size: None,
+                                    word_wrap: None,
+                                    vertical_anchor: None,
+                                    margin_left: None,
+                                    margin_right: None,
+                                    margin_top: None,
+                                    margin_bottom: None,
+                                })
+                            },
+                        };
+                        current_cells.push(cell);
+                        in_tc = false;
+                    }
+                    b"a:tr" if in_tr => {
+                        let row = TableRowDto {
+                            height: current_row_height.take(),
+                            cells: std::mem::take(&mut current_cells),
+                        };
+                        table_rows.push(row);
+                        in_tr = false;
+                    }
+                    b"a:tbl" if in_table => {
+                        let table = TableDto {
+                            grid: std::mem::take(&mut table_grid),
+                            rows: std::mem::take(&mut table_rows),
+                        };
+                        if let Some(ref mut shape) = current_shape {
+                            shape.table = Some(table);
+                        }
+                        in_table = false;
+                    }
+                    b"a:graphicData" if in_graphic_data => {
+                        in_graphic_data = false;
                     }
                     _ => {}
                 }

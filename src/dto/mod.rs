@@ -179,6 +179,58 @@ pub struct TextFrameDto {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct GridColDto {
+    pub width: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TableCellDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_span: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_span: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h_merge: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v_merge: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_frame: Option<TextFrameDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TableRowDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<i64>,
+    pub cells: Vec<TableCellDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TableDto {
+    pub grid: Vec<GridColDto>,
+    pub rows: Vec<TableRowDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChartSeriesDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChartDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<ChartSeriesDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ShapeDto {
     pub shape_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +263,11 @@ pub struct ShapeDto {
     pub image: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<TableDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ChartDto>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shapes: Option<Vec<ShapeDto>>,
 }
 
@@ -229,6 +286,8 @@ pub struct SlideDto {
 pub enum ShapeTypeInput {
     Textbox,
     Picture,
+    Table,
+    Chart,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -242,4 +301,8 @@ pub struct AddShape {
     pub text: Option<String>,
     pub image: Option<String>,
     pub shape_id: Option<u32>,
+    /// For chart shapes: relationship ID to an existing chart part
+    pub r_id: Option<String>,
+    /// For table shapes: table definition (grid, rows, cells)
+    pub table: Option<TableDto>,
 }

@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use quick_xml::Writer;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
@@ -304,4 +306,143 @@ fn write_color(color: &ColorFormatDto, writer: &mut Writer<Vec<u8>>) {
     writer
         .write_event(Event::End(BytesEnd::new("a:solidFill")))
         .ok();
+}
+
+pub fn table_to_xml(table: &TableDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(BytesStart::new("a:tbl")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("a:tblPr")))
+        .ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("a:noFill")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("a:tblPr")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("a:tblGrid")))
+        .ok();
+    for col in &table.grid {
+        let mut gc = BytesStart::new("a:gridCol");
+        gc.push_attribute(("w", col.width.to_string().as_str()));
+        writer.write_event(Event::Empty(gc)).ok();
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new("a:tblGrid")))
+        .ok();
+    for row in &table.rows {
+        let mut tr = BytesStart::new("a:tr");
+        if let Some(h) = row.height {
+            tr.push_attribute(("h", h.to_string().as_str()));
+        }
+        writer.write_event(Event::Start(tr)).ok();
+        for cell in &row.cells {
+            let mut tc = BytesStart::new("a:tc");
+            if let Some(rs) = cell.row_span {
+                tc.push_attribute(("rowSpan", rs.to_string().as_str()));
+            }
+            if let Some(gs) = cell.grid_span {
+                tc.push_attribute(("gridSpan", gs.to_string().as_str()));
+            }
+            if let Some(hm) = cell.h_merge {
+                tc.push_attribute(("hMerge", if hm { "1" } else { "0" }));
+            }
+            if let Some(vm) = cell.v_merge {
+                tc.push_attribute(("vMerge", if vm { "1" } else { "0" }));
+            }
+            writer.write_event(Event::Start(tc)).ok();
+            let body = if let Some(ref tf) = cell.text_frame {
+                let mut w2 = Writer::new(Vec::new());
+                w2.write_event(Event::Start(BytesStart::new("a:txBody")))
+                    .ok();
+                write_txbody(tf, &mut w2);
+                w2.write_event(Event::End(BytesEnd::new("a:txBody"))).ok();
+                w2.into_inner()
+            } else {
+                let mut w2 = Writer::new(Vec::new());
+                w2.write_event(Event::Start(BytesStart::new("a:txBody")))
+                    .ok();
+                w2.write_event(Event::Empty(BytesStart::new("a:bodyPr")))
+                    .ok();
+                w2.write_event(Event::Start(BytesStart::new("a:p"))).ok();
+                w2.write_event(Event::End(BytesEnd::new("a:p"))).ok();
+                w2.write_event(Event::End(BytesEnd::new("a:txBody"))).ok();
+                w2.into_inner()
+            };
+            writer.get_mut().write_all(&body).ok();
+            writer.write_event(Event::End(BytesEnd::new("a:tc"))).ok();
+        }
+        writer.write_event(Event::End(BytesEnd::new("a:tr"))).ok();
+    }
+    writer.write_event(Event::End(BytesEnd::new("a:tbl"))).ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+pub fn chart_part_to_xml(chart: &ChartDto) -> String {
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+"#,
+    );
+    let ct = chart.chart_type.as_deref().unwrap_or("barChart");
+    xml.push_str(&format!("      <c:{ct}>\n"));
+    if ct == "barChart" {
+        xml.push_str("        <c:barDir val=\"col\"/>\n");
+        xml.push_str("        <c:grouping val=\"clustered\"/>\n");
+    }
+    for (i, ser) in chart.series.iter().enumerate() {
+        xml.push_str("        <c:ser>\n");
+        xml.push_str(&format!("          <c:idx val=\"{i}\"/>\n"));
+        xml.push_str(&format!("          <c:order val=\"{i}\"/>\n"));
+        if ser.name.is_some() {
+            xml.push_str("          <c:tx>\n");
+            xml.push_str("            <c:strRef>\n");
+            xml.push_str(&format!("              <c:f>Sheet1!$A${}</c:f>\n", i + 1));
+            xml.push_str("            </c:strRef>\n");
+            xml.push_str("          </c:tx>\n");
+        }
+        xml.push_str("          <c:cat>\n");
+        xml.push_str("            <c:strLit>\n");
+        xml.push_str(&format!(
+            "              <c:ptCount val=\"{}\"/>\n",
+            ser.categories.len()
+        ));
+        for (j, cat) in ser.categories.iter().enumerate() {
+            xml.push_str(&format!(
+                "              <c:pt index=\"{j}\"><c:v>{cat}</c:v></c:pt>\n"
+            ));
+        }
+        xml.push_str("            </c:strLit>\n");
+        xml.push_str("          </c:cat>\n");
+        xml.push_str("          <c:val>\n");
+        xml.push_str("            <c:numLit>\n");
+        xml.push_str(&format!(
+            "              <c:ptCount val=\"{}\"/>\n",
+            ser.values.len()
+        ));
+        for (j, val) in ser.values.iter().enumerate() {
+            xml.push_str(&format!(
+                "              <c:pt index=\"{j}\"><c:v>{val}</c:v></c:pt>\n"
+            ));
+        }
+        xml.push_str("            </c:numLit>\n");
+        xml.push_str("          </c:val>\n");
+        xml.push_str("        </c:ser>\n");
+    }
+    xml.push_str(&format!("      </c:{ct}>\n"));
+    xml.push_str(
+        "    </c:plotArea>
+    <c:plotVisOnly val=\"1\"/>
+  </c:chart>
+</c:chartSpace>",
+    );
+    xml
 }

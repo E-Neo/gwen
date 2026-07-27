@@ -20,7 +20,10 @@ pub fn replace_text(xml_bytes: &[u8], shape_idx: usize, new_text: &str) -> AppRe
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic" {
+                if e.name().as_ref() == b"p:sp"
+                    || e.name().as_ref() == b"p:pic"
+                    || e.name().as_ref() == b"p:graphicFrame"
+                {
                     if shape_counter == shape_idx {
                         inside_target_shape = true;
                     }
@@ -95,7 +98,9 @@ pub fn remove_shape(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic";
+                let is_shape = e.name().as_ref() == b"p:sp"
+                    || e.name().as_ref() == b"p:pic"
+                    || e.name().as_ref() == b"p:graphicFrame";
                 if is_shape && shape_counter == shape_idx {
                     skip_depth = Some(1);
                     shape_counter += 1;
@@ -158,7 +163,9 @@ pub fn extract_shape_subtree(xml_bytes: &[u8], shape_idx: usize) -> AppResult<(V
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic";
+                let is_shape = e.name().as_ref() == b"p:sp"
+                    || e.name().as_ref() == b"p:pic"
+                    || e.name().as_ref() == b"p:graphicFrame";
                 if is_shape && shape_counter == shape_idx {
                     depth = Some(1);
                     found = true;
@@ -274,7 +281,9 @@ pub fn insert_shape_after(
                 writer
                     .write_event(Event::Start(e.clone()))
                     .map_err(AppError::Io)?;
-                let is_shape = e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic";
+                let is_shape = e.name().as_ref() == b"p:sp"
+                    || e.name().as_ref() == b"p:pic"
+                    || e.name().as_ref() == b"p:graphicFrame";
                 if is_shape {
                     if shape_counter == insert_idx {
                         writer
@@ -358,7 +367,9 @@ pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> 
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic";
+                let is_shape = e.name().as_ref() == b"p:sp"
+                    || e.name().as_ref() == b"p:pic"
+                    || e.name().as_ref() == b"p:graphicFrame";
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -401,7 +412,10 @@ pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> 
                     continue;
                 }
 
-                if inside_target && (e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic")
+                if inside_target
+                    && (e.name().as_ref() == b"p:sp"
+                        || e.name().as_ref() == b"p:pic"
+                        || e.name().as_ref() == b"p:graphicFrame")
                 {
                     inside_target = false;
                 }
@@ -496,7 +510,9 @@ pub fn replace_shape_attr(
             Ok(Event::Start(ref e)) => {
                 let ename = e.name();
                 let ename_bytes = ename.as_ref();
-                let is_shape = ename_bytes == b"p:sp" || ename_bytes == b"p:pic";
+                let is_shape = ename_bytes == b"p:sp"
+                    || ename_bytes == b"p:pic"
+                    || ename_bytes == b"p:graphicFrame";
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -538,7 +554,10 @@ pub fn replace_shape_attr(
                 }
             }
             Ok(Event::End(ref e)) => {
-                if inside_target && (e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic")
+                if inside_target
+                    && (e.name().as_ref() == b"p:sp"
+                        || e.name().as_ref() == b"p:pic"
+                        || e.name().as_ref() == b"p:graphicFrame")
                 {
                     inside_target = false;
                 }
@@ -735,6 +754,186 @@ pub fn replace_shape_property(
     replace_txbody(xml_bytes, shape_idx, new_txbody.as_bytes())
 }
 
+fn replace_table_tbl(xml_bytes: &[u8], shape_idx: usize, new_tbl: &[u8]) -> AppResult<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+    let mut writer = Writer::new(Vec::new());
+    let mut shape_counter = 0;
+    let mut inside_target = false;
+    let mut tbl_depth = 0usize;
+    let mut inside_tbl = false;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let en = e.name();
+                let enb = en.as_ref();
+                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
+                if is_shape {
+                    if shape_counter == shape_idx {
+                        inside_target = true;
+                    }
+                    shape_counter += 1;
+                }
+                if inside_target && enb == b"a:tbl" {
+                    inside_tbl = true;
+                    tbl_depth = 1;
+                    writer.get_mut().write_all(new_tbl).map_err(AppError::Io)?;
+                    continue;
+                }
+                if inside_tbl {
+                    tbl_depth += 1;
+                    continue;
+                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::End(ref e)) => {
+                let en = e.name();
+                let enb = en.as_ref();
+                if inside_tbl {
+                    tbl_depth = tbl_depth.saturating_sub(1);
+                    if tbl_depth == 0 {
+                        inside_tbl = false;
+                    }
+                    continue;
+                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(AppError::Io)?;
+                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
+                {
+                    inside_target = false;
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                if inside_tbl {
+                    continue;
+                }
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(e)),
+            Ok(e) => {
+                if !inside_tbl {
+                    writer.write_event(e).map_err(AppError::Io)?;
+                }
+            }
+        }
+    }
+    Ok(writer.into_inner())
+}
+
+pub fn replace_shape_table_cell(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    // remaining: table, rows, Index(I), cells, Index(J), text_frame (optional deeper)
+    let empty_map = HashMap::new();
+    let shapes = crate::model::slide::parse_slide_shapes(xml_bytes, &empty_map)?;
+
+    let shape = shapes
+        .get(shape_idx)
+        .ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+
+    let mut json = serde_json::to_value(shape)
+        .map_err(|e| AppError::InvalidValue(format!("Serialization error: {e}")))?;
+
+    let new_value: serde_json::Value = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid JSON value: {e}")))?;
+
+    {
+        let mut current = &mut json;
+        for seg in remaining {
+            current = match seg {
+                path::PathSegment::Field(name) => {
+                    if !current.get(name.as_str()).is_some()
+                        && let Some(map) = current.as_object_mut()
+                    {
+                        map.insert(name.clone(), serde_json::Value::Null);
+                    }
+                    current.get_mut(name.as_str()).ok_or_else(|| {
+                        AppError::PathParse(format!("Field '{name}' not found in JSON tree"))
+                    })?
+                }
+                path::PathSegment::Index(idx) => current.get_mut(*idx).ok_or_else(|| {
+                    AppError::PathParse(format!("Index {idx} out of bounds in JSON tree"))
+                })?,
+            };
+        }
+        *current = new_value;
+    }
+
+    let modified_shape: ShapeDto = serde_json::from_value(json)
+        .map_err(|e| AppError::InvalidValue(format!("Deserialization error: {e}")))?;
+
+    let new_tbl = match modified_shape.table {
+        Some(ref tbl) => crate::dto::xml::table_to_xml(tbl),
+        None => {
+            return Err(AppError::InvalidValue(
+                "Target shape has no table".to_string(),
+            ));
+        }
+    };
+
+    replace_table_tbl(xml_bytes, shape_idx, new_tbl.as_bytes())
+}
+
+pub fn replace_shape_chart(
+    chart_xml: &[u8],
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let chart = crate::model::chart::parse_chart_xml(chart_xml)?;
+    let mut json = serde_json::to_value(&chart)
+        .map_err(|e| AppError::InvalidValue(format!("Serialization error: {e}")))?;
+
+    let new_value: serde_json::Value = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid JSON value: {e}")))?;
+
+    // Strip the "chart" prefix; remaining starts at chart fields
+    let inner_remaining = if matches!(remaining.first(), Some(path::PathSegment::Field(n)) if n == "chart")
+    {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+
+    {
+        let mut current = &mut json;
+        for seg in inner_remaining {
+            current = match seg {
+                path::PathSegment::Field(name) => {
+                    if !current.get(name.as_str()).is_some()
+                        && let Some(map) = current.as_object_mut()
+                    {
+                        map.insert(name.clone(), serde_json::Value::Null);
+                    }
+                    current.get_mut(name.as_str()).ok_or_else(|| {
+                        AppError::PathParse(format!("Field '{name}' not found in JSON tree"))
+                    })?
+                }
+                path::PathSegment::Index(idx) => current.get_mut(*idx).ok_or_else(|| {
+                    AppError::PathParse(format!("Index {idx} out of bounds in JSON tree"))
+                })?,
+            };
+        }
+        *current = new_value;
+    }
+
+    let modified_chart: crate::dto::ChartDto = serde_json::from_value(json)
+        .map_err(|e| AppError::InvalidValue(format!("Deserialization error: {e}")))?;
+
+    let new_xml = crate::dto::xml::chart_part_to_xml(&modified_chart);
+    Ok(new_xml.into_bytes())
+}
+
 fn text_frame_roundtrip(
     xml_bytes: &[u8],
     shape_idx: usize,
@@ -758,12 +957,114 @@ fn text_frame_roundtrip(
 
     let new_txbody = match modified_shape.text_frame {
         Some(ref tf) => crate::dto::xml::txbody_to_xml(tf),
-        None => return Err(AppError::InvalidValue(
-            "Target shape has no text frame".to_string(),
-        )),
+        None => {
+            return Err(AppError::InvalidValue(
+                "Target shape has no text frame".to_string(),
+            ));
+        }
     };
 
     replace_txbody(xml_bytes, shape_idx, new_txbody.as_bytes())
+}
+
+fn table_roundtrip(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    modifier: impl FnOnce(&mut serde_json::Value, &[path::PathSegment]) -> AppResult<()>,
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    let empty_map = HashMap::new();
+    let shapes = crate::model::slide::parse_slide_shapes(xml_bytes, &empty_map)?;
+
+    let shape = shapes
+        .get(shape_idx)
+        .ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+
+    let mut json = serde_json::to_value(shape)
+        .map_err(|e| AppError::InvalidValue(format!("Serialization error: {e}")))?;
+
+    modifier(&mut json, remaining)?;
+
+    let modified_shape: ShapeDto = serde_json::from_value(json)
+        .map_err(|e| AppError::InvalidValue(format!("Deserialization error: {e}")))?;
+
+    let new_tbl = match modified_shape.table {
+        Some(ref tbl) => crate::dto::xml::table_to_xml(tbl),
+        None => {
+            return Err(AppError::InvalidValue(
+                "Target shape has no table".to_string(),
+            ));
+        }
+    };
+
+    replace_table_tbl(xml_bytes, shape_idx, new_tbl.as_bytes())
+}
+
+pub fn add_to_table(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value_json: &str,
+) -> AppResult<Vec<u8>> {
+    let new_val: serde_json::Value = serde_json::from_str(value_json)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid JSON: {e}")))?;
+
+    table_roundtrip(
+        xml_bytes,
+        shape_idx,
+        |json, _remaining| {
+            let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+            match remaining.last() {
+                Some(path::PathSegment::Index(idx)) => {
+                    let arr = parent
+                        .as_array_mut()
+                        .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
+                    let insert_at = (*idx + 1).min(arr.len());
+                    arr.insert(insert_at, new_val.clone());
+                }
+                Some(path::PathSegment::Field(name)) => {
+                    let arr = parent
+                        .get_mut(name.as_str())
+                        .and_then(|v| v.as_array_mut())
+                        .ok_or_else(|| {
+                            AppError::PathParse(format!("Expected array field '{name}'"))
+                        })?;
+                    arr.push(new_val.clone());
+                }
+                None => unreachable!(),
+            }
+            Ok(())
+        },
+        remaining,
+    )
+}
+
+pub fn remove_from_table(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    table_roundtrip(
+        xml_bytes,
+        shape_idx,
+        |json, _remaining| {
+            let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+            match remaining.last() {
+                Some(path::PathSegment::Index(idx)) => {
+                    let arr = parent
+                        .as_array_mut()
+                        .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
+                    if *idx >= arr.len() {
+                        return Err(AppError::PathParse(format!("Index {idx} out of bounds")));
+                    }
+                    arr.remove(*idx);
+                }
+                _ => return Err(AppError::PathParse("Expected index to remove".to_string())),
+            }
+            Ok(())
+        },
+        remaining,
+    )
 }
 
 pub fn add_to_text_frame(
@@ -775,32 +1076,40 @@ pub fn add_to_text_frame(
     let new_val: serde_json::Value = serde_json::from_str(value_json)
         .map_err(|e| AppError::InvalidValue(format!("Invalid JSON: {e}")))?;
 
-    text_frame_roundtrip(xml_bytes, shape_idx, |json, _remaining| {
-        // remaining examples:
-        //   ["text_frame", "paragraphs", Index(K)] -> insert para at K+1
-        //   ["text_frame", "paragraphs"] -> append para
-        //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> insert run at J+1
-        //   ["text_frame", "paragraphs", Index(K), "runs"] -> append run
-        let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+    text_frame_roundtrip(
+        xml_bytes,
+        shape_idx,
+        |json, _remaining| {
+            // remaining examples:
+            //   ["text_frame", "paragraphs", Index(K)] -> insert para at K+1
+            //   ["text_frame", "paragraphs"] -> append para
+            //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> insert run at J+1
+            //   ["text_frame", "paragraphs", Index(K), "runs"] -> append run
+            let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
 
-        match remaining.last() {
-            Some(path::PathSegment::Index(idx)) => {
-                let arr = parent.as_array_mut().ok_or_else(|| {
-                    AppError::PathParse("Expected array".to_string())
-                })?;
-                let insert_at = (*idx + 1).min(arr.len());
-                arr.insert(insert_at, new_val.clone());
+            match remaining.last() {
+                Some(path::PathSegment::Index(idx)) => {
+                    let arr = parent
+                        .as_array_mut()
+                        .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
+                    let insert_at = (*idx + 1).min(arr.len());
+                    arr.insert(insert_at, new_val.clone());
+                }
+                Some(path::PathSegment::Field(name)) => {
+                    let arr = parent
+                        .get_mut(name.as_str())
+                        .and_then(|v| v.as_array_mut())
+                        .ok_or_else(|| {
+                            AppError::PathParse(format!("Expected array field '{name}'"))
+                        })?;
+                    arr.push(new_val.clone());
+                }
+                None => unreachable!(),
             }
-            Some(path::PathSegment::Field(name)) => {
-                let arr = parent.get_mut(name.as_str()).and_then(|v| v.as_array_mut()).ok_or_else(|| {
-                    AppError::PathParse(format!("Expected array field '{name}'"))
-                })?;
-                arr.push(new_val.clone());
-            }
-            None => unreachable!(),
-        }
-        Ok(())
-    }, remaining)
+            Ok(())
+        },
+        remaining,
+    )
 }
 
 pub fn remove_from_text_frame(
@@ -808,25 +1117,30 @@ pub fn remove_from_text_frame(
     shape_idx: usize,
     remaining: &[path::PathSegment],
 ) -> AppResult<Vec<u8>> {
-    text_frame_roundtrip(xml_bytes, shape_idx, |json, _remaining| {
-        // remaining examples:
-        //   ["text_frame", "paragraphs", Index(K)] -> remove para K
-        //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> remove run J
-        let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
-        match remaining.last() {
-            Some(path::PathSegment::Index(idx)) => {
-                let arr = parent.as_array_mut().ok_or_else(|| {
-                    AppError::PathParse("Expected array".to_string())
-                })?;
-                if *idx >= arr.len() {
-                    return Err(AppError::PathParse(format!("Index {idx} out of bounds")));
+    text_frame_roundtrip(
+        xml_bytes,
+        shape_idx,
+        |json, _remaining| {
+            // remaining examples:
+            //   ["text_frame", "paragraphs", Index(K)] -> remove para K
+            //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> remove run J
+            let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+            match remaining.last() {
+                Some(path::PathSegment::Index(idx)) => {
+                    let arr = parent
+                        .as_array_mut()
+                        .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
+                    if *idx >= arr.len() {
+                        return Err(AppError::PathParse(format!("Index {idx} out of bounds")));
+                    }
+                    arr.remove(*idx);
                 }
-                arr.remove(*idx);
+                _ => return Err(AppError::PathParse("Expected index to remove".to_string())),
             }
-            _ => return Err(AppError::PathParse("Expected index to remove".to_string())),
-        }
-        Ok(())
-    }, remaining)
+            Ok(())
+        },
+        remaining,
+    )
 }
 
 fn serialize_start_event(ename: &[u8], e: &BytesStart, out: &mut Vec<u8>) {
@@ -860,13 +1174,27 @@ pub fn extract_txbody_element(
     shape_idx: usize,
     remaining: &[path::PathSegment],
 ) -> AppResult<Vec<u8>> {
-    let target_para = remaining.iter()
+    let target_para = remaining
+        .iter()
         .skip(2) // text_frame, paragraphs
-        .find_map(|s| if let path::PathSegment::Index(i) = s { Some(*i) } else { None });
+        .find_map(|s| {
+            if let path::PathSegment::Index(i) = s {
+                Some(*i)
+            } else {
+                None
+            }
+        });
 
-    let target_run = remaining.iter()
+    let target_run = remaining
+        .iter()
         .skip(4) // text_frame, paragraphs, para_idx, runs
-        .find_map(|s| if let path::PathSegment::Index(i) = s { Some(*i) } else { None });
+        .find_map(|s| {
+            if let path::PathSegment::Index(i) = s {
+                Some(*i)
+            } else {
+                None
+            }
+        });
 
     let extracting_run = target_run.is_some();
     let is_run_self_closing = remaining.len() == 5; // ...paragraphs[K].runs[J] and no deeper
@@ -889,12 +1217,16 @@ pub fn extract_txbody_element(
             Ok(Event::Start(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
-                let is_shape = enb == b"p:sp" || enb == b"p:pic";
+                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
                 if is_shape {
-                    if shape_counter == shape_idx { inside_target = true; }
+                    if shape_counter == shape_idx {
+                        inside_target = true;
+                    }
                     shape_counter += 1;
                 }
-                if inside_target && enb == b"p:txBody" { in_txbody = true; }
+                if inside_target && enb == b"p:txBody" {
+                    in_txbody = true;
+                }
                 if in_txbody && enb == b"a:p" {
                     if para_counter == target_para.unwrap_or(0) {
                         in_para = true;
@@ -918,19 +1250,28 @@ pub fn extract_txbody_element(
                     }
                     run_counter += 1;
                 }
-                if collecting && !(extracting_run && enb == b"a:r") && !(!extracting_run && enb == b"a:p") {
+                if collecting
+                    && !(extracting_run && enb == b"a:r")
+                    && !(!extracting_run && enb == b"a:p")
+                {
                     serialize_start_event(enb, e, &mut extracted);
                 }
-                if in_para { para_depth += 1; }
+                if in_para {
+                    para_depth += 1;
+                }
             }
             Ok(Event::End(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
                 if in_para {
                     para_depth = para_depth.saturating_sub(1);
-                    if para_depth == 0 { in_para = false; }
+                    if para_depth == 0 {
+                        in_para = false;
+                    }
                 }
-                if in_txbody && enb == b"p:txBody" { in_txbody = false; }
+                if in_txbody && enb == b"p:txBody" {
+                    in_txbody = false;
+                }
                 if collecting && (enb == b"a:p" || (extracting_run && enb == b"a:r")) {
                     extracted.extend_from_slice(b"</");
                     extracted.extend_from_slice(enb);
@@ -941,7 +1282,10 @@ pub fn extract_txbody_element(
                     extracted.extend_from_slice(enb);
                     extracted.extend_from_slice(b">");
                 }
-                if inside_target && (enb == b"p:sp" || enb == b"p:pic") { inside_target = false; }
+                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
+                {
+                    inside_target = false;
+                }
             }
             Ok(Event::Empty(ref e)) => {
                 let en = e.name();
@@ -956,7 +1300,9 @@ pub fn extract_txbody_element(
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if collecting { extracted.extend_from_slice(t); }
+                if collecting {
+                    extracted.extend_from_slice(t);
+                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(AppError::Xml(e)),
@@ -976,13 +1322,21 @@ pub fn insert_into_txbody(
     remaining: &[path::PathSegment],
     element_xml: &[u8],
 ) -> AppResult<Vec<u8>> {
-    let target_para = remaining.iter()
-        .skip(2)
-        .find_map(|s| if let path::PathSegment::Index(i) = s { Some(*i) } else { None });
+    let target_para = remaining.iter().skip(2).find_map(|s| {
+        if let path::PathSegment::Index(i) = s {
+            Some(*i)
+        } else {
+            None
+        }
+    });
 
-    let target_run = remaining.iter()
-        .skip(4)
-        .find_map(|s| if let path::PathSegment::Index(i) = s { Some(*i) } else { None });
+    let target_run = remaining.iter().skip(4).find_map(|s| {
+        if let path::PathSegment::Index(i) = s {
+            Some(*i)
+        } else {
+            None
+        }
+    });
 
     let is_run_target = target_run.is_some() || {
         let mut segs = remaining.iter();
@@ -1008,20 +1362,28 @@ pub fn insert_into_txbody(
             Ok(Event::Start(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
-                let is_shape = enb == b"p:sp" || enb == b"p:pic";
+                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
                 if is_shape {
-                    if shape_counter == shape_idx { inside_target = true; }
+                    if shape_counter == shape_idx {
+                        inside_target = true;
+                    }
                     shape_counter += 1;
                 }
-                if inside_target && enb == b"p:txBody" { inside_txbody = true; }
+                if inside_target && enb == b"p:txBody" {
+                    inside_txbody = true;
+                }
                 if inside_txbody && enb == b"a:p" {
                     para_counter += 1;
-                    if Some(para_counter - 1) == target_para || (target_para.is_none() && para_counter == 1) {
+                    if Some(para_counter - 1) == target_para
+                        || (target_para.is_none() && para_counter == 1)
+                    {
                         in_target_para = true;
                     }
                 }
 
-                writer.write_event(Event::Start(e.clone())).map_err(AppError::Io)?;
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(AppError::Io)?;
 
                 if inside_txbody && !inserted {
                     let should_insert = if is_run_target && in_target_para {
@@ -1040,7 +1402,10 @@ pub fn insert_into_txbody(
                         false
                     };
                     if should_insert {
-                        writer.get_mut().write_all(element_xml).map_err(AppError::Io)?;
+                        writer
+                            .get_mut()
+                            .write_all(element_xml)
+                            .map_err(AppError::Io)?;
                         inserted = true;
                     }
                 }
@@ -1053,24 +1418,37 @@ pub fn insert_into_txbody(
                 let en = e.name();
                 let enb = en.as_ref();
 
-                if inside_txbody && !inserted {
-                    if is_run_target && in_target_para && enb == b"a:p" {
-                        writer.get_mut().write_all(element_xml).map_err(AppError::Io)?;
-                        inserted = true;
-                    } else if !is_run_target && enb == b"p:txBody" {
-                        writer.get_mut().write_all(element_xml).map_err(AppError::Io)?;
-                        inserted = true;
-                    }
+                if inside_txbody
+                    && !inserted
+                    && ((is_run_target && in_target_para && enb == b"a:p")
+                        || (!is_run_target && enb == b"p:txBody"))
+                {
+                    writer
+                        .get_mut()
+                        .write_all(element_xml)
+                        .map_err(AppError::Io)?;
+                    inserted = true;
                 }
 
-                writer.write_event(Event::End(e.clone())).map_err(AppError::Io)?;
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(AppError::Io)?;
 
-                if inside_txbody && enb == b"a:p" { in_target_para = false; }
-                if inside_txbody && enb == b"p:txBody" { inside_txbody = false; }
-                if inside_target && (enb == b"p:sp" || enb == b"p:pic") { inside_target = false; }
+                if inside_txbody && enb == b"a:p" {
+                    in_target_para = false;
+                }
+                if inside_txbody && enb == b"p:txBody" {
+                    inside_txbody = false;
+                }
+                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
+                {
+                    inside_target = false;
+                }
             }
             Ok(Event::Empty(ref e)) => {
-                writer.write_event(Event::Empty(e.clone())).map_err(AppError::Io)?;
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(AppError::Io)?;
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(AppError::Xml(e)),

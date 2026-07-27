@@ -39,9 +39,14 @@ pub fn execute(input: &str, path_str: &str, output: &str) -> AppResult<()> {
     if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "text_frame")
     {
-        // Remove from text_frame: paragraph or run
         let shape_idx = resolved.shape_index()?;
         let new_data = editor::remove_from_text_frame(&part_data, shape_idx, remaining)?;
+        pkg.set_part(slide_uri, new_data);
+    } else if remaining.len() >= 2
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        let shape_idx = resolved.shape_index()?;
+        let new_data = editor::remove_from_table(&part_data, shape_idx, remaining)?;
         pkg.set_part(slide_uri, new_data);
     } else if remaining.is_empty() {
         let shape_idx = resolved.shape_index()?;

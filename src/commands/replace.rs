@@ -1,10 +1,37 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::engine::editor;
 use crate::error::{AppError, AppResult};
 use crate::model::presentation::Presentation;
+use crate::model::slide;
 use crate::opc::Package;
 use crate::path;
+
+/// Resolve the chart part URI from a shape's chart r:id.
+fn resolve_chart_part(pkg: &Package, slide_uri: &str, shape_idx: usize) -> AppResult<String> {
+    let empty_map: HashMap<String, String> = HashMap::new();
+    let slide_data = pkg
+        .get_part(slide_uri)
+        .ok_or_else(|| AppError::PartNotFound(slide_uri.to_string()))?;
+    let shapes = slide::parse_slide_shapes(slide_data, &empty_map)?;
+    let shape = shapes
+        .get(shape_idx)
+        .ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let r_id = shape
+        .chart
+        .as_ref()
+        .and_then(|c| c.r_id.as_ref())
+        .ok_or_else(|| AppError::PathParse("Shape has no chart relationship".to_string()))?;
+    let rels = pkg
+        .get_rels(slide_uri)
+        .ok_or_else(|| AppError::PartNotFound(format!("{slide_uri} rels")))?;
+    let rel = rels
+        .get(r_id)
+        .ok_or_else(|| AppError::PathParse(format!("Chart relationship {r_id} not found")))?;
+    let chart_uri = format!("ppt/{}", rel.target);
+    Ok(chart_uri)
+}
 
 pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
@@ -88,7 +115,6 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 .ok_or(AppError::PartNotFound(slide_uri.to_string()))?
                 .to_vec();
 
-            // Check if it's a simple attribute (left, top, width, height, rotation, name)
             let is_attr_target = remaining.len() == 1
                 && matches!(&remaining[0], path::PathSegment::Field(name)
                     if matches!(name.as_str(), "left" | "top" | "width" | "height" | "rotation" | "name"));
@@ -96,10 +122,29 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
             let is_text_target = remaining.len() == 1
                 && matches!(&remaining[0], path::PathSegment::Field(name) if name == "text");
 
+            let is_table_cell = remaining.len() >= 2
+                && matches!(&remaining[0], path::PathSegment::Field(name) if name == "table");
+
+            let is_chart_target = remaining.len() >= 2
+                && matches!(&remaining[0], path::PathSegment::Field(name) if name == "chart");
+
             let new_data = if is_text_target {
                 editor::replace_shape_text(&part_data, *shape_idx, "text", value)?
             } else if is_attr_target {
                 editor::replace_shape_attr(&part_data, *shape_idx, remaining, value)?
+            } else if is_table_cell {
+                editor::replace_shape_table_cell(&part_data, *shape_idx, remaining, value)?
+            } else if is_chart_target {
+                // Chart data lives in a separate OPC part; route through package
+                let chart_part_uri = resolve_chart_part(&pkg, slide_uri, *shape_idx)?;
+                let chart_data = pkg
+                    .get_part(&chart_part_uri)
+                    .ok_or_else(|| AppError::PartNotFound(chart_part_uri.clone()))?
+                    .to_vec();
+                let new_chart_data = editor::replace_shape_chart(&chart_data, remaining, value)?;
+                pkg.set_part(&chart_part_uri, new_chart_data);
+                // Return original slide data unchanged
+                part_data.clone()
             } else {
                 editor::replace_shape_property(&part_data, *shape_idx, remaining, value)?
             };
