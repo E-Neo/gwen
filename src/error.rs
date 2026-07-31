@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum AppError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -29,9 +28,6 @@ pub enum AppError {
 
     #[error("Invalid value: {0}")]
     InvalidValue(String),
-
-    #[error("Missing field: {0}")]
-    MissingField(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

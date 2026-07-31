@@ -29,8 +29,19 @@ fn resolve_chart_part(pkg: &Package, slide_uri: &str, shape_idx: usize) -> AppRe
     let rel = rels
         .get(r_id)
         .ok_or_else(|| AppError::PathParse(format!("Chart relationship {r_id} not found")))?;
-    let chart_uri = format!("ppt/{}", rel.target);
-    Ok(chart_uri)
+    let base_dir = slide_uri.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let rel_path = rel.target.trim_start_matches('/');
+    let mut parts: Vec<&str> = base_dir.split('/').collect();
+    for seg in rel_path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(seg),
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppResult<()> {
@@ -115,38 +126,53 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 .ok_or(AppError::PartNotFound(slide_uri.to_string()))?
                 .to_vec();
 
-            let is_attr_target = remaining.len() == 1
-                && matches!(&remaining[0], path::PathSegment::Field(name)
-                    if matches!(name.as_str(), "left" | "top" | "width" | "height" | "rotation" | "name"));
+            let first_seg = remaining.first().and_then(|s| {
+                if let path::PathSegment::Field(name) = s {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            });
 
-            let is_text_target = remaining.len() == 1
-                && matches!(&remaining[0], path::PathSegment::Field(name) if name == "text");
+            const SHAPE_ATTRS: [&str; 6] = ["left", "top", "width", "height", "rotation", "name"];
 
-            let is_table_cell = remaining.len() >= 2
-                && matches!(&remaining[0], path::PathSegment::Field(name) if name == "table");
-
-            let is_chart_target = remaining.len() >= 2
-                && matches!(&remaining[0], path::PathSegment::Field(name) if name == "chart");
-
-            let new_data = if is_text_target {
-                editor::replace_shape_text(&part_data, *shape_idx, "text", value)?
-            } else if is_attr_target {
-                editor::replace_shape_attr(&part_data, *shape_idx, remaining, value)?
-            } else if is_table_cell {
-                editor::replace_shape_table_cell(&part_data, *shape_idx, remaining, value)?
-            } else if is_chart_target {
-                // Chart data lives in a separate OPC part; route through package
-                let chart_part_uri = resolve_chart_part(&pkg, slide_uri, *shape_idx)?;
-                let chart_data = pkg
-                    .get_part(&chart_part_uri)
-                    .ok_or_else(|| AppError::PartNotFound(chart_part_uri.clone()))?
-                    .to_vec();
-                let new_chart_data = editor::replace_shape_chart(&chart_data, remaining, value)?;
-                pkg.set_part(&chart_part_uri, new_chart_data);
-                // Return original slide data unchanged
-                part_data.clone()
-            } else {
-                editor::replace_shape_property(&part_data, *shape_idx, remaining, value)?
+            let new_data = match (first_seg, remaining.len()) {
+                (Some("text"), 1) => {
+                    editor::replace_shape_text(&part_data, *shape_idx, "text", value)?
+                }
+                (Some(name), 1) if SHAPE_ATTRS.contains(&name) => {
+                    editor::replace_shape_attr(&part_data, *shape_idx, remaining, value)?
+                }
+                (Some("text_frame"), _) => {
+                    crate::engine::xml_edit::replace_shape_property_lossless(
+                        &part_data, *shape_idx, remaining, value,
+                    )?
+                }
+                (Some("table"), n) if n >= 2 => {
+                    crate::engine::xml_edit::replace_table_cell_property_lossless(
+                        &part_data, *shape_idx, remaining, value,
+                    )?
+                }
+                (Some("chart"), n) if n >= 2 => {
+                    // Chart data lives in a separate OPC part; route through package
+                    let chart_part_uri = resolve_chart_part(&pkg, slide_uri, *shape_idx)?;
+                    let chart_data = pkg
+                        .get_part(&chart_part_uri)
+                        .ok_or_else(|| AppError::PartNotFound(chart_part_uri.clone()))?
+                        .to_vec();
+                    let new_chart_data = crate::engine::xml_edit::replace_chart_property_lossless(
+                        &chart_data,
+                        remaining,
+                        value,
+                    )?;
+                    pkg.set_part(&chart_part_uri, new_chart_data);
+                    // Return original slide data unchanged
+                    part_data.clone()
+                }
+                _ => {
+                    // Fallback: lossy txBody round-trip for unknown paths
+                    editor::replace_shape_property(&part_data, *shape_idx, remaining, value)?
+                }
             };
             pkg.set_part(slide_uri, new_data);
         }

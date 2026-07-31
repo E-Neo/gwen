@@ -446,3 +446,411 @@ pub fn chart_part_to_xml(chart: &ChartDto) -> String {
     );
     xml
 }
+
+pub fn shape_to_xml(shape: &ShapeDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    match shape.shape_type {
+        ShapeType::TextBox
+        | ShapeType::AutoShape
+        | ShapeType::Line
+        | ShapeType::Freeform
+        | ShapeType::Placeholder => write_sp_elem(shape, &mut writer),
+        ShapeType::Picture => write_pic_elem(shape, &mut writer),
+        ShapeType::Group => write_grp_sp_elem(shape, &mut writer),
+        ShapeType::Table | ShapeType::Chart => write_graphic_frame_elem(shape, &mut writer),
+        _ => write_sp_elem(shape, &mut writer),
+    }
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+fn write_xfrm(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>, tag: &str) {
+    let rot_attr = shape.rotation.map(|r| (r * 60000.0).round() as i64);
+    let l = shape.left.unwrap_or(0);
+    let t = shape.top.unwrap_or(0);
+    let w = shape.width.unwrap_or(914400);
+    let h = shape.height.unwrap_or(274320);
+    let mut elem = BytesStart::new(tag);
+    if let Some(rv) = rot_attr {
+        elem.push_attribute(("rot", rv.to_string().as_str()));
+    }
+    writer.write_event(Event::Start(elem)).ok();
+    let mut off = BytesStart::new("a:off");
+    off.push_attribute(("x", l.to_string().as_str()));
+    off.push_attribute(("y", t.to_string().as_str()));
+    writer.write_event(Event::Empty(off)).ok();
+    let mut ext = BytesStart::new("a:ext");
+    ext.push_attribute(("cx", w.to_string().as_str()));
+    ext.push_attribute(("cy", h.to_string().as_str()));
+    writer.write_event(Event::Empty(ext)).ok();
+    writer.write_event(Event::End(BytesEnd::new(tag))).ok();
+}
+
+fn write_shape_fill_outline(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    if let Some(ref fill) = shape.fill {
+        match fill.fill_type {
+            Some(FillType::NoFill) => {
+                writer
+                    .write_event(Event::Empty(BytesStart::new("a:noFill")))
+                    .ok();
+            }
+            _ => {
+                writer
+                    .write_event(Event::Start(BytesStart::new("a:solidFill")))
+                    .ok();
+                if let Some(ref color) = fill.color {
+                    if let Some(ref rgb) = color.rgb {
+                        let mut clr = BytesStart::new("a:srgbClr");
+                        clr.push_attribute(("val", rgb.as_str()));
+                        writer.write_event(Event::Empty(clr)).ok();
+                    } else if let Some(ref tc) = color.theme_color {
+                        let mut clr = BytesStart::new("a:schemeClr");
+                        clr.push_attribute(("val", tc.as_str()));
+                        writer.write_event(Event::Empty(clr)).ok();
+                    }
+                }
+                writer
+                    .write_event(Event::End(BytesEnd::new("a:solidFill")))
+                    .ok();
+            }
+        }
+    }
+    if let Some(ref outline) = shape.outline {
+        let w_str = outline.width.map(|w| w.to_string());
+        let has_any = outline.width.is_some()
+            || outline.cap.is_some()
+            || outline.compound.is_some()
+            || outline.dash.is_some()
+            || outline.fill.is_some();
+        if has_any {
+            let mut ln = BytesStart::new("a:ln");
+            if let Some(ref ws) = w_str {
+                ln.push_attribute(("w", ws.as_str()));
+            }
+            if let Some(ref cap) = outline.cap {
+                ln.push_attribute((
+                    "cap",
+                    match cap {
+                        LineCap::Rnd => "rnd",
+                        LineCap::Sq => "sq",
+                        LineCap::Flat => "flat",
+                    },
+                ));
+            }
+            if let Some(ref cmp) = outline.compound {
+                ln.push_attribute((
+                    "cmpd",
+                    match cmp {
+                        CompoundLine::Sng => "sng",
+                        CompoundLine::Dbl => "dbl",
+                        CompoundLine::ThickThin => "thickThin",
+                        CompoundLine::ThinThick => "thinThick",
+                        CompoundLine::Tri => "tri",
+                    },
+                ));
+            }
+            writer.write_event(Event::Start(ln)).ok();
+            if let Some(ref dash) = outline.dash {
+                let mut pd = BytesStart::new("a:prstDash");
+                pd.push_attribute((
+                    "val",
+                    match dash {
+                        LineDash::Solid => "solid",
+                        LineDash::Dot => "dot",
+                        LineDash::Dash => "dash",
+                        LineDash::LgDash => "lgDash",
+                        LineDash::DashDot => "dashDot",
+                        LineDash::LgDashDot => "lgDashDot",
+                        LineDash::LgDashDotDot => "lgDashDotDot",
+                        LineDash::SysDash => "sysDash",
+                        LineDash::SysDot => "sysDot",
+                        LineDash::SysDashDot => "sysDashDot",
+                        LineDash::SysDashDotDot => "sysDashDotDot",
+                    },
+                ));
+                writer.write_event(Event::Empty(pd)).ok();
+            }
+            if let Some(ref fill) = outline.fill {
+                match fill.fill_type {
+                    Some(FillType::NoFill) => {
+                        writer
+                            .write_event(Event::Empty(BytesStart::new("a:noFill")))
+                            .ok();
+                    }
+                    _ => {
+                        writer
+                            .write_event(Event::Start(BytesStart::new("a:solidFill")))
+                            .ok();
+                        if let Some(ref color) = fill.color {
+                            if let Some(ref rgb) = color.rgb {
+                                let mut clr = BytesStart::new("a:srgbClr");
+                                clr.push_attribute(("val", rgb.as_str()));
+                                writer.write_event(Event::Empty(clr)).ok();
+                            } else if let Some(ref tc) = color.theme_color {
+                                let mut clr = BytesStart::new("a:schemeClr");
+                                clr.push_attribute(("val", tc.as_str()));
+                                writer.write_event(Event::Empty(clr)).ok();
+                            }
+                        }
+                        writer
+                            .write_event(Event::End(BytesEnd::new("a:solidFill")))
+                            .ok();
+                    }
+                }
+            }
+            writer.write_event(Event::End(BytesEnd::new("a:ln"))).ok();
+        }
+    }
+}
+
+fn write_sp_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    writer
+        .write_event(Event::Start(BytesStart::new("p:sp")))
+        .ok();
+    let name = shape.name.as_deref().unwrap_or("");
+    writer
+        .write_event(Event::Start(BytesStart::new("p:nvSpPr")))
+        .ok();
+    let mut cid = BytesStart::new("p:cNvPr");
+    cid.push_attribute(("id", shape.shape_id.to_string().as_str()));
+    cid.push_attribute(("name", name));
+    writer.write_event(Event::Empty(cid)).ok();
+    let mut sp = BytesStart::new("p:cNvSpPr");
+    if matches!(shape.shape_type, ShapeType::TextBox) {
+        sp.push_attribute(("txBox", "1"));
+    }
+    writer.write_event(Event::Empty(sp)).ok();
+    if shape.is_placeholder {
+        writer
+            .write_event(Event::Start(BytesStart::new("p:nvPr")))
+            .ok();
+        if let Some(ref ph) = shape.placeholder_format {
+            let mut pe = BytesStart::new("p:ph");
+            pe.push_attribute(("idx", ph.idx.to_string().as_str()));
+            if let Some(ref pt) = ph.ph_type {
+                let s = match pt {
+                    PlaceholderType::Title => "title",
+                    PlaceholderType::Body => "body",
+                    PlaceholderType::CenterTitle => "ctrTitle",
+                    PlaceholderType::SubTitle => "subTitle",
+                    PlaceholderType::Object => "obj",
+                    _ => "obj",
+                };
+                pe.push_attribute(("type", s));
+            }
+            writer.write_event(Event::Empty(pe)).ok();
+        }
+        writer.write_event(Event::End(BytesEnd::new("p:nvPr"))).ok();
+    } else {
+        writer
+            .write_event(Event::Empty(BytesStart::new("p:nvPr")))
+            .ok();
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new("p:nvSpPr")))
+        .ok();
+
+    writer
+        .write_event(Event::Start(BytesStart::new("p:spPr")))
+        .ok();
+    write_xfrm(shape, writer, "a:xfrm");
+    let prst = shape.auto_shape_type.as_deref().unwrap_or("rect");
+    let mut pg = BytesStart::new("a:prstGeom");
+    pg.push_attribute(("prst", prst));
+    writer.write_event(Event::Empty(pg)).ok();
+    write_shape_fill_outline(shape, writer);
+    writer.write_event(Event::End(BytesEnd::new("p:spPr"))).ok();
+
+    if let Some(ref tf) = shape.text_frame {
+        writer.get_mut().write_all(b"<p:txBody>").ok();
+        writer
+            .get_mut()
+            .write_all(txbody_to_xml(tf).as_bytes())
+            .ok();
+        writer.get_mut().write_all(b"</p:txBody>").ok();
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("p:sp"))).ok();
+}
+
+fn write_pic_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    writer
+        .write_event(Event::Start(BytesStart::new("p:pic")))
+        .ok();
+    let name = shape.name.as_deref().unwrap_or("");
+    writer
+        .write_event(Event::Start(BytesStart::new("p:nvPicPr")))
+        .ok();
+    let mut cid = BytesStart::new("p:cNvPr");
+    cid.push_attribute(("id", shape.shape_id.to_string().as_str()));
+    cid.push_attribute(("name", name));
+    writer.write_event(Event::Empty(cid)).ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:cNvPicPr")))
+        .ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:nvPr")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:nvPicPr")))
+        .ok();
+
+    writer
+        .write_event(Event::Start(BytesStart::new("p:blipFill")))
+        .ok();
+    let img = shape.image.as_deref().unwrap_or("rId1");
+    let mut blip = BytesStart::new("a:blip");
+    blip.push_attribute(("r:embed", img));
+    writer.write_event(Event::Empty(blip)).ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("a:stretch")))
+        .ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("a:fillRect")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("a:stretch")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:blipFill")))
+        .ok();
+
+    writer
+        .write_event(Event::Start(BytesStart::new("p:spPr")))
+        .ok();
+    write_xfrm(shape, writer, "a:xfrm");
+    let mut pg = BytesStart::new("a:prstGeom");
+    pg.push_attribute(("prst", "rect"));
+    writer.write_event(Event::Empty(pg)).ok();
+    write_shape_fill_outline(shape, writer);
+    writer.write_event(Event::End(BytesEnd::new("p:spPr"))).ok();
+
+    writer.write_event(Event::End(BytesEnd::new("p:pic"))).ok();
+}
+
+fn write_graphic_frame_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    writer
+        .write_event(Event::Start(BytesStart::new("p:graphicFrame")))
+        .ok();
+    let name = shape.name.as_deref().unwrap_or("");
+    writer
+        .write_event(Event::Start(BytesStart::new("p:nvGraphicFramePr")))
+        .ok();
+    let mut cid = BytesStart::new("p:cNvPr");
+    cid.push_attribute(("id", shape.shape_id.to_string().as_str()));
+    cid.push_attribute(("name", name));
+    writer.write_event(Event::Empty(cid)).ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:cNvGraphicFramePr")))
+        .ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:nvPr")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:nvGraphicFramePr")))
+        .ok();
+
+    write_xfrm(shape, writer, "p:xfrm");
+
+    writer
+        .write_event(Event::Start(BytesStart::new("a:graphic")))
+        .ok();
+    let uri = if matches!(shape.shape_type, ShapeType::Table) {
+        "http://schemas.openxmlformats.org/drawingml/2006/table"
+    } else {
+        "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    };
+    let mut gd = BytesStart::new("a:graphicData");
+    gd.push_attribute(("uri", uri));
+    writer.write_event(Event::Start(gd)).ok();
+
+    if matches!(shape.shape_type, ShapeType::Table) {
+        if let Some(ref tbl) = shape.table {
+            writer
+                .get_mut()
+                .write_all(table_to_xml(tbl).as_bytes())
+                .ok();
+        }
+    } else if let Some(ref ch) = shape.chart {
+        let rid = ch.r_id.as_deref().unwrap_or("rId1");
+        let mut ce = BytesStart::new("c:chart");
+        ce.push_attribute(("r:id", rid));
+        writer.write_event(Event::Empty(ce)).ok();
+    }
+
+    writer
+        .write_event(Event::End(BytesEnd::new("a:graphicData")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("a:graphic")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:graphicFrame")))
+        .ok();
+}
+
+fn write_grp_sp_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    writer
+        .write_event(Event::Start(BytesStart::new("p:grpSp")))
+        .ok();
+    let name = shape.name.as_deref().unwrap_or("");
+    writer
+        .write_event(Event::Start(BytesStart::new("p:nvGrpSpPr")))
+        .ok();
+    let mut cid = BytesStart::new("p:cNvPr");
+    cid.push_attribute(("id", shape.shape_id.to_string().as_str()));
+    cid.push_attribute(("name", name));
+    writer.write_event(Event::Empty(cid)).ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:cNvGrpSpPr")))
+        .ok();
+    writer
+        .write_event(Event::Empty(BytesStart::new("p:nvPr")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:nvGrpSpPr")))
+        .ok();
+
+    writer
+        .write_event(Event::Start(BytesStart::new("p:grpSpPr")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("a:xfrm")))
+        .ok();
+    writer
+        .write_event(Event::Empty(
+            BytesStart::new("a:off").with_attributes(vec![("x", "0"), ("y", "0")]),
+        ))
+        .ok();
+    writer
+        .write_event(Event::Empty(
+            BytesStart::new("a:ext").with_attributes(vec![("cx", "0"), ("cy", "0")]),
+        ))
+        .ok();
+    writer
+        .write_event(Event::Empty(
+            BytesStart::new("a:chOff").with_attributes(vec![("x", "0"), ("y", "0")]),
+        ))
+        .ok();
+    writer
+        .write_event(Event::Empty(
+            BytesStart::new("a:chExt").with_attributes(vec![("cx", "0"), ("cy", "0")]),
+        ))
+        .ok();
+    writer.write_event(Event::End(BytesEnd::new("a:xfrm"))).ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("p:grpSpPr")))
+        .ok();
+
+    if let Some(ref children) = shape.shapes {
+        for child in children {
+            writer
+                .get_mut()
+                .write_all(shape_to_xml(child).as_bytes())
+                .ok();
+        }
+    }
+
+    writer
+        .write_event(Event::End(BytesEnd::new("p:grpSp")))
+        .ok();
+}

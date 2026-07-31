@@ -77,6 +77,75 @@ pub struct ColorFormatDto {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillType {
+    Solid,
+    Gradient,
+    Pattern,
+    Picture,
+    NoFill,
+    Group,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FillDto {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub fill_type: Option<FillType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorFormatDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineCap {
+    Rnd,
+    Sq,
+    Flat,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompoundLine {
+    Sng,
+    Dbl,
+    ThickThin,
+    ThinThick,
+    Tri,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineDash {
+    Solid,
+    Dot,
+    Dash,
+    LgDash,
+    DashDot,
+    LgDashDot,
+    LgDashDotDot,
+    SysDash,
+    SysDot,
+    SysDashDot,
+    SysDashDotDot,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutlineDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<LineCap>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound: Option<CompoundLine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dash: Option<LineDash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<FillDto>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FontDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -253,6 +322,11 @@ pub struct ShapeDto {
     pub has_text_frame: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<FillDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline: Option<OutlineDto>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder_format: Option<PlaceholderFormatDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_shape_type: Option<String>,
@@ -271,7 +345,6 @@ pub struct ShapeDto {
     pub shapes: Option<Vec<ShapeDto>>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SlideDto {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,13 +354,14 @@ pub struct SlideDto {
     pub shapes: Vec<ShapeDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeTypeInput {
     Textbox,
     Picture,
     Table,
     Chart,
+    AutoShape,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -301,8 +375,19 @@ pub struct AddShape {
     pub text: Option<String>,
     pub image: Option<String>,
     pub shape_id: Option<u32>,
+    pub auto_shape_type: Option<String>,
+    /// For picture shapes: set by add.rs after storing the image; used as r:embed
+    pub image_r_id: Option<String>,
+    /// For chart shapes: inline chart data for creating a new chart part
+    pub chart: Option<ChartDto>,
+    /// For chart shapes: set by add.rs after creating the chart part; used as r:id in c:chart
+    pub chart_r_id: Option<String>,
     /// For chart shapes: relationship ID to an existing chart part
     pub r_id: Option<String>,
     /// For table shapes: table definition (grid, rows, cells)
     pub table: Option<TableDto>,
+    /// Fill for auto/text shapes
+    pub fill: Option<FillDto>,
+    /// Outline for shapes
+    pub outline: Option<OutlineDto>,
 }

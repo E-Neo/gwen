@@ -122,6 +122,19 @@ pub fn parse_slide_shapes(
     let mut body_pr_margin_t: Option<i64> = None;
     let mut body_pr_margin_b: Option<i64> = None;
 
+    let mut in_sp_pr = false;
+    let mut in_shape_fill = false;
+    let mut in_shape_ln = false;
+    let mut in_ln_fill = false;
+    let mut shape_fill_type: Option<FillType> = None;
+    let mut shape_fill_color: Option<ColorFormatDto> = None;
+    let mut ln_width: Option<i64> = None;
+    let mut ln_cap: Option<LineCap> = None;
+    let mut ln_compound: Option<CompoundLine> = None;
+    let mut ln_dash: Option<LineDash> = None;
+    let mut ln_fill_type: Option<FillType> = None;
+    let mut ln_fill_color: Option<ColorFormatDto> = None;
+
     let mut run = fresh_run();
     let mut para = fresh_para();
     let mut paragraphs: Vec<ParagraphDto> = Vec::new();
@@ -171,6 +184,8 @@ pub fn parse_slide_shapes(
                             rotation: None,
                             is_placeholder: false,
                             has_text_frame: false,
+                            fill: None,
+                            outline: None,
                             placeholder_format: None,
                             auto_shape_type: None,
                             text_frame: None,
@@ -259,6 +274,70 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"p:spPr" => {
+                        in_sp_pr = true;
+                    }
+                    b"a:noFill" if in_sp_pr && !in_shape_ln => {
+                        shape_fill_type = Some(FillType::NoFill);
+                    }
+                    b"a:solidFill" if in_sp_pr && !in_shape_ln => {
+                        in_shape_fill = true;
+                    }
+                    b"a:solidFill" if in_shape_ln => {
+                        in_ln_fill = true;
+                    }
+                    b"a:noFill" if in_shape_ln => {
+                        ln_fill_type = Some(FillType::NoFill);
+                    }
+                    b"a:ln" if in_sp_pr => {
+                        in_shape_ln = true;
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"w" => {
+                                    ln_width = String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                b"cap" => {
+                                    ln_cap = match String::from_utf8_lossy(&a.value).as_ref() {
+                                        "rnd" => Some(LineCap::Rnd),
+                                        "sq" => Some(LineCap::Sq),
+                                        "flat" => Some(LineCap::Flat),
+                                        _ => None,
+                                    };
+                                }
+                                b"cmpd" => {
+                                    ln_compound = match String::from_utf8_lossy(&a.value).as_ref() {
+                                        "sng" => Some(CompoundLine::Sng),
+                                        "dbl" => Some(CompoundLine::Dbl),
+                                        "thickThin" => Some(CompoundLine::ThickThin),
+                                        "thinThick" => Some(CompoundLine::ThinThick),
+                                        "tri" => Some(CompoundLine::Tri),
+                                        _ => None,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"a:prstDash" if in_shape_ln => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_dash = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    "solid" => Some(LineDash::Solid),
+                                    "dot" => Some(LineDash::Dot),
+                                    "dash" => Some(LineDash::Dash),
+                                    "lgDash" => Some(LineDash::LgDash),
+                                    "dashDot" => Some(LineDash::DashDot),
+                                    "lgDashDot" => Some(LineDash::LgDashDot),
+                                    "lgDashDotDot" => Some(LineDash::LgDashDotDot),
+                                    "sysDash" => Some(LineDash::SysDash),
+                                    "sysDot" => Some(LineDash::SysDot),
+                                    "sysDashDot" => Some(LineDash::SysDashDot),
+                                    "sysDashDotDot" => Some(LineDash::SysDashDotDot),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
                     b"a:xfrm" | b"p:xfrm" => {
                         in_xfrm = true;
                         if let Some(ref mut shape) = current_shape {
@@ -312,6 +391,58 @@ pub fn parse_slide_shapes(
                                     let r_id = String::from_utf8_lossy(&a.value).to_string();
                                     shape.image = image_map.get(&r_id).cloned();
                                 }
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_shape_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                shape_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_shape_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                shape_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_ln_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_ln_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                    brightness: None,
+                                });
                             }
                         }
                     }
@@ -759,6 +890,119 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:noFill" if in_sp_pr && !in_shape_ln => {
+                        shape_fill_type = Some(FillType::NoFill);
+                    }
+                    b"a:solidFill" if in_sp_pr && !in_shape_ln => {
+                        in_shape_fill = true;
+                    }
+                    b"a:solidFill" if in_shape_ln => {
+                        in_ln_fill = true;
+                    }
+                    b"a:noFill" if in_shape_ln => {
+                        ln_fill_type = Some(FillType::NoFill);
+                    }
+                    b"a:ln" if in_sp_pr => {
+                        in_shape_ln = true;
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"w" => {
+                                    ln_width = String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                b"cap" => {
+                                    ln_cap = match String::from_utf8_lossy(&a.value).as_ref() {
+                                        "rnd" => Some(LineCap::Rnd),
+                                        "sq" => Some(LineCap::Sq),
+                                        "flat" => Some(LineCap::Flat),
+                                        _ => None,
+                                    };
+                                }
+                                b"cmpd" => {
+                                    ln_compound = match String::from_utf8_lossy(&a.value).as_ref() {
+                                        "sng" => Some(CompoundLine::Sng),
+                                        "dbl" => Some(CompoundLine::Dbl),
+                                        "thickThin" => Some(CompoundLine::ThickThin),
+                                        "thinThick" => Some(CompoundLine::ThinThick),
+                                        "tri" => Some(CompoundLine::Tri),
+                                        _ => None,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"a:prstDash" if in_shape_ln => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_dash = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    "solid" => Some(LineDash::Solid),
+                                    "dot" => Some(LineDash::Dot),
+                                    "dash" => Some(LineDash::Dash),
+                                    "lgDash" => Some(LineDash::LgDash),
+                                    "dashDot" => Some(LineDash::DashDot),
+                                    "lgDashDot" => Some(LineDash::LgDashDot),
+                                    "lgDashDotDot" => Some(LineDash::LgDashDotDot),
+                                    "sysDash" => Some(LineDash::SysDash),
+                                    "sysDot" => Some(LineDash::SysDot),
+                                    "sysDashDot" => Some(LineDash::SysDashDot),
+                                    "sysDashDotDot" => Some(LineDash::SysDashDotDot),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_shape_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                shape_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_shape_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                shape_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_ln_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_ln_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                ln_fill_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                    brightness: None,
+                                });
+                            }
+                        }
+                    }
                     b"p:cNvSpPr" => {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"txBox" && a.value.as_ref() == b"1" {
@@ -1014,6 +1258,18 @@ pub fn parse_slide_shapes(
                         table_grid.clear();
                         current_cells.clear();
                         table_rows.clear();
+                        in_sp_pr = false;
+                        in_shape_fill = false;
+                        in_shape_ln = false;
+                        in_ln_fill = false;
+                        shape_fill_type = None;
+                        shape_fill_color = None;
+                        ln_width = None;
+                        ln_cap = None;
+                        ln_compound = None;
+                        ln_dash = None;
+                        ln_fill_type = None;
+                        ln_fill_color = None;
                     }
                     b"a:xfrm" | b"p:xfrm" => {
                         in_xfrm = false;
@@ -1039,6 +1295,67 @@ pub fn parse_slide_shapes(
                         run = fresh_run();
                         text_buf.clear();
                         in_run = false;
+                    }
+                    b"p:spPr" => {
+                        if let Some(ref mut shape) = current_shape {
+                            if let Some(ft) = shape_fill_type.take() {
+                                shape.fill = Some(FillDto {
+                                    fill_type: Some(ft),
+                                    color: shape_fill_color.take(),
+                                    alpha: None,
+                                });
+                            } else if let Some(color) = shape_fill_color.take() {
+                                shape.fill = Some(FillDto {
+                                    fill_type: Some(FillType::Solid),
+                                    color: Some(color),
+                                    alpha: None,
+                                });
+                            }
+                            let ln_fill = ln_fill_type
+                                .take()
+                                .or_else(|| ln_fill_color.as_ref().map(|_| FillType::Solid));
+                            let has_ln = ln_width.is_some()
+                                || ln_cap.is_some()
+                                || ln_compound.is_some()
+                                || ln_dash.is_some()
+                                || ln_fill_color.is_some()
+                                || ln_fill_type.is_some();
+                            if has_ln {
+                                shape.outline = Some(OutlineDto {
+                                    width: ln_width.take(),
+                                    cap: ln_cap.take(),
+                                    compound: ln_compound.take(),
+                                    dash: ln_dash.take(),
+                                    fill: ln_fill.map(|ft| FillDto {
+                                        fill_type: Some(ft),
+                                        color: ln_fill_color.take(),
+                                        alpha: None,
+                                    }),
+                                });
+                            }
+                        }
+                        in_sp_pr = false;
+                        in_shape_ln = false;
+                        in_shape_fill = false;
+                        in_ln_fill = false;
+                        shape_fill_type = None;
+                        shape_fill_color = None;
+                        ln_width = None;
+                        ln_cap = None;
+                        ln_compound = None;
+                        ln_dash = None;
+                        ln_fill_type = None;
+                        ln_fill_color = None;
+                    }
+                    b"a:ln" if in_shape_ln => {
+                        in_shape_ln = false;
+                        in_ln_fill = false;
+                    }
+                    b"a:solidFill" if in_shape_fill => {
+                        in_shape_fill = false;
+                    }
+                    b"a:solidFill" if in_ln_fill => {
+                        in_ln_fill = false;
                     }
                     b"a:rPr" if in_run_props => {
                         if let Some(font) = run_font.take()

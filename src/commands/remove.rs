@@ -22,6 +22,28 @@ pub fn execute(input: &str, path_str: &str, output: &str) -> AppResult<()> {
 
     let segments = path::parse_path(path_str)?;
     let resolved = path::resolve_path(&segments)?;
+    let remaining = resolved.remaining_segments();
+
+    // Slide-level removal: p.slides[N]
+    if remaining.is_empty()
+        && let path::ResolvedPath::Slide {
+            slide_idx: Some(idx),
+            ..
+        } = &resolved
+    {
+        let slide_uri = pres
+            .slide_uris
+            .get(*idx)
+            .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
+        let (new_pres_xml, removed_r_id) = editor::remove_slide_from_presentation(pres_part, *idx)?;
+        pkg.set_part("ppt/presentation.xml", new_pres_xml);
+        pkg.remove_relationship("ppt/presentation.xml", &removed_r_id);
+        pkg.remove_part(slide_uri);
+        pkg.remove_all_relationships(slide_uri);
+        pkg.remove_content_type_override(&format!("/{}", slide_uri))?;
+        pkg.save(Path::new(output))?;
+        return Ok(());
+    }
 
     let slide_idx = resolved.slide_index()?;
     let slide_uri = pres
@@ -33,8 +55,6 @@ pub fn execute(input: &str, path_str: &str, output: &str) -> AppResult<()> {
         .get_part(slide_uri)
         .ok_or(AppError::PartNotFound(slide_uri.to_string()))?
         .to_vec();
-
-    let remaining = resolved.remaining_segments();
 
     if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "text_frame")

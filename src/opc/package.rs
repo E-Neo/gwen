@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
+use std::path::PathBuf;
 
 use quick_xml::Reader;
 use quick_xml::Writer;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesDecl, Event};
 use zip::CompressionMethod;
 use zip::read::ZipArchive;
 use zip::write::FileOptions;
@@ -57,12 +58,6 @@ impl Package {
         self.relationships.get(uri)
     }
 
-    #[allow(dead_code)]
-    pub fn get_rels_mut(&mut self, uri: &str) -> Option<&mut HashMap<String, Relationship>> {
-        self.relationships.get_mut(uri)
-    }
-
-    #[allow(dead_code)]
     pub fn add_relationship(&mut self, source_uri: &str, rel: Relationship) -> String {
         let rels = self
             .relationships
@@ -78,6 +73,76 @@ impl Package {
         rel.id = new_id.clone();
         rels.insert(new_id.clone(), rel);
         new_id
+    }
+
+    pub fn remove_part(&mut self, uri: &str) {
+        self.parts.remove(uri);
+    }
+
+    pub fn remove_relationship(&mut self, source_uri: &str, r_id: &str) {
+        if let Some(rels) = self.relationships.get_mut(source_uri) {
+            rels.remove(r_id);
+        }
+    }
+
+    pub fn remove_all_relationships(&mut self, source_uri: &str) {
+        self.relationships.remove(source_uri);
+    }
+
+    pub fn remove_content_type_override(&mut self, part_name: &str) -> AppResult<()> {
+        let raw = self
+            .get_part("[Content_Types].xml")
+            .ok_or_else(|| AppError::PartNotFound("[Content_Types].xml".to_string()))?
+            .to_vec();
+
+        let mut reader = Reader::from_reader(&raw[..]);
+        reader.config_mut().trim_text(true);
+        let mut writer = Writer::new(Vec::new());
+        let mut inside_types = false;
+        let mut buf = Vec::new();
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    if e.name().as_ref() == b"Types" {
+                        inside_types = true;
+                    }
+                    writer
+                        .write_event(Event::Start(e.clone()))
+                        .map_err(AppError::Io)?;
+                }
+                Ok(Event::Empty(ref e)) => {
+                    if inside_types && e.name().as_ref() == b"Override" {
+                        let skip = e.attributes().flatten().any(|a| {
+                            a.key.as_ref() == b"PartName"
+                                && a.value.as_ref() == part_name.as_bytes()
+                        });
+                        if skip {
+                            continue;
+                        }
+                    }
+                    writer
+                        .write_event(Event::Empty(e.clone()))
+                        .map_err(AppError::Io)?;
+                }
+                Ok(Event::End(ref e)) => {
+                    if e.name().as_ref() == b"Types" {
+                        inside_types = false;
+                    }
+                    writer
+                        .write_event(Event::End(e.clone()))
+                        .map_err(AppError::Io)?;
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(AppError::Xml(e)),
+                Ok(e) => {
+                    writer.write_event(e).map_err(AppError::Io)?;
+                }
+            }
+        }
+
+        self.set_part("[Content_Types].xml", writer.into_inner());
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> AppResult<()> {
@@ -106,6 +171,140 @@ impl Package {
         }
 
         zip.finish()?;
+        Ok(())
+    }
+
+    pub fn get_next_slide_num(&self) -> u32 {
+        let mut max_num = 0u32;
+        for key in self.parts.keys() {
+            if let Some(rest) = key.strip_prefix("ppt/slides/slide")
+                && let Some(num_str) = rest.strip_suffix(".xml")
+                && let Ok(n) = num_str.parse::<u32>()
+                && n > max_num
+            {
+                max_num = n;
+            }
+        }
+        max_num + 1
+    }
+
+    pub fn get_next_chart_num(&self) -> u32 {
+        let mut max_num = 0u32;
+        for key in self.parts.keys() {
+            if let Some(rest) = key.strip_prefix("ppt/charts/chart")
+                && let Some(num_str) = rest.strip_suffix(".xml")
+                && let Ok(n) = num_str.parse::<u32>()
+                && n > max_num
+            {
+                max_num = n;
+            }
+        }
+        max_num + 1
+    }
+
+    pub fn get_next_media_num(&self) -> u32 {
+        let mut max_num = 0u32;
+        for key in self.parts.keys() {
+            if let Some(rest) = key.strip_prefix("ppt/media/image") {
+                let num_str = rest.trim_end_matches(|c: char| !c.is_ascii_digit());
+                if let Ok(n) = num_str.parse::<u32>()
+                    && n > max_num
+                {
+                    max_num = n;
+                }
+            }
+        }
+        max_num + 1
+    }
+
+    pub fn add_image_file(&mut self, file_path: &str) -> AppResult<String> {
+        let path = PathBuf::from(file_path);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+        let content_type = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            "tif" | "tiff" => "image/tiff",
+            "webp" => "image/webp",
+            _ => {
+                return Err(AppError::InvalidValue(format!(
+                    "unsupported image extension: .{ext}"
+                )));
+            }
+        };
+
+        let data = std::fs::read(file_path).map_err(|e| {
+            AppError::InvalidValue(format!("cannot read image file '{file_path}': {e}"))
+        })?;
+
+        let num = self.get_next_media_num();
+        let media_uri = format!("ppt/media/image{}.{}", num, ext);
+        self.set_part(&media_uri, data);
+        self.add_content_type_override(&format!("/{}", media_uri), content_type)?;
+        Ok(media_uri)
+    }
+
+    pub fn add_content_type_override(
+        &mut self,
+        part_name: &str,
+        content_type: &str,
+    ) -> AppResult<()> {
+        let raw = self
+            .get_part("[Content_Types].xml")
+            .ok_or_else(|| AppError::PartNotFound("[Content_Types].xml".to_string()))?
+            .to_vec();
+
+        let mut reader = Reader::from_reader(&raw[..]);
+        reader.config_mut().trim_text(true);
+        let mut writer = Writer::new(Vec::new());
+        let mut inserted = false;
+        let mut buf = Vec::new();
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::End(ref e)) if e.name().as_ref() == b"Types" && !inserted => {
+                    let mut override_elem = quick_xml::events::BytesStart::new("Override");
+                    override_elem.push_attribute(("PartName", part_name));
+                    override_elem.push_attribute(("ContentType", content_type));
+                    writer
+                        .write_event(Event::Empty(override_elem))
+                        .map_err(AppError::Io)?;
+                    inserted = true;
+                    writer
+                        .write_event(Event::End(e.clone()))
+                        .map_err(AppError::Io)?;
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(AppError::Xml(e)),
+                Ok(e) => {
+                    writer.write_event(e).map_err(AppError::Io)?;
+                }
+            }
+        }
+
+        if !inserted {
+            let mut bytes = raw;
+            let insert = format!(
+                "  <Override PartName=\"{}\" ContentType=\"{}\"/>\n",
+                part_name, content_type
+            );
+            let close_tag = "</Types>";
+            if let Some(pos) = bytes
+                .windows(close_tag.len())
+                .position(|w| w == close_tag.as_bytes())
+            {
+                bytes.splice(pos..pos, insert.into_bytes());
+            }
+            self.set_part("[Content_Types].xml", bytes);
+        } else {
+            self.set_part("[Content_Types].xml", writer.into_inner());
+        }
         Ok(())
     }
 }
@@ -196,6 +395,13 @@ fn parse_rels_xml(data: &[u8]) -> AppResult<HashMap<String, Relationship>> {
 
 fn serialize_rels_xml(rels: &HashMap<String, Relationship>) -> AppResult<Vec<u8>> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer
+        .write_event(Event::Decl(BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            Some("yes"),
+        )))
+        .map_err(AppError::Io)?;
     writer
         .write_event(Event::Start(
             quick_xml::events::BytesStart::new("Relationships").with_attributes(vec![(

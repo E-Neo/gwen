@@ -2,7 +2,7 @@ use quick_xml::Writer;
 use std::io::Cursor;
 use std::io::Write;
 
-use crate::dto::{AddShape, ShapeTypeInput};
+use crate::dto::{AddShape, FillType, ShapeTypeInput, SlideDto};
 use crate::error::AppResult;
 
 pub fn generate_shape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
@@ -11,6 +11,7 @@ pub fn generate_shape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
         ShapeTypeInput::Picture => generate_picture_xml(shape, new_id),
         ShapeTypeInput::Table => generate_table_xml(shape, new_id),
         ShapeTypeInput::Chart => generate_chart_xml(shape, new_id),
+        ShapeTypeInput::AutoShape => generate_autoshape_xml(shape, new_id),
     }
 }
 
@@ -130,7 +131,11 @@ fn generate_chart_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     let width = shape.width.unwrap_or(6096000);
     let height = shape.height.unwrap_or(3048000);
     let name = format!("Chart {}", new_id);
-    let r_id = shape.r_id.as_deref().unwrap_or("rId1");
+    let r_id = shape
+        .chart_r_id
+        .as_deref()
+        .or(shape.r_id.as_deref())
+        .unwrap_or("rId1");
 
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     write_open_tag(&mut writer, "p:graphicFrame", &[]);
@@ -208,7 +213,8 @@ fn generate_textbox_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     );
     write_close_tag(&mut writer, "a:xfrm");
     write_empty_tag(&mut writer, "a:prstGeom", &[("prst", "rect")]);
-    write_empty_tag(&mut writer, "a:noFill", &[]);
+    write_fill_xml(shape, &mut writer)?;
+    write_outline_xml(shape, &mut writer)?;
     write_close_tag(&mut writer, "p:spPr");
 
     write_open_tag(&mut writer, "p:txBody", &[]);
@@ -228,13 +234,185 @@ fn generate_textbox_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     Ok(inner)
 }
 
+fn generate_autoshape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
+    let left = shape.left.unwrap_or(0);
+    let top = shape.top.unwrap_or(0);
+    let width = shape.width.unwrap_or(914400);
+    let height = shape.height.unwrap_or(274320);
+    let text = shape.text.as_deref().unwrap_or("");
+    let name = format!("AutoShape {}", new_id);
+    let prst = shape.auto_shape_type.as_deref().unwrap_or("rect");
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    write_open_tag(&mut writer, "p:sp", &[]);
+
+    write_open_tag(&mut writer, "p:nvSpPr", &[]);
+    write_empty_tag(
+        &mut writer,
+        "p:cNvPr",
+        &[("id", &new_id.to_string()), ("name", &name)],
+    );
+    write_empty_tag(&mut writer, "p:cNvSpPr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvSpPr");
+
+    write_open_tag(&mut writer, "p:spPr", &[]);
+    write_open_tag(&mut writer, "a:xfrm", &[]);
+    write_empty_tag(
+        &mut writer,
+        "a:off",
+        &[("x", &left.to_string()), ("y", &top.to_string())],
+    );
+    write_empty_tag(
+        &mut writer,
+        "a:ext",
+        &[("cx", &width.to_string()), ("cy", &height.to_string())],
+    );
+    write_close_tag(&mut writer, "a:xfrm");
+    write_empty_tag(&mut writer, "a:prstGeom", &[("prst", prst)]);
+    write_fill_xml(shape, &mut writer)?;
+    write_outline_xml(shape, &mut writer)?;
+    write_close_tag(&mut writer, "p:spPr");
+
+    if !text.is_empty() {
+        write_open_tag(&mut writer, "p:txBody", &[]);
+        write_empty_tag(&mut writer, "a:bodyPr", &[]);
+        write_empty_tag(&mut writer, "a:lstStyle", &[]);
+        write_open_tag(&mut writer, "a:p", &[]);
+        write_open_tag(&mut writer, "a:r", &[]);
+        write_empty_tag(&mut writer, "a:rPr", &[("lang", "en-US"), ("sz", "1200")]);
+        write_text_tag(&mut writer, "a:t", text);
+        write_close_tag(&mut writer, "a:r");
+        write_close_tag(&mut writer, "a:p");
+        write_close_tag(&mut writer, "p:txBody");
+    }
+
+    write_close_tag(&mut writer, "p:sp");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
+}
+
+fn write_fill_xml(shape: &AddShape, writer: &mut Writer<Cursor<Vec<u8>>>) -> AppResult<()> {
+    if let Some(ref fill) = shape.fill {
+        match fill.fill_type {
+            Some(FillType::NoFill) => {
+                write_empty_tag(writer, "a:noFill", &[]);
+            }
+            _ => {
+                write_open_tag(writer, "a:solidFill", &[]);
+                if let Some(ref color) = fill.color {
+                    if let Some(ref rgb) = color.rgb {
+                        write_empty_tag(writer, "a:srgbClr", &[("val", rgb)]);
+                    } else if let Some(ref tc) = color.theme_color {
+                        write_empty_tag(writer, "a:schemeClr", &[("val", tc)]);
+                    } else {
+                        write_empty_tag(writer, "a:srgbClr", &[("val", "4472C4")]);
+                    }
+                } else {
+                    write_empty_tag(writer, "a:srgbClr", &[("val", "4472C4")]);
+                }
+                write_close_tag(writer, "a:solidFill");
+            }
+        }
+    } else {
+        write_open_tag(writer, "a:solidFill", &[]);
+        write_empty_tag(writer, "a:srgbClr", &[("val", "4472C4")]);
+        write_close_tag(writer, "a:solidFill");
+    }
+    Ok(())
+}
+
+fn write_outline_xml(shape: &AddShape, writer: &mut Writer<Cursor<Vec<u8>>>) -> AppResult<()> {
+    if let Some(ref outline) = shape.outline {
+        let w_str = outline.width.map(|w| w.to_string());
+        let has_any = outline.width.is_some()
+            || outline.cap.is_some()
+            || outline.compound.is_some()
+            || outline.dash.is_some()
+            || outline.fill.is_some();
+        if !has_any {
+            return Ok(());
+        }
+        let mut attr_pairs: Vec<(&str, &str)> = Vec::new();
+        if let Some(ref ws) = w_str {
+            attr_pairs.push(("w", ws.as_str()));
+        }
+        if let Some(ref cap) = outline.cap {
+            attr_pairs.push((
+                "cap",
+                match cap {
+                    crate::dto::LineCap::Rnd => "rnd",
+                    crate::dto::LineCap::Sq => "sq",
+                    crate::dto::LineCap::Flat => "flat",
+                },
+            ));
+        }
+        if let Some(ref cmp) = outline.compound {
+            attr_pairs.push((
+                "cmpd",
+                match cmp {
+                    crate::dto::CompoundLine::Sng => "sng",
+                    crate::dto::CompoundLine::Dbl => "dbl",
+                    crate::dto::CompoundLine::ThickThin => "thickThin",
+                    crate::dto::CompoundLine::ThinThick => "thinThick",
+                    crate::dto::CompoundLine::Tri => "tri",
+                },
+            ));
+        }
+        write_open_tag(writer, "a:ln", &attr_pairs);
+        if let Some(ref dash) = outline.dash {
+            write_empty_tag(
+                writer,
+                "a:prstDash",
+                &[(
+                    "val",
+                    match dash {
+                        crate::dto::LineDash::Solid => "solid",
+                        crate::dto::LineDash::Dot => "dot",
+                        crate::dto::LineDash::Dash => "dash",
+                        crate::dto::LineDash::LgDash => "lgDash",
+                        crate::dto::LineDash::DashDot => "dashDot",
+                        crate::dto::LineDash::LgDashDot => "lgDashDot",
+                        crate::dto::LineDash::LgDashDotDot => "lgDashDotDot",
+                        crate::dto::LineDash::SysDash => "sysDash",
+                        crate::dto::LineDash::SysDot => "sysDot",
+                        crate::dto::LineDash::SysDashDot => "sysDashDot",
+                        crate::dto::LineDash::SysDashDotDot => "sysDashDotDot",
+                    },
+                )],
+            );
+        }
+        if let Some(ref fill) = outline.fill {
+            match fill.fill_type {
+                Some(FillType::NoFill) => {
+                    write_empty_tag(writer, "a:noFill", &[]);
+                }
+                _ => {
+                    write_open_tag(writer, "a:solidFill", &[]);
+                    if let Some(ref color) = fill.color {
+                        if let Some(ref rgb) = color.rgb {
+                            write_empty_tag(writer, "a:srgbClr", &[("val", rgb)]);
+                        } else if let Some(ref tc) = color.theme_color {
+                            write_empty_tag(writer, "a:schemeClr", &[("val", tc)]);
+                        }
+                    }
+                    write_close_tag(writer, "a:solidFill");
+                }
+            }
+        }
+        write_close_tag(writer, "a:ln");
+    }
+    Ok(())
+}
+
 fn generate_picture_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     let left = shape.left.unwrap_or(0);
     let top = shape.top.unwrap_or(0);
     let width = shape.width.unwrap_or(1000000);
     let height = shape.height.unwrap_or(800000);
     let name = format!("Picture {}", new_id);
-    let r_id = "rId1";
+    let r_id = shape.image_r_id.as_deref().unwrap_or("rId1");
 
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     write_open_tag(&mut writer, "p:pic", &[]);
@@ -341,4 +519,76 @@ fn write_text_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, text: &str) 
         .write_event(Event::Text(BytesText::new(text)))
         .unwrap();
     writer.write_event(Event::End(BytesEnd::new(name))).unwrap();
+}
+
+pub fn generate_slide_xml(
+    slide: &SlideDto,
+    layout_r_id: &str,
+    _slide_num: u32,
+) -> AppResult<Vec<u8>> {
+    use quick_xml::events::BytesStart;
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    let mut sld = BytesStart::new("p:sld");
+    sld.push_attribute((
+        "xmlns:a",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+    ));
+    sld.push_attribute((
+        "xmlns:r",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    ));
+    sld.push_attribute((
+        "xmlns:p",
+        "http://schemas.openxmlformats.org/presentationml/2006/main",
+    ));
+    write_open_tag_full(&mut writer, &sld);
+
+    write_open_tag(&mut writer, "p:cSld", &[]);
+    write_open_tag(&mut writer, "p:spTree", &[]);
+
+    write_open_tag(&mut writer, "p:nvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:cNvPr", &[("id", "1"), ("name", "")]);
+    write_empty_tag(&mut writer, "p:cNvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvGrpSpPr");
+
+    write_open_tag(&mut writer, "p:grpSpPr", &[]);
+    write_open_tag(&mut writer, "a:xfrm", &[]);
+    write_empty_tag(&mut writer, "a:off", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:ext", &[("cx", "0"), ("cy", "0")]);
+    write_empty_tag(&mut writer, "a:chOff", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:chExt", &[("cx", "0"), ("cy", "0")]);
+    write_close_tag(&mut writer, "a:xfrm");
+    write_close_tag(&mut writer, "p:grpSpPr");
+
+    for shape in &slide.shapes {
+        let xml = crate::dto::xml::shape_to_xml(shape);
+        writer
+            .get_mut()
+            .write_all(xml.as_bytes())
+            .map_err(crate::error::AppError::Io)?;
+    }
+
+    write_close_tag(&mut writer, "p:spTree");
+    write_close_tag(&mut writer, "p:cSld");
+
+    let layout_id = 2147483648u32;
+    write_open_tag(&mut writer, "p:sldLayoutIdLst", &[]);
+    write_empty_tag(
+        &mut writer,
+        "p:sldLayoutId",
+        &[("id", &layout_id.to_string()), ("r:id", layout_r_id)],
+    );
+    write_close_tag(&mut writer, "p:sldLayoutIdLst");
+
+    write_close_tag(&mut writer, "p:sld");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
+}
+
+fn write_open_tag_full(writer: &mut Writer<Cursor<Vec<u8>>>, elem: &quick_xml::events::BytesStart) {
+    use quick_xml::events::Event;
+    writer.write_event(Event::Start(elem.clone())).unwrap();
 }
