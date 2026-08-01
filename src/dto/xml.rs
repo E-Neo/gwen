@@ -816,25 +816,48 @@ fn write_grp_sp_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
     writer
         .write_event(Event::Start(BytesStart::new("a:xfrm")))
         .ok();
+    let (off_x, off_y) = (
+        shape.left.unwrap_or(0).to_string(),
+        shape.top.unwrap_or(0).to_string(),
+    );
     writer
         .write_event(Event::Empty(
-            BytesStart::new("a:off").with_attributes(vec![("x", "0"), ("y", "0")]),
+            BytesStart::new("a:off")
+                .with_attributes(vec![("x", off_x.as_str()), ("y", off_y.as_str())]),
         ))
         .ok();
+    let (ext_cx, ext_cy) = (
+        shape.width.unwrap_or(0).to_string(),
+        shape.height.unwrap_or(0).to_string(),
+    );
     writer
-        .write_event(Event::Empty(
-            BytesStart::new("a:ext").with_attributes(vec![("cx", "0"), ("cy", "0")]),
-        ))
+        .write_event(Event::Empty(BytesStart::new("a:ext").with_attributes(
+            vec![("cx", ext_cx.as_str()), ("cy", ext_cy.as_str())],
+        )))
         .ok();
+    let (ch_off_x, ch_off_y) = (
+        shape.ch_off_x.unwrap_or(0).to_string(),
+        shape.ch_off_y.unwrap_or(0).to_string(),
+    );
     writer
-        .write_event(Event::Empty(
-            BytesStart::new("a:chOff").with_attributes(vec![("x", "0"), ("y", "0")]),
-        ))
+        .write_event(Event::Empty(BytesStart::new("a:chOff").with_attributes(
+            vec![("x", ch_off_x.as_str()), ("y", ch_off_y.as_str())],
+        )))
         .ok();
+    let (ch_ext_cx, ch_ext_cy) = (
+        shape
+            .ch_ext_cx
+            .unwrap_or_else(|| shape.width.unwrap_or(0))
+            .to_string(),
+        shape
+            .ch_ext_cy
+            .unwrap_or_else(|| shape.height.unwrap_or(0))
+            .to_string(),
+    );
     writer
-        .write_event(Event::Empty(
-            BytesStart::new("a:chExt").with_attributes(vec![("cx", "0"), ("cy", "0")]),
-        ))
+        .write_event(Event::Empty(BytesStart::new("a:chExt").with_attributes(
+            vec![("cx", ch_ext_cx.as_str()), ("cy", ch_ext_cy.as_str())],
+        )))
         .ok();
     writer.write_event(Event::End(BytesEnd::new("a:xfrm"))).ok();
     writer

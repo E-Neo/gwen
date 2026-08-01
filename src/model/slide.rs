@@ -37,6 +37,34 @@ fn fresh_font() -> FontDto {
     }
 }
 
+fn fresh_shape(shape_type: ShapeType) -> ShapeDto {
+    ShapeDto {
+        shape_id: 0,
+        name: None,
+        shape_type,
+        left: None,
+        top: None,
+        width: None,
+        height: None,
+        rotation: None,
+        ch_off_x: None,
+        ch_off_y: None,
+        ch_ext_cx: None,
+        ch_ext_cy: None,
+        is_placeholder: false,
+        has_text_frame: false,
+        fill: None,
+        outline: None,
+        placeholder_format: None,
+        auto_shape_type: None,
+        text_frame: None,
+        image: None,
+        table: None,
+        chart: None,
+        shapes: None,
+    }
+}
+
 fn parse_placeholder_type(raw: &str) -> Option<PlaceholderType> {
     match raw {
         "title" => Some(PlaceholderType::Title),
@@ -85,7 +113,19 @@ fn parse_anchor(raw: &str) -> Option<VerticalAnchor> {
     }
 }
 
-pub fn parse_slide_shapes(
+/// Resolve the shape that property handlers should mutate: the innermost open
+/// shape (`current_shape`) if one is being parsed, otherwise the innermost open
+/// group (so a group's own `nvGrpSpPr`/`grpSpPr` properties land on the group).
+fn shape_target<'a>(
+    current_shape: &'a mut Option<ShapeDto>,
+    group_stack: &'a mut [ShapeDto],
+) -> Option<&'a mut ShapeDto> {
+    if current_shape.is_some() {
+        current_shape.as_mut()
+    } else {
+        group_stack.last_mut()
+    }
+}pub fn parse_slide_shapes(
     data: &[u8],
     image_map: &HashMap<String, String>,
 ) -> AppResult<Vec<ShapeDto>> {
@@ -95,6 +135,7 @@ pub fn parse_slide_shapes(
     let mut buf = Vec::new();
 
     let mut current_shape: Option<ShapeDto> = None;
+    let mut group_stack: Vec<ShapeDto> = Vec::new();
     let mut in_text_frame = false;
     let mut in_paragraph = false;
     let mut in_run = false;
@@ -161,11 +202,30 @@ pub fn parse_slide_shapes(
                 let ename = e.name();
                 let tag = ename.as_ref();
                 match tag {
-                    b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame" => {
+                    b"p:grpSp" => {
+                        group_stack.push(fresh_shape(ShapeType::Group));
+                        is_textbox = false;
+                        in_text_frame = false;
+                        in_paragraph = false;
+                        in_run = false;
+                        text_buf.clear();
+                        run = fresh_run();
+                        para = fresh_para();
+                        paragraphs = Vec::new();
+                        in_xfrm = false;
+                        in_table = false;
+                        in_tr = false;
+                        in_tc = false;
+                        in_cell_text = false;
+                        in_graphic_data = false;
+                        table_grid.clear();
+                        current_cells.clear();
+                        table_rows.clear();
+                    }
+                    b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:graphicFrame" => {
                         let mut st = match tag {
                             b"p:pic" => ShapeType::Picture,
                             b"p:cxnSp" => ShapeType::Line,
-                            b"p:grpSp" => ShapeType::Group,
                             b"p:graphicFrame" => ShapeType::Chart,
                             _ => ShapeType::AutoShape,
                         };
@@ -173,27 +233,7 @@ pub fn parse_slide_shapes(
                         if is_gf {
                             st = ShapeType::AutoShape; // will be corrected by a:graphicData handler
                         }
-                        current_shape = Some(ShapeDto {
-                            shape_id: 0,
-                            name: None,
-                            shape_type: st,
-                            left: None,
-                            top: None,
-                            width: None,
-                            height: None,
-                            rotation: None,
-                            is_placeholder: false,
-                            has_text_frame: false,
-                            fill: None,
-                            outline: None,
-                            placeholder_format: None,
-                            auto_shape_type: None,
-                            text_frame: None,
-                            image: None,
-                            table: None,
-                            chart: None,
-                            shapes: None,
-                        });
+                        current_shape = Some(fresh_shape(st));
                         is_textbox = false;
                         in_text_frame = false;
                         in_paragraph = false;
@@ -241,7 +281,9 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"p:cNvPr" => {
-                        if let Some(ref mut shape) = current_shape {
+                        if let Some(ref mut shape) =
+                            shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"id" => {
@@ -340,7 +382,9 @@ pub fn parse_slide_shapes(
                     }
                     b"a:xfrm" | b"p:xfrm" => {
                         in_xfrm = true;
-                        if let Some(ref mut shape) = current_shape {
+                        if let Some(ref mut shape) =
+                            shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 if a.key.as_ref() == b"rot" {
                                     let raw = String::from_utf8_lossy(&a.value);
@@ -352,7 +396,10 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"a:off" => {
-                        if in_xfrm && let Some(ref mut shape) = current_shape {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"x" => {
@@ -367,7 +414,10 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"a:ext" => {
-                        if in_xfrm && let Some(ref mut shape) = current_shape {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"cx" => {
@@ -375,6 +425,46 @@ pub fn parse_slide_shapes(
                                     }
                                     b"cy" => {
                                         shape.height =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    b"a:chOff" => {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"x" => {
+                                        shape.ch_off_x =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    b"y" => {
+                                        shape.ch_off_y =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    b"a:chExt" => {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"cx" => {
+                                        shape.ch_ext_cx =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    b"cy" => {
+                                        shape.ch_ext_cy =
                                             String::from_utf8_lossy(&a.value).parse().ok()
                                     }
                                     _ => {}
@@ -750,7 +840,9 @@ pub fn parse_slide_shapes(
                 let tag = ename.as_ref();
                 match tag {
                     b"p:cNvPr" => {
-                        if let Some(ref mut shape) = current_shape {
+                        if let Some(ref mut shape) =
+                            shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"id" => {
@@ -826,7 +918,9 @@ pub fn parse_slide_shapes(
                     }
                     b"a:xfrm" | b"p:xfrm" => {
                         in_xfrm = true;
-                        if let Some(ref mut shape) = current_shape {
+                        if let Some(ref mut shape) =
+                            shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 if a.key.as_ref() == b"rot" {
                                     let raw = String::from_utf8_lossy(&a.value);
@@ -838,7 +932,10 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"a:off" => {
-                        if in_xfrm && let Some(ref mut shape) = current_shape {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"x" => {
@@ -853,7 +950,10 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"a:ext" => {
-                        if in_xfrm && let Some(ref mut shape) = current_shape {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
                             for a in e.attributes().flatten() {
                                 match a.key.as_ref() {
                                     b"cx" => {
@@ -861,6 +961,46 @@ pub fn parse_slide_shapes(
                                     }
                                     b"cy" => {
                                         shape.height =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    b"a:chOff" => {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"x" => {
+                                        shape.ch_off_x =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    b"y" => {
+                                        shape.ch_off_y =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    b"a:chExt" => {
+                        if in_xfrm
+                            && let Some(ref mut shape) =
+                                shape_target(&mut current_shape, &mut group_stack)
+                        {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"cx" => {
+                                        shape.ch_ext_cx =
+                                            String::from_utf8_lossy(&a.value).parse().ok()
+                                    }
+                                    b"cy" => {
+                                        shape.ch_ext_cy =
                                             String::from_utf8_lossy(&a.value).parse().ok()
                                     }
                                     _ => {}
@@ -1214,7 +1354,16 @@ pub fn parse_slide_shapes(
                 let tag = ename.as_ref();
                 match tag {
                     b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame" => {
-                        if let Some(mut shape) = current_shape.take() {
+                        if tag == b"p:grpSp" {
+                            if let Some(group) = group_stack.pop() {
+                                if let Some(parent) = group_stack.last_mut() {
+                                    let children = parent.shapes.get_or_insert_with(Vec::new);
+                                    children.push(group);
+                                } else {
+                                    shapes.push(group);
+                                }
+                            }
+                        } else if let Some(mut shape) = current_shape.take() {
                             if !paragraphs.is_empty() {
                                 shape.text_frame = Some(TextFrameDto {
                                     paragraphs,
@@ -1236,7 +1385,11 @@ pub fn parse_slide_shapes(
                                 body_pr_margin_b = None;
                             }
                             paragraphs = Vec::new();
-                            shapes.push(shape);
+                            if let Some(parent) = group_stack.last_mut() {
+                                parent.shapes.get_or_insert_with(Vec::new).push(shape);
+                            } else {
+                                shapes.push(shape);
+                            }
                         }
                         in_text_frame = false;
                         in_paragraph = false;
@@ -1483,4 +1636,116 @@ pub fn parse_slide_shapes(
     }
 
     Ok(shapes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_map() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn group_children_are_nested() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+            <p:grpSp>
+              <p:nvGrpSpPr><p:cNvPr id="2" name="My Group"/><p:cNvGrpSpPr><a:grpSpLocks noGrp="1"/></p:cNvGrpSpPr><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="500" cy="300"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="600"/></a:xfrm></p:grpSpPr>
+              <p:sp><p:nvSpPr><p:cNvPr id="3" name="Inner 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="50"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>hi</a:t></a:r></a:p></p:txBody></p:sp>
+              <p:sp><p:nvSpPr><p:cNvPr id="4" name="Inner 2"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="200" y="20"/><a:ext cx="100" cy="50"/></a:xfrm></p:spPr></p:sp>
+            </p:grpSp>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        assert_eq!(shapes.len(), 1);
+        let group = &shapes[0];
+        assert_eq!(group.shape_type, ShapeType::Group);
+        assert_eq!(group.name.as_deref(), Some("My Group"));
+        assert_eq!(group.left, Some(100));
+        assert_eq!(group.top, Some(200));
+        assert_eq!(group.width, Some(500));
+        assert_eq!(group.height, Some(300));
+        assert_eq!(group.ch_off_x, Some(0));
+        assert_eq!(group.ch_ext_cx, Some(1000));
+        assert_eq!(group.ch_ext_cy, Some(600));
+        let children = group.shapes.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].name.as_deref(), Some("Inner 1"));
+        assert_eq!(children[0].left, Some(10));
+        assert_eq!(children[0].shape_type, ShapeType::AutoShape);
+        let text = children[0].text_frame.as_ref().unwrap();
+        assert_eq!(text.paragraphs[0].runs[0].text, "hi");
+        assert_eq!(children[1].name.as_deref(), Some("Inner 2"));
+        assert_eq!(children[1].left, Some(200));
+    }
+
+    #[test]
+    fn nested_groups_are_preserved() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+            <p:grpSp>
+              <p:nvGrpSpPr><p:cNvPr id="2" name="Outer"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/><a:chOff x="0" y="0"/><a:chExt cx="100" cy="100"/></a:xfrm></p:grpSpPr>
+              <p:grpSp>
+                <p:nvGrpSpPr><p:cNvPr id="3" name="Inner"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+                <p:grpSpPr><a:xfrm><a:off x="5" y="5"/><a:ext cx="50" cy="50"/><a:chOff x="0" y="0"/><a:chExt cx="50" cy="50"/></a:xfrm></p:grpSpPr>
+                <p:sp><p:nvSpPr><p:cNvPr id="4" name="Leaf"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:sp>
+              </p:grpSp>
+            </p:grpSp>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        assert_eq!(shapes.len(), 1);
+        let outer = &shapes[0];
+        assert_eq!(outer.shape_type, ShapeType::Group);
+        assert_eq!(outer.name.as_deref(), Some("Outer"));
+        let inner = &outer.shapes.as_ref().unwrap()[0];
+        assert_eq!(inner.shape_type, ShapeType::Group);
+        assert_eq!(inner.name.as_deref(), Some("Inner"));
+        assert_eq!(inner.left, Some(5));
+        let leaf = &inner.shapes.as_ref().unwrap()[0];
+        assert_eq!(leaf.name.as_deref(), Some("Leaf"));
+    }
+
+    #[test]
+    fn sibling_group_flat_shapes_order_is_preserved() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+            <p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:sp>
+            <p:grpSp>
+              <p:nvGrpSpPr><p:cNvPr id="3" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/><a:chOff x="0" y="0"/><a:chExt cx="10" cy="10"/></a:xfrm></p:grpSpPr>
+              <p:sp><p:nvSpPr><p:cNvPr id="4" name="B"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:sp>
+            </p:grpSp>
+            <p:sp><p:nvSpPr><p:cNvPr id="5" name="C"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:sp>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        assert_eq!(shapes.len(), 3);
+        assert_eq!(shapes[0].name.as_deref(), Some("A"));
+        assert_eq!(shapes[1].shape_type, ShapeType::Group);
+        assert_eq!(shapes[1].name.as_deref(), Some("G"));
+        assert_eq!(
+            shapes[1].shapes.as_ref().unwrap()[0].name.as_deref(),
+            Some("B")
+        );
+        assert_eq!(shapes[2].name.as_deref(), Some("C"));
+    }
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod xml;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ShapeType {
     AutoShape,
@@ -317,6 +317,16 @@ pub struct ShapeDto {
     pub height: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<f64>,
+
+    // Group child coordinate system (a:chOff / a:chExt), for group shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ch_off_x: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ch_off_y: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ch_ext_cx: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ch_ext_cy: Option<i64>,
 
     pub is_placeholder: bool,
     pub has_text_frame: bool,
