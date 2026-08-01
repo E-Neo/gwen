@@ -441,3 +441,50 @@ fn table_row_and_column_add_remove_roundtrip() {
     assert_eq!(tbl["grid"].as_array().unwrap().len(), 2);
     assert_eq!(tbl["rows"][0]["cells"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn add_picture_and_crop_roundtrip() {
+    let dir = tmp();
+    let png = dir.join("px.png");
+    let png_bytes = include_bytes!("fixtures/px.png");
+    std::fs::write(&png, png_bytes).unwrap();
+
+    let out = dir.join("pic.pptx");
+    let add_value = serde_json::json!({
+        "type": "picture",
+        "left": 100,
+        "top": 200,
+        "width": 300,
+        "height": 400,
+        "image": png.to_string_lossy().to_string(),
+    })
+    .to_string();
+    run_ok(&[
+        "add",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes",
+        "--value",
+        &add_value,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+
+    run_ok(&[
+        "replace",
+        out.to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[1].crop.left",
+        "--value",
+        "0.25",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+
+    let crop = query(&out, "slides[0].shapes[1].crop");
+    assert_eq!(crop["left"], 0.25, "crop.left written");
+    let img = query(&out, "slides[0].shapes[1].image");
+    assert_eq!(img, "image1.png");
+    let shape_type = query(&out, "slides[0].shapes[1].shape_type");
+    assert_eq!(shape_type, "PICTURE");
+}

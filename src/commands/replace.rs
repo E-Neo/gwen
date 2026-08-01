@@ -110,6 +110,12 @@ fn replace_shape_properties(
             )?;
             pkg.set_part(&chart_part_uri, new_chart_data);
         }
+        (Some("crop"), n) if n >= 2 => {
+            let new_data = crate::engine::xml_edit::replace_picture_crop(
+                &part_data, shape_idx, remaining, &scalar,
+            )?;
+            pkg.set_part(container_uri, new_data);
+        }
         _ => {
             // Fallback: lossy txBody round-trip for unknown paths
             let new_data = editor::replace_shape_property(&part_data, shape_idx, remaining, value)?;

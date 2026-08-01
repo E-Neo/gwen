@@ -59,6 +59,7 @@ fn fresh_shape(shape_type: ShapeType) -> ShapeDto {
         auto_shape_type: None,
         text_frame: None,
         image: None,
+        crop: None,
         table: None,
         chart: None,
         shapes: None,
@@ -168,6 +169,7 @@ pub fn parse_slide_shapes(
     let mut in_shape_fill = false;
     let mut in_shape_ln = false;
     let mut in_ln_fill = false;
+    let mut in_blip = false;
     let mut shape_fill_type: Option<FillType> = None;
     let mut shape_fill_color: Option<ColorFormatDto> = None;
     let mut ln_width: Option<i64> = None;
@@ -474,6 +476,7 @@ pub fn parse_slide_shapes(
                         }
                     }
                     b"a:blip" => {
+                        in_blip = true;
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
                                 if a.key.as_ref() == b"r:embed"
@@ -1021,6 +1024,29 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:srcRect" if in_blip => {
+                        if let Some(ref mut shape) = current_shape {
+                            let mut crop = CropDto::default();
+                            for a in e.attributes().flatten() {
+                                let raw = String::from_utf8_lossy(&a.value).to_string();
+                                let v = raw.parse::<f64>().ok().map(|n| n / 100000.0);
+                                match a.key.as_ref() {
+                                    b"l" => crop.left = v,
+                                    b"t" => crop.top = v,
+                                    b"r" => crop.right = v,
+                                    b"b" => crop.bottom = v,
+                                    _ => {}
+                                }
+                            }
+                            if crop.left.is_some()
+                                || crop.top.is_some()
+                                || crop.right.is_some()
+                                || crop.bottom.is_some()
+                            {
+                                shape.crop = Some(crop);
+                            }
+                        }
+                    }
                     b"a:prstGeom" => {
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
@@ -1505,6 +1531,9 @@ pub fn parse_slide_shapes(
                         in_shape_ln = false;
                         in_ln_fill = false;
                     }
+                    b"a:blip" if in_blip => {
+                        in_blip = false;
+                    }
                     b"a:solidFill" if in_shape_fill => {
                         in_shape_fill = false;
                     }
@@ -1748,5 +1777,38 @@ mod tests {
             Some("B")
         );
         assert_eq!(shapes[2].name.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn picture_crop_is_parsed() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+            <p:pic>
+              <p:nvPicPr><p:cNvPr id="2" name="Pic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+              <p:blipFill>
+                <a:blip r:embed="rId1"><a:srcRect l="10000" t="5000" r="0" b="0"/></a:blip>
+                <a:stretch><a:fillRect/></a:stretch>
+              </p:blipFill>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr>
+            </p:pic>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let mut image_map = HashMap::new();
+        image_map.insert("rId1".to_string(), "image1.png".to_string());
+        let shapes = parse_slide_shapes(xml, &image_map).unwrap();
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].shape_type, ShapeType::Picture);
+        assert_eq!(shapes[0].image.as_deref(), Some("image1.png"));
+        let crop = shapes[0].crop.as_ref().expect("crop parsed");
+        assert_eq!(crop.left, Some(0.1));
+        assert_eq!(crop.top, Some(0.05));
+        assert_eq!(crop.right, Some(0.0));
+        assert_eq!(crop.bottom, Some(0.0));
     }
 }

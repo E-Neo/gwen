@@ -318,6 +318,94 @@ pub fn replace_shape_property_lossless(
     write_events(events)
 }
 
+/// Set one crop side (left/top/right/bottom) of a picture shape's `a:srcRect`
+/// child of its `a:blip`. `value` is a fraction 0.0-1.0 of the amount cropped.
+/// The `a:srcRect` element is created if the picture has none.
+pub fn replace_picture_crop(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let side_attr = match remaining.get(1) {
+        Some(path::PathSegment::Field(name)) => match name.as_str() {
+            "left" => b"l",
+            "top" => b"t",
+            "right" => b"r",
+            "bottom" => b"b",
+            other => {
+                return Err(AppError::PathParse(format!(
+                    "Unsupported crop side '{other}'"
+                )));
+            }
+        },
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected crop side after 'crop' (left/top/right/bottom)".to_string(),
+            ));
+        }
+    };
+
+    let fraction = value
+        .parse::<f64>()
+        .map_err(|_| AppError::InvalidValue(format!("Invalid crop value '{value}'")))?;
+    let percent = (fraction * 100000.0).round() as i64;
+    let percent_str = percent.to_string();
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+
+    // Locate the a:blip inside the picture shape.
+    let blip_range = {
+        let mut i = shape_start;
+        let mut blip: Option<(usize, usize)> = None;
+        while i < shape_end {
+            match &events[i] {
+                Event::Start(e) if e.name().as_ref() == b"a:blip" => {
+                    blip = find_elem_range(&events, b"a:blip", i);
+                    break;
+                }
+                Event::Empty(e) if e.name().as_ref() == b"a:blip" => {
+                    blip = Some((i, i));
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        blip
+    }
+    .ok_or(AppError::PathParse(
+        "Shape at index has no a:blip (not a picture)".to_string(),
+    ))?;
+
+    let (blip_start, blip_end) = blip_range;
+
+    // Locate an existing a:srcRect child of the blip.
+    let src_range = find_child_elem_range(&events, blip_start, blip_end, b"a:srcRect");
+
+    if let Some((s, e)) = src_range {
+        if s == e {
+            if let Event::Empty(ref orig) = events[s] {
+                events[s] = Event::Empty(copy_attrs(orig, side_attr, &percent_str));
+            }
+        } else if let Event::Start(ref orig) = events[s] {
+            events[s] = Event::Start(copy_attrs(orig, side_attr, &percent_str));
+        }
+    } else {
+        // No a:srcRect yet: expand the blip into a start/end pair if it is
+        // self-closing, then insert a fresh a:srcRect as its first child.
+        let mut src = BytesStart::new("a:srcRect");
+        let key_str = String::from_utf8_lossy(side_attr).to_string();
+        src.push_attribute((key_str.as_str(), percent_str.as_str()));
+        let insert_at = expand_empty_container(&mut events, blip_start, b"a:blip");
+        events.insert(insert_at, Event::Empty(src));
+    }
+
+    write_events(events)
+}
+
 fn edit_txbody_path(
     events: &mut Vec<Event<'static>>,
     txbody_start: usize,
@@ -2234,6 +2322,14 @@ mod tests {
           <a:tr h="8"><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>Y</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>Y2</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
         </a:tbl></a:graphicData></a:graphic>
       </p:graphicFrame>
+      <p:pic>
+        <p:nvPicPr><p:cNvPr id="4" name="P1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill>
+          <a:blip r:embed="rId5"/>
+          <a:stretch><a:fillRect/></a:stretch>
+        </p:blipFill>
+        <p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm></p:spPr>
+      </p:pic>
     </p:spTree>
   </p:cSld>
 </p:sld>"#;
@@ -2378,6 +2474,36 @@ mod tests {
         let out = replace_table_cell_property_lossless(xml, 1, &path, "2400").unwrap();
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("sz=\"2400\""));
+    }
+
+    #[test]
+    fn picture_crop_inserts_src_rect() {
+        let xml = SLIDE.as_bytes();
+        let path = path::parse_path("crop.left").unwrap();
+        let out = replace_picture_crop(xml, 2, &path, "0.25").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:srcRect l=\"25000\""),
+            "srcRect with l=25000 inserted, got: {out_str}"
+        );
+        assert!(out_str.contains("<a:stretch>"), "blipFill preserved");
+        assert!(out_str.contains("Hello"), "other shapes preserved");
+    }
+
+    #[test]
+    fn picture_crop_updates_existing_src_rect() {
+        let mut xml = SLIDE.to_string();
+        xml = xml.replace(
+            "<a:blip r:embed=\"rId5\"/>",
+            "<a:blip r:embed=\"rId5\"><a:srcRect l=\"10000\" t=\"5000\"/></a:blip>",
+        );
+        let path = path::parse_path("crop.top").unwrap();
+        let out = replace_picture_crop(xml.as_bytes(), 2, &path, "0.1").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:srcRect l=\"10000\" t=\"10000\""),
+            "existing srcRect updated, got: {out_str}"
+        );
     }
 
     #[test]

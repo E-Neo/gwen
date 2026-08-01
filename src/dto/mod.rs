@@ -299,6 +299,18 @@ pub struct ChartDto {
     pub series: Vec<ChartSeriesDto>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CropDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<f64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShapeDto {
     pub shape_id: u32,
@@ -345,6 +357,8 @@ pub struct ShapeDto {
     pub text_frame: Option<TextFrameDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<CropDto>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<TableDto>,
