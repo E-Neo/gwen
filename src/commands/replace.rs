@@ -8,6 +8,29 @@ use crate::model::slide;
 use crate::opc::Package;
 use crate::path;
 
+/// Route a `shapes[N]…` path to a generic part that owns a shape tree (a slide
+/// master or layout). `remaining` starts with `shapes`, then the shape index.
+fn replace_in_shapes_part(
+    pkg: &mut Package,
+    part_uri: &str,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<()> {
+    let (shape_idx, rest) = match remaining {
+        [
+            path::PathSegment::Field(n),
+            path::PathSegment::Index(i),
+            rest @ ..,
+        ] if n == "shapes" => (*i, rest),
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected shapes[N] after the master/layout index".to_string(),
+            ));
+        }
+    };
+    replace_shape_properties(pkg, part_uri, shape_idx, rest, value)
+}
+
 /// Resolve the chart part URI from a shape's chart r:id.
 fn resolve_chart_part(pkg: &Package, slide_uri: &str, shape_idx: usize) -> AppResult<String> {
     let empty_map: HashMap<String, String> = HashMap::new();
@@ -270,6 +293,45 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         } => {
             return Err(AppError::PathParse(
                 "Shape index required (e.g. p.slides[0].shapes[0])".to_string(),
+            ));
+        }
+        path::ResolvedPath::Theme { remaining } => {
+            let theme_uri = crate::model::parts::theme_uri(&pkg)
+                .ok_or_else(|| AppError::PathParse("Presentation has no theme".to_string()))?;
+            let theme_data = pkg
+                .get_part(&theme_uri)
+                .ok_or(AppError::PartNotFound(theme_uri.clone()))?
+                .to_vec();
+            let scalar = scalar_string(value);
+            let new_data =
+                crate::engine::xml_edit::replace_theme_property(&theme_data, remaining, &scalar)?;
+            pkg.set_part(&theme_uri, new_data);
+        }
+        path::ResolvedPath::Master {
+            master_idx: Some(idx),
+            remaining,
+        } => {
+            let masters = crate::model::parts::master_uris(&pkg);
+            let master_uri = masters
+                .get(*idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*idx))?
+                .clone();
+            replace_in_shapes_part(&mut pkg, &master_uri, remaining, value)?;
+        }
+        path::ResolvedPath::Layout {
+            layout_idx: Some(idx),
+            remaining,
+        } => {
+            let layouts = crate::model::parts::layout_uris(&pkg);
+            let layout_uri = layouts
+                .get(*idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*idx))?
+                .clone();
+            replace_in_shapes_part(&mut pkg, &layout_uri, remaining, value)?;
+        }
+        path::ResolvedPath::Master { .. } | path::ResolvedPath::Layout { .. } => {
+            return Err(AppError::PathParse(
+                "Index required (e.g. p.slideMasters[0].shapes[0])".to_string(),
             ));
         }
         path::ResolvedPath::Notes {

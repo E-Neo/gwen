@@ -35,12 +35,25 @@ pub fn execute(input: &str, path_str: &str, output: &str) -> AppResult<()> {
             .slide_uris
             .get(*idx)
             .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
+        // Resolve an attached notes slide before its relationships are removed.
+        let notes_uri = crate::model::notes::resolve_notes_uri(&pkg, slide_uri);
+        let notes_rel_id = pkg.get_rels(slide_uri).and_then(|rels| {
+            rels.values()
+                .find(|r| r.rel_type == crate::model::notes::NOTES_SLIDE_REL_TYPE)
+                .map(|r| r.id.clone())
+        });
         let (new_pres_xml, removed_r_id) = editor::remove_slide_from_presentation(pres_part, *idx)?;
         pkg.set_part("ppt/presentation.xml", new_pres_xml);
         pkg.remove_relationship("ppt/presentation.xml", &removed_r_id);
         pkg.remove_part(slide_uri);
         pkg.remove_all_relationships(slide_uri);
         pkg.remove_content_type_override(&format!("/{}", slide_uri))?;
+        if let (Some(notes_uri), Some(notes_rel_id)) = (notes_uri, notes_rel_id) {
+            pkg.remove_relationship(slide_uri, &notes_rel_id);
+            pkg.remove_part(&notes_uri);
+            pkg.remove_all_relationships(&notes_uri);
+            pkg.remove_content_type_override(&format!("/{}", notes_uri))?;
+        }
         pkg.save(Path::new(output))?;
         return Ok(());
     }

@@ -31,6 +31,13 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         if let path::ResolvedPath::Slide { slide_idx, .. } = &resolved {
             return add_slide(&mut pkg, &mut pres, &pres_part, slide_idx, value, output);
         }
+        if let path::ResolvedPath::Notes {
+            slide_idx: Some(idx),
+            ..
+        } = &resolved
+        {
+            return add_notes_slide(&mut pkg, &pres, *idx, value, output);
+        }
     }
 
     // Determine the part that owns the shapes being targeted: a slide or a
@@ -242,6 +249,55 @@ fn add_slide(
         &format!("/ppt/slides/slide{}.xml", slide_num),
         "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
     )?;
+
+    pkg.save(Path::new(output))?;
+    Ok(())
+}
+
+/// Attach a notes slide to an existing slide (`add slides[N].notes`).
+fn add_notes_slide(
+    pkg: &mut Package,
+    pres: &Presentation,
+    slide_idx: usize,
+    value: &str,
+    output: &str,
+) -> AppResult<()> {
+    let slide_uri = pres
+        .slide_uris
+        .get(slide_idx)
+        .ok_or(AppError::SlideIndexOutOfBounds(slide_idx))?;
+
+    if crate::model::notes::resolve_notes_uri(pkg, slide_uri).is_some() {
+        return Err(AppError::InvalidValue(
+            "Slide already has a notes slide".to_string(),
+        ));
+    }
+
+    let slide_dto: crate::dto::SlideDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid notes JSON: {}", e)))?;
+
+    let notes_num = pkg.get_next_notes_num();
+    let notes_uri = format!("ppt/notesSlides/notesSlide{}.xml", notes_num);
+
+    let notes_xml = factory::generate_notes_xml(&slide_dto)?;
+    pkg.set_part(&notes_uri, notes_xml);
+    pkg.add_content_type_override(
+        &format!("/{}", notes_uri),
+        "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml",
+    )?;
+
+    pkg.add_relationship(
+        slide_uri,
+        Relationship {
+            id: String::new(),
+            target: format!(
+                "../{}",
+                notes_uri.strip_prefix("ppt/").unwrap_or(&notes_uri)
+            ),
+            target_mode: None,
+            rel_type: crate::model::notes::NOTES_SLIDE_REL_TYPE.to_string(),
+        },
+    );
 
     pkg.save(Path::new(output))?;
     Ok(())

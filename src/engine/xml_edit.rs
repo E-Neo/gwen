@@ -37,7 +37,11 @@ fn is_shape_tag(name: &[u8]) -> bool {
     )
 }
 
-fn find_elem_range(events: &[Event<'_>], name: &[u8], start_from: usize) -> Option<(usize, usize)> {
+pub(crate) fn find_elem_range(
+    events: &[Event<'_>],
+    name: &[u8],
+    start_from: usize,
+) -> Option<(usize, usize)> {
     let mut depth = 0u32;
     let mut start = None;
     for (i, event) in events.iter().enumerate().skip(start_from) {
@@ -85,6 +89,37 @@ fn find_nth_child_range(
             }
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the first direct child element by name (Start or self-closing) inside a
+/// parent range. Returns `(start, end)`; for a self-closing element `start == end`.
+pub(crate) fn find_child_elem_range(
+    events: &[Event<'_>],
+    parent_start: usize,
+    parent_end: usize,
+    child_name: &[u8],
+) -> Option<(usize, usize)> {
+    let mut depth = 0u32;
+    let mut i = parent_start + 1;
+    while i < parent_end {
+        match &events[i] {
+            Event::Start(e) => {
+                if depth == 0 && e.name().as_ref() == child_name {
+                    return find_elem_range(events, child_name, i);
+                }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+            }
+            Event::Empty(e) if depth == 0 && e.name().as_ref() == child_name => {
+                return Some((i, i));
             }
             _ => {}
         }
@@ -1528,6 +1563,96 @@ pub fn parse_slide_background(xml_bytes: &[u8]) -> serde_json::Value {
     json!({ "fill": { "type": serde_json::Value::Null } })
 }
 
+pub const THEME_COLOR_NAMES: [&str; 12] = [
+    "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+    "hlink", "folHlink",
+];
+
+fn set_srgb_attr(events: &mut [Event<'static>], s: usize, e: usize, value: &str) {
+    if s == e {
+        if let Event::Empty(orig) = &events[s] {
+            events[s] = Event::Empty(copy_attrs(orig, b"val", value));
+        }
+    } else if let Event::Start(orig) = &events[s] {
+        events[s] = Event::Start(copy_attrs(orig, b"val", value));
+    }
+}
+
+fn set_latin_typeface(events: &mut [Event<'static>], s: usize, e: usize, value: &str) {
+    if s == e {
+        if let Event::Empty(orig) = &events[s] {
+            events[s] = Event::Empty(copy_attrs(orig, b"typeface", value));
+        }
+    } else if let Event::Start(orig) = &events[s] {
+        events[s] = Event::Start(copy_attrs(orig, b"typeface", value));
+    }
+}
+
+/// Replace a theme color (`p.theme.colors.accent1`) or font
+/// (`p.theme.fonts.major` / `.minor`). `remaining` is the segments after
+/// `theme`.
+pub fn replace_theme_property(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+
+    match remaining {
+        [path::PathSegment::Field(n), path::PathSegment::Field(prop)]
+            if n == "colors" && THEME_COLOR_NAMES.contains(&prop.as_str()) =>
+        {
+            let clr_range = find_elem_range(&events, b"a:clrScheme", 0)
+                .ok_or_else(|| AppError::PathParse("No color scheme in theme".to_string()))?;
+            let child_name = format!("a:{prop}");
+            let child =
+                find_child_elem_range(&events, clr_range.0, clr_range.1, child_name.as_bytes())
+                    .ok_or_else(|| {
+                        AppError::PathParse(format!("Theme color '{prop}' not found"))
+                    })?;
+            let srgb = find_child_elem_range(&events, child.0, child.1, b"a:srgbClr");
+            match srgb {
+                Some((s, e)) => set_srgb_attr(&mut events, s, e, value),
+                None => {
+                    let mut clr = BytesStart::new("a:srgbClr");
+                    clr.push_attribute(("val", value));
+                    events.insert(child.0 + 1, Event::Empty(clr));
+                }
+            }
+        }
+        [path::PathSegment::Field(n), path::PathSegment::Field(prop)]
+            if n == "fonts" && matches!(prop.as_str(), "major" | "minor") =>
+        {
+            let font_range = find_elem_range(&events, b"a:fontScheme", 0)
+                .ok_or_else(|| AppError::PathParse("No font scheme in theme".to_string()))?;
+            let family = if prop == "major" {
+                b"a:majorFont"
+            } else {
+                b"a:minorFont"
+            };
+            let family_range =
+                find_child_elem_range(&events, font_range.0, font_range.1, family)
+                    .ok_or_else(|| AppError::PathParse("Font family not found".to_string()))?;
+            let latin = find_child_elem_range(&events, family_range.0, family_range.1, b"a:latin");
+            match latin {
+                Some((s, e)) => set_latin_typeface(&mut events, s, e, value),
+                None => {
+                    let mut latin = BytesStart::new("a:latin");
+                    latin.push_attribute(("typeface", value));
+                    events.insert(family_range.0 + 1, Event::Empty(latin));
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected theme.colors.<name> or theme.fonts.major/minor".to_string(),
+            ));
+        }
+    }
+
+    write_events(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1858,5 +1983,54 @@ mod tests {
             out_str.contains("<dcterms:created xsi:type=\"dcterms:W3CDTF\">2024-05-01T10:30:00Z</dcterms:created>"),
             "got: {out_str}"
         );
+    }
+
+    #[test]
+    fn theme_color_replaced() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="Office"><a:accent1><a:srgbClr val="4F81BD"/></a:accent1></a:clrScheme></a:themeElements></a:theme>"#;
+        let path = path::parse_path("theme.colors.accent1").unwrap();
+        let out = replace_theme_property(xml.as_bytes(), &path[1..], "FF0000").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:srgbClr val=\"FF0000\"/>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn theme_color_created_when_srgb_absent() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="Office"><a:accent1><a:sysClr val="windowText"/></a:accent1></a:clrScheme></a:themeElements></a:theme>"#;
+        let path = path::parse_path("theme.colors.accent1").unwrap();
+        let out = replace_theme_property(xml.as_bytes(), &path[1..], "00FF00").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:srgbClr val=\"00FF00\"/>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn theme_font_replaced() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#;
+        let path = path::parse_path("theme.fonts.major").unwrap();
+        let out = replace_theme_property(xml.as_bytes(), &path[1..], "Arial").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("typeface=\"Arial\""), "got: {out_str}");
+    }
+
+    #[test]
+    fn theme_font_created_when_latin_absent() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Office"><a:minorFont/></a:fontScheme></a:themeElements></a:theme>"#;
+        let path = path::parse_path("theme.fonts.minor").unwrap();
+        let out = replace_theme_property(xml.as_bytes(), &path[1..], "Consolas").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("typeface=\"Consolas\""), "got: {out_str}");
+    }
+
+    #[test]
+    fn theme_rejects_bad_path() {
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>"#;
+        let path = path::parse_path("theme.nope.accent1").unwrap();
+        assert!(replace_theme_property(xml.as_bytes(), &path[1..], "000000").is_err());
     }
 }

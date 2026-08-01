@@ -29,6 +29,17 @@ pub enum ResolvedPath {
         shape_idx: Option<usize>,
         remaining: Vec<PathSegment>,
     },
+    Theme {
+        remaining: Vec<PathSegment>,
+    },
+    Master {
+        master_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
+    Layout {
+        layout_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
 }
 
 pub fn parse_path(path_str: &str) -> AppResult<Vec<PathSegment>> {
@@ -215,6 +226,45 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
                 }),
             }
         }
+        PathSegment::Field(name) if name == "theme" => Ok(ResolvedPath::Theme {
+            remaining: segments[1..].to_vec(),
+        }),
+        PathSegment::Field(name) if name == "slideMasters" => {
+            let tail = &segments[1..];
+            if tail.is_empty() {
+                return Ok(ResolvedPath::Master {
+                    master_idx: None,
+                    remaining: Vec::new(),
+                });
+            }
+            match &tail[0] {
+                PathSegment::Index(idx) => Ok(ResolvedPath::Master {
+                    master_idx: Some(*idx),
+                    remaining: tail[1..].to_vec(),
+                }),
+                _ => Err(AppError::PathParse(
+                    "Expected index after slideMasters".to_string(),
+                )),
+            }
+        }
+        PathSegment::Field(name) if name == "slideLayouts" => {
+            let tail = &segments[1..];
+            if tail.is_empty() {
+                return Ok(ResolvedPath::Layout {
+                    layout_idx: None,
+                    remaining: Vec::new(),
+                });
+            }
+            match &tail[0] {
+                PathSegment::Index(idx) => Ok(ResolvedPath::Layout {
+                    layout_idx: Some(*idx),
+                    remaining: tail[1..].to_vec(),
+                }),
+                _ => Err(AppError::PathParse(
+                    "Expected index after slideLayouts".to_string(),
+                )),
+            }
+        }
         PathSegment::Field(_) => Ok(ResolvedPath::Presentation {
             remaining: segments.to_vec(),
         }),
@@ -233,6 +283,9 @@ impl ResolvedPath {
             ResolvedPath::Shape { remaining, .. } => remaining,
             ResolvedPath::Notes { remaining, .. } => remaining,
             ResolvedPath::NotesShape { remaining, .. } => remaining,
+            ResolvedPath::Theme { remaining } => remaining,
+            ResolvedPath::Master { remaining, .. } => remaining,
+            ResolvedPath::Layout { remaining, .. } => remaining,
         }
     }
 
@@ -312,5 +365,50 @@ mod tests {
     fn notes_requires_slide_index() {
         assert!(resolve_path(&parse_path("slides.notes").unwrap()).is_ok());
         assert!(resolve_path(&parse_path("slides[0].notes").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn theme_path_resolves() {
+        match resolve_path(&parse_path("p.theme.colors.accent1").unwrap()).unwrap() {
+            ResolvedPath::Theme { remaining } => {
+                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "colors"));
+                assert!(matches!(&remaining[1], PathSegment::Field(n) if n == "accent1"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn master_path_resolves() {
+        match resolve_path(&parse_path("p.slideMasters[0].shapes[1].left").unwrap()).unwrap() {
+            ResolvedPath::Master {
+                master_idx: Some(0),
+                remaining,
+            } => {
+                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "shapes"));
+                assert!(matches!(&remaining[1], PathSegment::Index(1)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            resolve_path(&parse_path("p.slideMasters").unwrap()).unwrap(),
+            ResolvedPath::Master {
+                master_idx: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn layout_path_resolves() {
+        match resolve_path(&parse_path("p.slideLayouts[0].shapes").unwrap()).unwrap() {
+            ResolvedPath::Layout {
+                layout_idx: Some(0),
+                remaining,
+            } => {
+                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "shapes"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

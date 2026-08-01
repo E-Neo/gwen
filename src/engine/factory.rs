@@ -588,6 +588,130 @@ pub fn generate_slide_xml(
     Ok(inner)
 }
 
+/// Generate a notes slide (`p:notes`) part with the given shapes. When no
+/// shapes are supplied, the standard notes placeholders (slide image, notes
+/// body, slide number) are created so that `notes_text_frame` resolves.
+pub fn generate_notes_xml(slide: &SlideDto) -> AppResult<Vec<u8>> {
+    use quick_xml::events::BytesStart;
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    let mut notes = BytesStart::new("p:notes");
+    notes.push_attribute((
+        "xmlns:a",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+    ));
+    notes.push_attribute((
+        "xmlns:r",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    ));
+    notes.push_attribute((
+        "xmlns:p",
+        "http://schemas.openxmlformats.org/presentationml/2006/main",
+    ));
+    write_open_tag_full(&mut writer, &notes);
+
+    write_open_tag(&mut writer, "p:cSld", &[]);
+    write_open_tag(&mut writer, "p:spTree", &[]);
+
+    write_open_tag(&mut writer, "p:nvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:cNvPr", &[("id", "1"), ("name", "")]);
+    write_empty_tag(&mut writer, "p:cNvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvGrpSpPr");
+
+    write_open_tag(&mut writer, "p:grpSpPr", &[]);
+    write_open_tag(&mut writer, "a:xfrm", &[]);
+    write_empty_tag(&mut writer, "a:off", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:ext", &[("cx", "0"), ("cy", "0")]);
+    write_empty_tag(&mut writer, "a:chOff", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:chExt", &[("cx", "0"), ("cy", "0")]);
+    write_close_tag(&mut writer, "a:xfrm");
+    write_close_tag(&mut writer, "p:grpSpPr");
+
+    if slide.shapes.is_empty() {
+        write_notes_placeholder(&mut writer, 2, "Slide Image Placeholder 1", "sldImg", 2);
+        write_notes_body_placeholder(&mut writer);
+        write_notes_placeholder(&mut writer, 4, "Slide Number Placeholder 3", "sldNum", 5);
+    } else {
+        for shape in &slide.shapes {
+            let xml = crate::dto::xml::shape_to_xml(shape);
+            writer
+                .get_mut()
+                .write_all(xml.as_bytes())
+                .map_err(crate::error::AppError::Io)?;
+        }
+    }
+
+    write_close_tag(&mut writer, "p:spTree");
+    write_close_tag(&mut writer, "p:cSld");
+    write_close_tag(&mut writer, "p:notes");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
+}
+
+fn write_notes_placeholder(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    id: u32,
+    name: &str,
+    ph_type: &str,
+    idx: u32,
+) {
+    write_open_tag(writer, "p:sp", &[]);
+    write_open_tag(writer, "p:nvSpPr", &[]);
+    write_empty_tag(
+        writer,
+        "p:cNvPr",
+        &[("id", &id.to_string()), ("name", name)],
+    );
+    write_open_tag(writer, "p:cNvSpPr", &[]);
+    write_empty_tag(writer, "a:spLocks", &[("noGrp", "1")]);
+    write_close_tag(writer, "p:cNvSpPr");
+    write_open_tag(writer, "p:nvPr", &[]);
+    write_empty_tag(
+        writer,
+        "p:ph",
+        &[("type", ph_type), ("idx", &idx.to_string())],
+    );
+    write_close_tag(writer, "p:nvPr");
+    write_close_tag(writer, "p:nvSpPr");
+    write_empty_tag(writer, "p:spPr", &[]);
+    write_close_tag(writer, "p:sp");
+}
+
+fn write_notes_body_placeholder(writer: &mut Writer<Cursor<Vec<u8>>>) {
+    write_open_tag(writer, "p:sp", &[]);
+    write_open_tag(writer, "p:nvSpPr", &[]);
+    write_empty_tag(
+        writer,
+        "p:cNvPr",
+        &[("id", "3"), ("name", "Notes Placeholder 2")],
+    );
+    write_open_tag(writer, "p:cNvSpPr", &[]);
+    write_empty_tag(writer, "a:spLocks", &[("noGrp", "1")]);
+    write_close_tag(writer, "p:cNvSpPr");
+    write_open_tag(writer, "p:nvPr", &[]);
+    write_empty_tag(
+        writer,
+        "p:ph",
+        &[("type", "body"), ("idx", "3"), ("sz", "quarter")],
+    );
+    write_close_tag(writer, "p:nvPr");
+    write_close_tag(writer, "p:nvSpPr");
+    write_empty_tag(writer, "p:spPr", &[]);
+    write_open_tag(writer, "p:txBody", &[]);
+    write_empty_tag(writer, "a:bodyPr", &[]);
+    write_empty_tag(writer, "a:lstStyle", &[]);
+    write_open_tag(writer, "a:p", &[]);
+    write_open_tag(writer, "a:r", &[]);
+    write_open_tag(writer, "a:t", &[]);
+    write_close_tag(writer, "a:t");
+    write_close_tag(writer, "a:r");
+    write_close_tag(writer, "a:p");
+    write_close_tag(writer, "p:txBody");
+    write_close_tag(writer, "p:sp");
+}
+
 fn write_open_tag_full(writer: &mut Writer<Cursor<Vec<u8>>>, elem: &quick_xml::events::BytesStart) {
     use quick_xml::events::Event;
     writer.write_event(Event::Start(elem.clone())).unwrap();

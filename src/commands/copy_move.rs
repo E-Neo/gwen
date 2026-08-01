@@ -172,6 +172,15 @@ fn resolve_slide_path(pkg: &Package, path_str: &str) -> AppResult<Option<usize>>
 
 pub fn copy_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
+
+    // Slide-level copy: duplicate a whole slide at the given position.
+    if let (Some(from_idx), Some(to_idx)) = (
+        resolve_slide_path(&pkg, from_path)?,
+        resolve_slide_path(&pkg, to_path)?,
+    ) {
+        return copy_slide(&mut pkg, from_idx, to_idx, output);
+    }
+
     let src = resolve_target(&pkg, from_path)?;
     let dst = resolve_target(&pkg, to_path)?;
 
@@ -298,6 +307,105 @@ pub fn move_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> 
             from_path, to_path
         )));
     }
+
+    pkg.save(Path::new(output))?;
+    Ok(())
+}
+
+const SLIDE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const NOTES_SLIDE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml";
+
+/// Duplicate a whole slide (`copy --from slides[N] --to slides[M]`). The new
+/// slide is inserted at position `to_idx`, sharing the source's layout while
+/// image/chart relationships are remapped to fresh parts/r-ids.
+fn copy_slide(pkg: &mut Package, from_idx: usize, to_idx: usize, output: &str) -> AppResult<()> {
+    let pres_part = pkg
+        .get_part("ppt/presentation.xml")
+        .ok_or(AppError::PartNotFound("ppt/presentation.xml".to_string()))?
+        .to_vec();
+    let pres_rels = pkg
+        .get_rels("ppt/presentation.xml")
+        .ok_or(AppError::PartNotFound(
+            "ppt/presentation.xml rels".to_string(),
+        ))?;
+    let mut pres = Presentation::parse(&pres_part)?;
+    pres.slide_uris = pres.resolve_slide_uris(pres_rels);
+
+    let src_uri = pres
+        .slide_uris
+        .get(from_idx)
+        .ok_or(AppError::SlideIndexOutOfBounds(from_idx))?
+        .clone();
+    let src_data = pkg
+        .get_part(&src_uri)
+        .ok_or(AppError::PartNotFound(src_uri.clone()))?
+        .to_vec();
+    let src_rels = pkg
+        .get_rels(&src_uri)
+        .ok_or(AppError::PartNotFound(format!("{src_uri} rels")))?
+        .clone();
+
+    let slide_num = pkg.get_next_slide_num();
+    let new_uri = format!("ppt/slides/slide{slide_num}.xml");
+
+    // Image/chart rels referenced by the slide are duplicated onto the new part.
+    let new_data = remap_shape_rels(pkg, &src_data, &src_uri, &new_uri)?;
+    pkg.set_part(&new_uri, new_data);
+
+    // Re-use the source's slide layout relationship.
+    if let Some(layout_rel) = src_rels
+        .values()
+        .find(|r| r.rel_type.contains("slideLayout"))
+    {
+        pkg.add_relationship(&new_uri, layout_rel.clone());
+    }
+
+    pkg.add_content_type_override(&format!("/{new_uri}"), SLIDE_CONTENT_TYPE)?;
+
+    // Copy an attached notes slide, if present, with its own fresh part number.
+    if let Some(notes_uri) = crate::model::notes::resolve_notes_uri(pkg, &src_uri) {
+        let notes_data = pkg
+            .get_part(&notes_uri)
+            .ok_or(AppError::PartNotFound(notes_uri.clone()))?
+            .to_vec();
+        let notes_num = pkg.get_next_notes_num();
+        let new_notes_uri = format!("ppt/notesSlides/notesSlide{notes_num}.xml");
+        pkg.set_part(&new_notes_uri, notes_data);
+        if let Some(notes_rels) = pkg.get_rels(&notes_uri).cloned() {
+            pkg.set_rels(&new_notes_uri, notes_rels);
+        }
+        pkg.add_content_type_override(&format!("/{new_notes_uri}"), NOTES_SLIDE_CONTENT_TYPE)?;
+        pkg.add_relationship(
+            &new_uri,
+            Relationship {
+                id: String::new(),
+                target: format!(
+                    "../{}",
+                    new_notes_uri.strip_prefix("ppt/").unwrap_or(&new_notes_uri)
+                ),
+                rel_type: crate::model::notes::NOTES_SLIDE_REL_TYPE.to_string(),
+                target_mode: None,
+            },
+        );
+    }
+
+    // Register the new slide in presentation.xml at the target position.
+    let new_r_id = pkg.add_relationship(
+        "ppt/presentation.xml",
+        Relationship {
+            id: String::new(),
+            target: format!("slides/slide{slide_num}.xml"),
+            target_mode: None,
+            rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+                .to_string(),
+        },
+    );
+    let max_sld_id = editor::find_max_sld_id(&pres_part);
+    let new_pres =
+        editor::insert_slide_into_presentation(&pres_part, to_idx, &new_r_id, max_sld_id + 1)?;
+    pkg.set_part("ppt/presentation.xml", new_pres);
 
     pkg.save(Path::new(output))?;
     Ok(())

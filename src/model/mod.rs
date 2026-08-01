@@ -1,4 +1,6 @@
 pub mod core_props;
 pub mod notes;
+pub mod parts;
 pub mod presentation;
 pub mod slide;
+pub mod theme;

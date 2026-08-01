@@ -166,6 +166,58 @@ pub fn execute(
                     .clone(),
             }
         }
+        path::ResolvedPath::Theme { remaining: _ } => {
+            let theme_uri = crate::model::parts::theme_uri(&pkg)
+                .ok_or_else(|| AppError::PathParse("Presentation has no theme".to_string()))?;
+            let part_data = pkg
+                .get_part(&theme_uri)
+                .ok_or(AppError::PartNotFound(theme_uri.clone()))?;
+            crate::model::theme::parse_theme(part_data)
+        }
+        path::ResolvedPath::Master {
+            master_idx,
+            remaining: _,
+        } => {
+            let masters = crate::model::parts::master_uris(&pkg);
+            match master_idx {
+                Some(i) => {
+                    let m = masters.get(*i).ok_or(AppError::SlideIndexOutOfBounds(*i))?;
+                    let shapes = parse_shapes(&pkg, m, None)?;
+                    json!({ "shapes": shapes })
+                }
+                None => json!(
+                    masters
+                        .iter()
+                        .map(|m| {
+                            let shapes = parse_shapes(&pkg, m, None)?;
+                            Ok(json!({ "shapes": shapes }))
+                        })
+                        .collect::<AppResult<Vec<_>>>()?
+                ),
+            }
+        }
+        path::ResolvedPath::Layout {
+            layout_idx,
+            remaining: _,
+        } => {
+            let layouts = crate::model::parts::layout_uris(&pkg);
+            match layout_idx {
+                Some(i) => {
+                    let l = layouts.get(*i).ok_or(AppError::SlideIndexOutOfBounds(*i))?;
+                    let shapes = parse_shapes(&pkg, l, None)?;
+                    json!({ "shapes": shapes })
+                }
+                None => json!(
+                    layouts
+                        .iter()
+                        .map(|l| {
+                            let shapes = parse_shapes(&pkg, l, None)?;
+                            Ok(json!({ "shapes": shapes }))
+                        })
+                        .collect::<AppResult<Vec<_>>>()?
+                ),
+            }
+        }
         path::ResolvedPath::Notes {
             slide_idx: Some(idx),
             ..

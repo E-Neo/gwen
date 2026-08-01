@@ -38,12 +38,7 @@ fn run_ok(args: &[&str]) -> String {
 }
 
 fn query(input: &Path, path: &str) -> Value {
-    let out = run_ok(&[
-        "query",
-        input.to_str().unwrap(),
-        "--path",
-        path,
-    ]);
+    let out = run_ok(&["query", input.to_str().unwrap(), "--path", path]);
     serde_json::from_str(&out).unwrap()
 }
 
@@ -114,7 +109,10 @@ fn replace_text_roundtrip() {
         "--output",
         out.to_str().unwrap(),
     ]);
-    let v = query(&out, "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text");
+    let v = query(
+        &out,
+        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text",
+    );
     assert_eq!(v, "Changed");
 }
 
@@ -142,10 +140,16 @@ fn replace_rich_text_formatting() {
         "--output",
         out.to_str().unwrap(),
     ]);
-    let v = query(&out, "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font");
+    let v = query(
+        &out,
+        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font",
+    );
     assert_eq!(v["bold"], true);
     assert_eq!(v["size"], 2000);
-    let v = query(&out, "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text");
+    let v = query(
+        &out,
+        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text",
+    );
     assert_eq!(v, "Alpha", "text preserved through formatting edits");
 }
 
@@ -163,8 +167,14 @@ fn reorder_slides_via_move() {
         "--output",
         out.to_str().unwrap(),
     ]);
-    let first = query(&out, "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text");
-    let second = query(&out, "slides[1].shapes[0].text_frame.paragraphs[0].runs[0].text");
+    let first = query(
+        &out,
+        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text",
+    );
+    let second = query(
+        &out,
+        "slides[1].shapes[0].text_frame.paragraphs[0].runs[0].text",
+    );
     assert_eq!(first, "Beta");
     assert_eq!(second, "Alpha");
 }
@@ -254,4 +264,81 @@ fn remove_shape() {
     ]);
     let shapes = query(&out, "slides[0].shapes");
     assert_eq!(shapes.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn theme_color_replace_writes_theme_part() {
+    let dir = tmp();
+    let out = dir.join("theme.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "p.theme.colors.accent1",
+        "--value",
+        r#""FF0000""#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    run_ok(&[
+        "replace",
+        out.to_str().unwrap(),
+        "--path",
+        "p.theme.fonts.major",
+        "--value",
+        r#""Arial""#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(query(&out, "p.theme.colors.accent1"), "FF0000");
+    assert_eq!(query(&out, "p.theme.fonts.major"), "Arial");
+    assert_eq!(query(&out, "p.theme.colors.accent2"), "C0504D");
+    let theme_xml = read_zip_entry(&out, "ppt/theme/theme1.xml");
+    assert!(theme_xml.contains("FF0000"), "color written to theme part");
+    assert!(
+        theme_xml.contains("typeface=\"Arial\""),
+        "font written to theme part"
+    );
+}
+
+#[test]
+fn theme_query_reads_whole_scheme() {
+    let v = query(&fixture("two_slides.pptx"), "p.theme.colors");
+    let obj = v.as_object().unwrap();
+    assert!(obj.contains_key("accent1"));
+    assert!(obj.contains_key("dk1"));
+}
+
+#[test]
+fn master_and_layout_query_expose_shapes() {
+    let masters = query(&fixture("two_slides.pptx"), "p.slideMasters");
+    let arr = masters.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["shapes"].is_array());
+
+    let layouts = query(&fixture("two_slides.pptx"), "p.slideLayouts");
+    assert!(!layouts.as_array().unwrap().is_empty());
+
+    let first_layout = query(
+        &fixture("two_slides.pptx"),
+        "p.slideLayouts[0].shapes[0].name",
+    );
+    assert!(first_layout.is_string());
+}
+
+#[test]
+fn master_shape_replace_persists() {
+    let dir = tmp();
+    let out = dir.join("master.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "p.slideMasters[0].shapes[0].left",
+        "--value",
+        "100000",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(query(&out, "p.slideMasters[0].shapes[0].left"), 100000);
 }

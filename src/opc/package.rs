@@ -265,6 +265,20 @@ impl Package {
         max_num + 1
     }
 
+    pub fn get_next_notes_num(&self) -> u32 {
+        let mut max_num = 0u32;
+        for key in self.parts.keys() {
+            if let Some(rest) = key.strip_prefix("ppt/notesSlides/notesSlide")
+                && let Some(num_str) = rest.strip_suffix(".xml")
+                && let Ok(n) = num_str.parse::<u32>()
+                && n > max_num
+            {
+                max_num = n;
+            }
+        }
+        max_num + 1
+    }
+
     pub fn get_next_media_num(&self) -> u32 {
         let mut max_num = 0u32;
         for key in self.parts.keys() {
