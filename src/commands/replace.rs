@@ -116,6 +116,18 @@ fn replace_shape_properties(
             )?;
             pkg.set_part(container_uri, new_data);
         }
+        (Some("fill"), _) => {
+            let new_data = crate::engine::xml_edit::replace_shape_fill_lossless(
+                &part_data, shape_idx, remaining, &scalar,
+            )?;
+            pkg.set_part(container_uri, new_data);
+        }
+        (Some("outline"), _) => {
+            let new_data = crate::engine::xml_edit::replace_shape_outline_lossless(
+                &part_data, shape_idx, remaining, &scalar,
+            )?;
+            pkg.set_part(container_uri, new_data);
+        }
         _ => {
             // Fallback: lossy txBody round-trip for unknown paths
             let new_data = editor::replace_shape_property(&part_data, shape_idx, remaining, value)?;

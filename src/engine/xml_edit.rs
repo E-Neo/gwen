@@ -308,6 +308,12 @@ pub fn replace_shape_property_lossless(
         return Err(AppError::PathParse("Empty property path".to_string()));
     }
 
+    if remaining.len() == 1
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "text_frame")
+    {
+        return replace_text_frame_json_lossless(xml_bytes, shape_idx, value);
+    }
+
     let mut events = read_events(xml_bytes)?;
     let (shape_start, shape_end) =
         find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
@@ -315,6 +321,29 @@ pub fn replace_shape_property_lossless(
         .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
 
     edit_txbody_path(&mut events, txbody_start, txbody_end, remaining, value)?;
+    write_events(events)
+}
+
+/// Replace the entire text frame of a shape with rich content from a JSON
+/// `TextFrameDto` (paragraphs, runs, per-run fonts, hyperlinks, body properties).
+/// Only the `p:txBody` subtree is replaced; the rest of the shape is untouched.
+fn replace_text_frame_json_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let tf: crate::dto::TextFrameDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid text_frame JSON: {e}")))?;
+    let inner_xml = crate::dto::xml::txbody_to_xml(&tf);
+    let inner_events = read_events(inner_xml.as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+
+    events.splice(txbody_start + 1..txbody_end, inner_events);
     write_events(events)
 }
 
@@ -403,6 +432,364 @@ pub fn replace_picture_crop(
         events.insert(insert_at, Event::Empty(src));
     }
 
+    write_events(events)
+}
+
+// ---------------------------------------------------------------------------
+// Shape fill / outline (lossless)
+// ---------------------------------------------------------------------------
+
+const SHAPE_FILL_TAGS: [&[u8]; 6] = [
+    b"a:solidFill",
+    b"a:noFill",
+    b"a:gradFill",
+    b"a:blipFill",
+    b"a:pattFill",
+    b"a:grpFill",
+];
+
+const SPPR_LEADING_TAGS: [&[u8]; 3] = [b"a:xfrm", b"a:prstGeom", b"a:custGeom"];
+
+fn find_sppr_range(
+    events: &[Event<'_>],
+    shape_start: usize,
+    shape_end: usize,
+) -> Option<(usize, usize)> {
+    find_elem_range(events, b"p:spPr", shape_start).filter(|r| r.0 <= shape_end)
+}
+
+/// Compute the child index inside `p:spPr` where a fill/outline element should
+/// be inserted: after every direct child whose tag is in `after`, before any
+/// other child. Honors DrawingML child ordering (geometry, fill, line, effects).
+fn sppr_insert_slot(
+    events: &[Event<'_>],
+    sppr_start: usize,
+    sppr_end: usize,
+    after: &[&[u8]],
+) -> usize {
+    let mut slot = sppr_start + 1;
+    let mut i = sppr_start + 1;
+    while i < sppr_end {
+        match &events[i] {
+            Event::Start(e) => {
+                let name = e.name().as_ref().to_vec();
+                if after.contains(&name.as_slice())
+                    && let Some((_, re)) = find_elem_range(events, &name, i)
+                {
+                    slot = re + 1;
+                    i = re + 1;
+                    continue;
+                }
+                i += 1;
+            }
+            Event::Empty(e) => {
+                if after.contains(&e.name().as_ref()) {
+                    slot = i + 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    slot
+}
+
+fn fill_xml_events(fill: &crate::dto::FillDto) -> Vec<Event<'static>> {
+    if matches!(fill.fill_type, Some(crate::dto::FillType::NoFill)) {
+        return vec![Event::Empty(BytesStart::new("a:noFill"))];
+    }
+    let mut out = Vec::new();
+    out.push(Event::Start(BytesStart::new("a:solidFill")));
+    let color = fill.color.as_ref();
+    let (tag, val): (&str, &str) = match color {
+        Some(c) if c.rgb.is_some() => ("a:srgbClr", c.rgb.as_deref().unwrap()),
+        Some(c) if c.theme_color.is_some() => ("a:schemeClr", c.theme_color.as_deref().unwrap()),
+        _ => ("a:srgbClr", "4472C4"),
+    };
+    let mut clr = BytesStart::new(tag);
+    clr.push_attribute(("val", val));
+    out.push(Event::Empty(clr));
+    out.push(Event::End(BytesEnd::new("a:solidFill")));
+    out
+}
+
+fn outline_xml_events(outline: &crate::dto::OutlineDto) -> Vec<Event<'static>> {
+    if outline.width.is_none()
+        && outline.cap.is_none()
+        && outline.compound.is_none()
+        && outline.dash.is_none()
+        && outline.fill.is_none()
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut ln = BytesStart::new("a:ln");
+    if let Some(w) = outline.width {
+        ln.push_attribute(("w", w.to_string().as_str()));
+    }
+    if let Some(cap) = &outline.cap {
+        ln.push_attribute((
+            "cap",
+            match cap {
+                crate::dto::LineCap::Rnd => "rnd",
+                crate::dto::LineCap::Sq => "sq",
+                crate::dto::LineCap::Flat => "flat",
+            },
+        ));
+    }
+    if let Some(cmp) = &outline.compound {
+        ln.push_attribute((
+            "cmpd",
+            match cmp {
+                crate::dto::CompoundLine::Sng => "sng",
+                crate::dto::CompoundLine::Dbl => "dbl",
+                crate::dto::CompoundLine::ThickThin => "thickThin",
+                crate::dto::CompoundLine::ThinThick => "thinThick",
+                crate::dto::CompoundLine::Tri => "tri",
+            },
+        ));
+    }
+    out.push(Event::Start(ln));
+    if let Some(dash) = &outline.dash {
+        let mut d = BytesStart::new("a:prstDash");
+        d.push_attribute((
+            "val",
+            match dash {
+                crate::dto::LineDash::Solid => "solid",
+                crate::dto::LineDash::Dot => "dot",
+                crate::dto::LineDash::Dash => "dash",
+                crate::dto::LineDash::LgDash => "lgDash",
+                crate::dto::LineDash::DashDot => "dashDot",
+                crate::dto::LineDash::LgDashDot => "lgDashDot",
+                crate::dto::LineDash::LgDashDotDot => "lgDashDotDot",
+                crate::dto::LineDash::SysDash => "sysDash",
+                crate::dto::LineDash::SysDot => "sysDot",
+                crate::dto::LineDash::SysDashDot => "sysDashDot",
+                crate::dto::LineDash::SysDashDotDot => "sysDashDotDot",
+            },
+        ));
+        out.push(Event::Empty(d));
+    }
+    if let Some(fill) = &outline.fill {
+        out.extend(fill_xml_events(fill));
+    }
+    out.push(Event::End(BytesEnd::new("a:ln")));
+    out
+}
+
+fn color_dto_from_value(
+    rest: &[path::PathSegment],
+    value: &str,
+) -> AppResult<crate::dto::ColorFormatDto> {
+    let path::PathSegment::Field(name) = &rest[0] else {
+        return Err(AppError::PathParse(
+            "Expected color property name".to_string(),
+        ));
+    };
+    match name.as_str() {
+        "rgb" => Ok(crate::dto::ColorFormatDto {
+            color_type: Some(crate::dto::ColorType::Rgb),
+            rgb: Some(value.to_string()),
+            theme_color: None,
+            brightness: None,
+        }),
+        "theme_color" => Ok(crate::dto::ColorFormatDto {
+            color_type: Some(crate::dto::ColorType::Scheme),
+            rgb: None,
+            theme_color: Some(value.to_string()),
+            brightness: None,
+        }),
+        _ => Err(AppError::PathParse(format!(
+            "Unknown color property '{}'",
+            name.as_str()
+        ))),
+    }
+}
+
+fn parse_dto_enum<T: serde::de::DeserializeOwned>(value: &str) -> Option<T> {
+    serde_json::from_str(value)
+        .ok()
+        .or_else(|| serde_json::from_str(&format!("\"{value}\"")).ok())
+}
+
+fn fill_dto_from_value(rest: &[path::PathSegment], value: &str) -> AppResult<crate::dto::FillDto> {
+    if rest.is_empty() {
+        return serde_json::from_str(value)
+            .map_err(|e| AppError::InvalidValue(format!("Invalid fill JSON: {e}")));
+    }
+    let path::PathSegment::Field(name) = &rest[0] else {
+        return Err(AppError::PathParse(
+            "Expected fill property name".to_string(),
+        ));
+    };
+    match name.as_str() {
+        "type" => {
+            let t = parse_dto_enum::<crate::dto::FillType>(value)
+                .or(match value {
+                    "nofill" | "none" => Some(crate::dto::FillType::NoFill),
+                    _ => None,
+                })
+                .ok_or_else(|| AppError::InvalidValue(format!("Invalid fill type '{value}'")))?;
+            Ok(crate::dto::FillDto {
+                fill_type: Some(t),
+                color: None,
+                alpha: None,
+            })
+        }
+        "color" => {
+            let color = if rest.len() == 1 {
+                serde_json::from_str(value)
+                    .map_err(|e| AppError::InvalidValue(format!("Invalid color JSON: {e}")))?
+            } else {
+                color_dto_from_value(&rest[1..], value)?
+            };
+            Ok(crate::dto::FillDto {
+                fill_type: Some(crate::dto::FillType::Solid),
+                color: Some(color),
+                alpha: None,
+            })
+        }
+        _ => Err(AppError::PathParse(format!(
+            "Unknown fill property '{}'",
+            name.as_str()
+        ))),
+    }
+}
+
+fn outline_dto_from_value(
+    rest: &[path::PathSegment],
+    value: &str,
+) -> AppResult<crate::dto::OutlineDto> {
+    let mut outline = crate::dto::OutlineDto {
+        width: None,
+        cap: None,
+        compound: None,
+        dash: None,
+        fill: None,
+    };
+    if rest.is_empty() {
+        return serde_json::from_str(value)
+            .map_err(|e| AppError::InvalidValue(format!("Invalid outline JSON: {e}")));
+    }
+    let path::PathSegment::Field(name) = &rest[0] else {
+        return Err(AppError::PathParse(
+            "Expected outline property name".to_string(),
+        ));
+    };
+    match name.as_str() {
+        "width" => {
+            outline.width = Some(
+                value
+                    .parse()
+                    .map_err(|_| AppError::InvalidValue(format!("Invalid width '{value}'")))?,
+            );
+        }
+        "cap" => {
+            outline.cap = Some(
+                parse_dto_enum::<crate::dto::LineCap>(value)
+                    .ok_or_else(|| AppError::InvalidValue(format!("Invalid cap '{value}'")))?,
+            );
+        }
+        "compound" => {
+            outline.compound = Some(
+                parse_dto_enum::<crate::dto::CompoundLine>(value)
+                    .ok_or_else(|| AppError::InvalidValue(format!("Invalid compound '{value}'")))?,
+            );
+        }
+        "dash" => {
+            outline.dash = Some(
+                parse_dto_enum::<crate::dto::LineDash>(value)
+                    .ok_or_else(|| AppError::InvalidValue(format!("Invalid dash '{value}'")))?,
+            );
+        }
+        "fill" => {
+            let fill = if rest.len() == 1 {
+                fill_dto_from_value(&[], value)?
+            } else {
+                fill_dto_from_value(&rest[1..], value)?
+            };
+            outline.fill = Some(fill);
+        }
+        _ => {
+            return Err(AppError::PathParse(format!(
+                "Unknown outline property '{}'",
+                name.as_str()
+            )));
+        }
+    }
+    Ok(outline)
+}
+
+/// Set the fill of an existing shape (`fill`, `fill.type`, `fill.color`,
+/// `fill.color.rgb`, `fill.color.theme_color`). Only `p:sp`, `p:pic` and
+/// `p:cxnSp` have a fill; other shape types error.
+pub fn replace_shape_fill_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let rest = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "fill") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let fill = fill_dto_from_value(rest, value)?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (sppr_start, sppr_end) = find_sppr_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no properties element".to_string()))?;
+
+    remove_children_by_name(&mut events, sppr_start, sppr_end, &SHAPE_FILL_TAGS);
+
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (sppr_start, sppr_end) = find_sppr_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no properties element".to_string()))?;
+    let slot = sppr_insert_slot(&events, sppr_start, sppr_end, &SPPR_LEADING_TAGS);
+
+    for ev in fill_xml_events(&fill).into_iter().rev() {
+        events.insert(slot, ev);
+    }
+    write_events(events)
+}
+
+/// Set the outline (line) of an existing shape (`outline`, `outline.width`,
+/// `outline.dash`, `outline.cap`, `outline.compound`, `outline.fill`, …).
+pub fn replace_shape_outline_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let rest = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "outline") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let outline = outline_dto_from_value(rest, value)?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (sppr_start, sppr_end) = find_sppr_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no properties element".to_string()))?;
+
+    remove_children_by_name(&mut events, sppr_start, sppr_end, &[b"a:ln"]);
+
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (sppr_start, sppr_end) = find_sppr_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no properties element".to_string()))?;
+    let mut after: Vec<&[u8]> = SPPR_LEADING_TAGS.to_vec();
+    after.extend(SHAPE_FILL_TAGS);
+    let slot = sppr_insert_slot(&events, sppr_start, sppr_end, &after);
+
+    for ev in outline_xml_events(&outline).into_iter().rev() {
+        events.insert(slot, ev);
+    }
     write_events(events)
 }
 
@@ -883,6 +1270,14 @@ pub fn replace_table_cell_property_lossless(
     let (txbody_start, txbody_end) = find_elem_range(&events, b"a:txBody", cell_start)
         .filter(|r| r.0 <= cell_end)
         .ok_or_else(|| AppError::PathParse("Cell has no txBody".to_string()))?;
+
+    if rest.len() == 1 && matches!(&rest[0], path::PathSegment::Field(n) if n == "text_frame") {
+        let tf: crate::dto::TextFrameDto = serde_json::from_str(value)
+            .map_err(|e| AppError::InvalidValue(format!("Invalid text_frame JSON: {e}")))?;
+        let inner_events = read_events(crate::dto::xml::txbody_to_xml(&tf).as_bytes())?;
+        events.splice(txbody_start + 1..txbody_end, inner_events);
+        return write_events(events);
+    }
 
     edit_txbody_path(&mut events, txbody_start, txbody_end, rest, value)?;
     write_events(events)
@@ -2788,5 +3183,145 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert_eq!(out_str.matches("<a:gridCol").count(), 1, "got: {out_str}");
         assert_eq!(out_str.matches("<a:tc>").count(), 2, "got: {out_str}");
+    }
+
+    #[test]
+    fn fill_solid_replaces_gradient_and_preserves_rest() {
+        let path = path::parse_path("fill.color.rgb").unwrap();
+        let out = replace_shape_fill_lossless(SLIDE.as_bytes(), 0, &path, "0000FF").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains("gradFill"), "got: {out_str}");
+        assert!(
+            out_str.contains("<a:solidFill><a:srgbClr val=\"0000FF\"/></a:solidFill>"),
+            "got: {out_str}"
+        );
+        assert!(out_str.contains("<a:xfrm>"), "xfrm preserved");
+        assert!(out_str.contains("Hello"), "text preserved");
+    }
+
+    #[test]
+    fn fill_type_nofill() {
+        let path = path::parse_path("fill.type").unwrap();
+        let out = replace_shape_fill_lossless(SLIDE.as_bytes(), 0, &path, "no_fill").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains("gradFill"), "got: {out_str}");
+        assert!(out_str.contains("<a:noFill/>"), "got: {out_str}");
+        assert!(out_str.contains("Hello"), "text preserved");
+    }
+
+    #[test]
+    fn fill_type_nofill_alias() {
+        let path = path::parse_path("fill.type").unwrap();
+        let out = replace_shape_fill_lossless(SLIDE.as_bytes(), 0, &path, "nofill").unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("<a:noFill/>"));
+    }
+
+    #[test]
+    fn fill_theme_color_uses_scheme() {
+        let path = path::parse_path("fill.color.theme_color").unwrap();
+        let out = replace_shape_fill_lossless(SLIDE.as_bytes(), 0, &path, "accent1").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:solidFill><a:schemeClr val=\"accent1\"/></a:solidFill>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn fill_inserter_into_picture_sppr() {
+        let path = path::parse_path("fill.color.rgb").unwrap();
+        let out = replace_shape_fill_lossless(SLIDE.as_bytes(), 2, &path, "FF00AA").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<a:solidFill><a:srgbClr val=\"FF00AA\"/></a:solidFill>"),
+            "got: {out_str}"
+        );
+        assert!(out_str.contains("r:embed=\"rId5\""), "blipFill preserved");
+    }
+
+    #[test]
+    fn outline_creates_ln_with_attrs_and_fill() {
+        let path = path::parse_path("outline").unwrap();
+        let out = replace_shape_outline_lossless(
+            SLIDE.as_bytes(),
+            0,
+            &path,
+            r#"{"width":9525,"dash":"solid","fill":{"type":"solid","color":{"rgb":"000000"}}}"#,
+        )
+        .unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("a:ln w=\"9525\""), "got: {out_str}");
+        assert!(
+            out_str.contains("<a:prstDash val=\"solid\"/>"),
+            "got: {out_str}"
+        );
+        assert!(
+            out_str.contains("<a:solidFill><a:srgbClr val=\"000000\"/></a:solidFill>"),
+            "got: {out_str}"
+        );
+        assert!(out_str.contains("gradFill"), "shape fill preserved");
+        assert!(out_str.contains("Hello"), "text preserved");
+    }
+
+    #[test]
+    fn outline_leaf_width() {
+        let path = path::parse_path("outline.width").unwrap();
+        let out = replace_shape_outline_lossless(SLIDE.as_bytes(), 0, &path, "12700").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("a:ln w=\"12700\""), "got: {out_str}");
+        assert!(out_str.contains("gradFill"), "shape fill preserved");
+    }
+
+    #[test]
+    fn outline_replace_existing_ln() {
+        let path = path::parse_path("outline.width").unwrap();
+        let once = replace_shape_outline_lossless(SLIDE.as_bytes(), 0, &path, "9525").unwrap();
+        let twice = replace_shape_outline_lossless(&once, 0, &path, "12700").unwrap();
+        let out_str = String::from_utf8(twice).unwrap();
+        assert_eq!(out_str.matches("<a:ln").count(), 1, "got: {out_str}");
+        assert!(out_str.contains("w=\"12700\""), "got: {out_str}");
+        assert!(!out_str.contains("w=\"9525\""), "got: {out_str}");
+    }
+
+    #[test]
+    fn text_frame_whole_json_rich_content() {
+        let path = path::parse_path("text_frame").unwrap();
+        let value = r#"{"paragraphs":[{"runs":[{"text":"Hello","font":{"size":2400,"bold":true}}]},{"alignment":"CENTER","runs":[{"text":"World","font":{"italic":true}}]}]}"#;
+        let out = replace_shape_property_lossless(SLIDE.as_bytes(), 0, &path, value).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains(">Hello</a:t>"), "got: {out_str}");
+        assert!(out_str.contains(">World</a:t>"), "got: {out_str}");
+        assert!(
+            out_str.contains("sz=\"2400\""),
+            "per-run size, got: {out_str}"
+        );
+        assert!(out_str.contains("b=\"1\""), "per-run bold, got: {out_str}");
+        assert!(
+            out_str.contains("i=\"1\""),
+            "per-run italic, got: {out_str}"
+        );
+        assert!(
+            out_str.contains("algn=\"ctr\""),
+            "paragraph alignment, got: {out_str}"
+        );
+        assert!(out_str.contains("gradFill"), "spPr preserved");
+        assert!(out_str.contains("id=\"2\""), "shape identity preserved");
+    }
+
+    #[test]
+    fn table_cell_text_frame_whole_json() {
+        let path = path::parse_path("table.rows[0].cells[0].text_frame").unwrap();
+        let value = r#"{"paragraphs":[{"runs":[{"text":"NewCell","font":{"size":1800}}]}]}"#;
+        let out = replace_table_cell_property_lossless(SLIDE.as_bytes(), 1, &path, value).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("NewCell"), "got: {out_str}");
+        assert!(out_str.contains("sz=\"1800\""), "got: {out_str}");
+        assert!(out_str.contains(">Y<"), "other cell preserved");
+    }
+
+    #[test]
+    fn text_frame_json_rejects_non_object() {
+        let path = path::parse_path("text_frame").unwrap();
+        assert!(replace_shape_property_lossless(SLIDE.as_bytes(), 0, &path, "hello").is_err());
     }
 }

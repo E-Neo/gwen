@@ -488,3 +488,82 @@ fn add_picture_and_crop_roundtrip() {
     let shape_type = query(&out, "slides[0].shapes[1].shape_type");
     assert_eq!(shape_type, "PICTURE");
 }
+
+#[test]
+fn replace_fill_color_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("fill.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].fill.color.rgb",
+        "--value",
+        r#""FF0000""#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let fill = query(&out, "slides[0].shapes[0].fill");
+    assert_eq!(fill["type"], "solid");
+    assert_eq!(fill["color"]["rgb"], "FF0000");
+}
+
+#[test]
+fn replace_fill_type_nofill_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("fill_none.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].fill.type",
+        "--value",
+        r#""no_fill""#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let fill = query(&out, "slides[0].shapes[0].fill");
+    assert_eq!(fill["type"], "no_fill");
+}
+
+#[test]
+fn replace_outline_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("outline.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].outline.width",
+        "--value",
+        "12700",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let outline = query(&out, "slides[0].shapes[0].outline");
+    assert_eq!(outline["width"], 12700);
+}
+
+#[test]
+fn replace_text_frame_rich_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("rich_frame.pptx");
+    run_ok(&[
+        "replace",
+        fixture("two_slides.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].text_frame",
+        "--value",
+        r#"{"paragraphs":[{"runs":[{"text":"Hi","font":{"bold":true,"size":2000}}]},{"alignment":"CENTER","runs":[{"text":"There"}]}]}"#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let tf = query(&out, "slides[0].shapes[0].text_frame");
+    let paras = tf["paragraphs"].as_array().unwrap();
+    assert_eq!(paras.len(), 2);
+    assert_eq!(paras[0]["runs"][0]["text"], "Hi");
+    assert_eq!(paras[0]["runs"][0]["font"]["bold"], true);
+    assert_eq!(paras[0]["runs"][0]["font"]["size"], 2000);
+    assert_eq!(paras[1]["alignment"], "CENTER");
+    assert_eq!(paras[1]["runs"][0]["text"], "There");
+}
