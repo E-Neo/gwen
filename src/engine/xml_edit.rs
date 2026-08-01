@@ -170,6 +170,31 @@ fn copy_attrs(e: &BytesStart<'_>, key: &[u8], val: &str) -> BytesStart<'static> 
     elem
 }
 
+fn copy_attrs_all(e: &BytesStart<'_>) -> BytesStart<'static> {
+    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+    let mut elem = BytesStart::new(name);
+    for attr in e.attributes().flatten() {
+        let ak = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+        let av = String::from_utf8_lossy(&attr.value).to_string();
+        elem.push_attribute((ak.as_str(), av.as_str()));
+    }
+    elem
+}
+
+fn expand_empty_container(events: &mut Vec<Event<'static>>, s: usize, name: &[u8]) -> usize {
+    if let Event::Empty(e) = &events[s]
+        && e.name().as_ref() == name
+    {
+        events[s] = Event::Start(copy_attrs_all(e));
+        events.insert(
+            s + 1,
+            Event::End(BytesEnd::new(String::from_utf8_lossy(name).into_owned())),
+        );
+        return s + 1;
+    }
+    s + 1
+}
+
 fn is_whitespace_text(event: &Event<'_>) -> bool {
     let Event::Text(t) = event else {
         return false;
@@ -273,6 +298,9 @@ fn edit_txbody_path(
     }
 
     match &inner[0] {
+        path::PathSegment::Field(name) if name == "text" => {
+            edit_run_text_in_place(events, txbody_start, txbody_end, 0, 0, value)
+        }
         path::PathSegment::Field(name) if name == "paragraphs" => {
             if inner.len() < 2 {
                 return Err(AppError::PathParse("Paragraph index required".to_string()));
@@ -662,8 +690,9 @@ fn edit_txbody_prop_in_place(
                     events.remove(idx);
                 }
 
+                let insert_at = expand_empty_container(events, s, b"a:bodyPr");
                 let child_name_owned = String::from_utf8_lossy(child_name).to_string();
-                events.insert(s + 1, Event::Empty(BytesStart::new(child_name_owned)));
+                events.insert(insert_at, Event::Empty(BytesStart::new(child_name_owned)));
             } else {
                 let child_name_owned = String::from_utf8_lossy(child_name).to_string();
                 events.insert(txbody_start + 1, Event::End(BytesEnd::new("a:bodyPr")));
@@ -949,9 +978,10 @@ fn set_rpr_latin(
                 events[ls] = Event::Start(copy_attrs(orig, b"typeface", value));
             }
         } else {
+            let insert_at = expand_empty_container(events, s, b"a:rPr");
             let mut latin = BytesStart::new("a:latin");
             latin.push_attribute(("typeface", value));
-            events.insert(s + 1, Event::Empty(latin));
+            events.insert(insert_at, Event::Empty(latin));
         }
     } else {
         let rpr = BytesStart::new("a:rPr");
@@ -991,7 +1021,7 @@ fn set_rpr_color(
 ) {
     if let Some((s, e)) = *rpr_range {
         remove_solid_fill_children(events, s, e);
-        let insert_at = s + 1;
+        let insert_at = expand_empty_container(events, s, b"a:rPr");
         let color_events = color_xml_events(value);
         for (j, ev) in color_events.into_iter().enumerate() {
             events.insert(insert_at + j, ev);
@@ -1048,9 +1078,10 @@ fn set_end_rpr_latin(
                 events[ls] = Event::Start(copy_attrs(orig, b"typeface", value));
             }
         } else {
+            let insert_at = expand_empty_container(events, s, b"a:endParaRPr");
             let mut latin = BytesStart::new("a:latin");
             latin.push_attribute(("typeface", value));
-            events.insert(s + 1, Event::Empty(latin));
+            events.insert(insert_at, Event::Empty(latin));
         }
     } else {
         let rpr = BytesStart::new(elem_name);
@@ -1071,9 +1102,10 @@ fn set_end_rpr_color(
     let elem_name = "a:endParaRPr";
     if let Some((s, e)) = *rpr_range {
         remove_solid_fill_children(events, s, e);
+        let insert_at = expand_empty_container(events, s, b"a:endParaRPr");
         let color_events = color_xml_events(value);
         for (j, ev) in color_events.into_iter().enumerate() {
-            events.insert(s + 1 + j, ev);
+            events.insert(insert_at + j, ev);
         }
     } else {
         let rpr = BytesStart::new(elem_name);
@@ -1432,6 +1464,32 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("typeface=\"Arial\""));
         assert!(out_str.contains("gradFill"));
+    }
+
+    #[test]
+    fn font_color_expands_self_closing_rpr() {
+        let xml = SLIDE.as_bytes();
+        let path = path::parse_path("text_frame.paragraphs[0].runs[0].font.color").unwrap();
+        let out = replace_shape_property_lossless(xml, 0, &path, "FF0000").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        let snippet = out_str
+            .find("<a:rPr lang=\"en-US\" sz=\"1200\">")
+            .map(|i| &out_str[i..i + 90])
+            .expect("rPr must be expanded into a container");
+        assert!(
+            snippet.contains("<a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></a:rPr>"),
+            "solidFill must sit inside the rPr, got: {snippet}"
+        );
+    }
+
+    #[test]
+    fn table_cell_text_shorthand() {
+        let xml = SLIDE.as_bytes();
+        let path = path::parse_path("table.rows[0].cells[0].text").unwrap();
+        let out = replace_table_cell_property_lossless(xml, 1, &path, "Zed").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains(">Zed</a:t>"), "cell text updated");
+        assert!(out_str.contains("Y"), "other cell preserved");
     }
 
     #[test]
