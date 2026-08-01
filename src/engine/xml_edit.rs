@@ -6,7 +6,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use crate::error::{AppError, AppResult};
 use crate::path;
 
-fn read_events(xml_bytes: &[u8]) -> AppResult<Vec<Event<'static>>> {
+pub(crate) fn read_events(xml_bytes: &[u8]) -> AppResult<Vec<Event<'static>>> {
     let mut reader = Reader::from_reader(xml_bytes);
     let mut events = Vec::new();
     let mut buf = Vec::new();
@@ -20,7 +20,7 @@ fn read_events(xml_bytes: &[u8]) -> AppResult<Vec<Event<'static>>> {
     Ok(events)
 }
 
-fn write_events(events: Vec<Event<'static>>) -> AppResult<Vec<u8>> {
+pub(crate) fn write_events(events: Vec<Event<'static>>) -> AppResult<Vec<u8>> {
     let mut writer = Writer::new(Vec::new());
     for e in events {
         writer.write_event(e).map_err(AppError::Io)?;
@@ -1222,6 +1222,148 @@ fn remove_solid_fill_children(
     }
 }
 
+/// Map a snake_case core-property name to its element tag.
+fn core_prop_tag(name: &str) -> Option<&'static str> {
+    match name {
+        "title" => Some("dc:title"),
+        "subject" => Some("dc:subject"),
+        "author" => Some("dc:creator"),
+        "keywords" => Some("cp:keywords"),
+        "comments" => Some("dc:description"),
+        "last_modified_by" => Some("cp:lastModifiedBy"),
+        "revision" => Some("cp:revision"),
+        "created" => Some("dcterms:created"),
+        "modified" => Some("dcterms:modified"),
+        "category" => Some("cp:category"),
+        "content_status" => Some("cp:contentStatus"),
+        _ => None,
+    }
+}
+
+/// Map an element tag to its snake_case core-property name.
+pub fn core_prop_key(tag: &str) -> Option<&'static str> {
+    match tag {
+        "dc:title" => Some("title"),
+        "dc:subject" => Some("subject"),
+        "dc:creator" => Some("author"),
+        "cp:keywords" => Some("keywords"),
+        "dc:description" => Some("comments"),
+        "cp:lastModifiedBy" => Some("last_modified_by"),
+        "cp:revision" => Some("revision"),
+        "dcterms:created" => Some("created"),
+        "dcterms:modified" => Some("modified"),
+        "cp:category" => Some("category"),
+        "cp:contentStatus" => Some("content_status"),
+        _ => None,
+    }
+}
+
+/// Set the text of a core property in core.xml, creating the element if it
+/// is missing. The value is escaped for XML text content.
+pub fn replace_core_property(xml_bytes: &[u8], name: &str, value: &str) -> AppResult<Vec<u8>> {
+    let tag = core_prop_tag(name)
+        .ok_or_else(|| AppError::PathParse(format!("Unknown core property '{name}'")))?;
+
+    let mut events = read_events(xml_bytes)?;
+
+    // Find the cp:coreProperties root and its closing element.
+    let mut root_start: Option<usize> = None;
+    for (i, ev) in events.iter().enumerate() {
+        if let Event::Start(e) = ev
+            && e.name().as_ref() == b"cp:coreProperties"
+        {
+            root_start = Some(i);
+            break;
+        }
+    }
+    let root_start =
+        root_start.ok_or_else(|| AppError::PathParse("No cp:coreProperties root".to_string()))?;
+
+    let mut root_end: Option<usize> = None;
+    {
+        let mut depth = 0u32;
+        for (j, ev2) in events.iter().enumerate().skip(root_start) {
+            match ev2 {
+                Event::Start(_) => depth += 1,
+                Event::End(e2) => {
+                    depth = depth.saturating_sub(1);
+                    if e2.name().as_ref() == b"cp:coreProperties" && depth == 0 {
+                        root_end = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let root_end = root_end
+        .ok_or_else(|| AppError::PathParse("No cp:coreProperties root found".to_string()))?;
+
+    // Locate the property element (self-closing Empty, or Start..End).
+    let mut prop: Option<(usize, usize, bool)> = None;
+    {
+        let mut depth = 0u32;
+        let mut start: Option<usize> = None;
+        for j in (root_start + 1)..root_end {
+            match &events[j] {
+                Event::Start(e) => {
+                    if depth == 0 && e.name().as_ref() == tag.as_bytes() {
+                        start = Some(j);
+                    }
+                    depth += 1;
+                }
+                Event::Empty(e) if depth == 0 && e.name().as_ref() == tag.as_bytes() => {
+                    prop = Some((j, j, true));
+                    break;
+                }
+                Event::End(e) => {
+                    if let (Some(s), _) = (start, events.get(j))
+                        && depth == 1
+                        && e.name().as_ref() == tag.as_bytes()
+                    {
+                        prop = Some((s, j, false));
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let text_event = |value: &str| BytesText::from_escaped(escape(value.to_string()));
+
+    match prop {
+        Some((start, _end, true)) => {
+            // Self-closing element -> expand to start + text + end.
+            let Event::Empty(e) = events.remove(start) else {
+                unreachable!()
+            };
+            let name_str = String::from_utf8_lossy(e.name().as_ref()).to_string();
+            let mut start_elem = BytesStart::new(name_str.clone());
+            for a in e.attributes().flatten() {
+                start_elem.push_attribute((a.key.as_ref(), a.value.as_ref()));
+            }
+            events.insert(start, Event::End(BytesEnd::new(name_str)));
+            events.insert(start, Event::Text(text_event(value)));
+            events.insert(start, Event::Start(start_elem));
+        }
+        Some((start, end, false)) => {
+            // Replace the text content directly inside the element, inserting
+            // it if the element is currently empty.
+            replace_text_in_range(&mut events, start, end, value);
+        }
+        None => {
+            // Insert a new element just before the root's closing tag.
+            events.insert(root_end, Event::End(BytesEnd::new(tag.to_string())));
+            events.insert(root_end, Event::Text(text_event(value)));
+            events.insert(root_end, Event::Start(BytesStart::new(tag.to_string())));
+        }
+    }
+
+    write_events(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1452,5 +1594,38 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("<a:t>C</a:t>"), "got: {out_str}");
         assert!(!out_str.contains("amp;"));
+    }
+
+    #[test]
+    fn core_property_creates_element_when_absent() {
+        let xml = r#"<cp:coreProperties xmlns:cp="x" xmlns:dc="y"><dc:title/></cp:coreProperties>"#;
+        let out = replace_core_property(xml.as_bytes(), "author", "alice").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<dc:creator>alice</dc:creator>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn core_property_expands_self_closing_element() {
+        let xml = r#"<cp:coreProperties xmlns:cp="x" xmlns:dc="y"><dc:title/></cp:coreProperties>"#;
+        let out = replace_core_property(xml.as_bytes(), "title", "My Deck").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<dc:title>My Deck</dc:title>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn core_property_replaces_existing_text() {
+        let xml = r#"<cp:coreProperties xmlns:cp="x" xmlns:dcterms="z" xmlns:xsi="y"><dcterms:created xsi:type="dcterms:W3CDTF">2020-01-01T00:00:00Z</dcterms:created></cp:coreProperties>"#;
+        let out = replace_core_property(xml.as_bytes(), "created", "2024-05-01T10:30:00Z").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains("<dcterms:created xsi:type=\"dcterms:W3CDTF\">2024-05-01T10:30:00Z</dcterms:created>"),
+            "got: {out_str}"
+        );
     }
 }

@@ -156,12 +156,35 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
 
     match &resolved {
         path::ResolvedPath::Presentation { .. } => {
-            let pres_data = pkg
-                .get_part("ppt/presentation.xml")
-                .ok_or(AppError::PartNotFound("ppt/presentation.xml".to_string()))?
-                .to_vec();
-            let new_data = editor::replace_presentation_property(&pres_data, remaining, value)?;
-            pkg.set_part("ppt/presentation.xml", new_data);
+            if matches!(
+                remaining.first(),
+                Some(path::PathSegment::Field(n)) if n == "core_properties"
+            ) {
+                let prop = match remaining.get(1) {
+                    Some(path::PathSegment::Field(name)) => name.as_str(),
+                    _ => {
+                        return Err(AppError::PathParse(
+                            "core_properties requires a property name (e.g. core_properties.title)"
+                                .to_string(),
+                        ));
+                    }
+                };
+                let core_data = pkg
+                    .get_part("docProps/core.xml")
+                    .ok_or(AppError::PartNotFound("docProps/core.xml".to_string()))?
+                    .to_vec();
+                let scalar = scalar_string(value);
+                let new_core =
+                    crate::engine::xml_edit::replace_core_property(&core_data, prop, &scalar)?;
+                pkg.set_part("docProps/core.xml", new_core);
+            } else {
+                let pres_data = pkg
+                    .get_part("ppt/presentation.xml")
+                    .ok_or(AppError::PartNotFound("ppt/presentation.xml".to_string()))?
+                    .to_vec();
+                let new_data = editor::replace_presentation_property(&pres_data, remaining, value)?;
+                pkg.set_part("ppt/presentation.xml", new_data);
+            }
         }
         path::ResolvedPath::Slide {
             slide_idx: Some(slide_idx),

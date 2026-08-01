@@ -147,6 +147,29 @@ fn resolve_target(pkg: &Package, path_str: &str) -> AppResult<ResolvedTarget> {
     })
 }
 
+/// Resolve a path to a slide index if it names a whole slide (`slides[N]`).
+/// Returns `Ok(None)` for paths that target shapes or properties.
+fn resolve_slide_path(pkg: &Package, path_str: &str) -> AppResult<Option<usize>> {
+    let pres_part = pkg
+        .get_part("ppt/presentation.xml")
+        .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml".to_string()))?;
+    let pres_rels = pkg
+        .get_rels("ppt/presentation.xml")
+        .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml rels".to_string()))?;
+    let mut pres = Presentation::parse(pres_part)?;
+    pres.slide_uris = pres.resolve_slide_uris(pres_rels);
+
+    let segments = path::parse_path(path_str)?;
+    let resolved = path::resolve_path(&segments)?;
+    match &resolved {
+        path::ResolvedPath::Slide {
+            slide_idx: Some(i),
+            remaining,
+        } if remaining.is_empty() => Ok(Some(*i)),
+        _ => Ok(None),
+    }
+}
+
 pub fn copy_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
     let src = resolve_target(&pkg, from_path)?;
@@ -204,6 +227,22 @@ pub fn copy_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> 
 
 pub fn move_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
+
+    // Slide-level move: reorder slides within the presentation.
+    if let (Some(from_idx), Some(to_idx)) = (
+        resolve_slide_path(&pkg, from_path)?,
+        resolve_slide_path(&pkg, to_path)?,
+    ) {
+        let pres_data = pkg
+            .get_part("ppt/presentation.xml")
+            .ok_or(AppError::PartNotFound("ppt/presentation.xml".to_string()))?
+            .to_vec();
+        let new_pres = editor::reorder_slide(&pres_data, from_idx, to_idx)?;
+        pkg.set_part("ppt/presentation.xml", new_pres);
+        pkg.save(Path::new(output))?;
+        return Ok(());
+    }
+
     let src = resolve_target(&pkg, from_path)?;
     let dst = resolve_target(&pkg, to_path)?;
 

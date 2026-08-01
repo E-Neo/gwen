@@ -4,6 +4,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::model::core_props;
 use crate::model::notes;
 use crate::model::presentation::Presentation;
 use crate::model::slide;
@@ -112,10 +113,16 @@ pub fn execute(
                     Ok(json!({ "shapes": shapes }))
                 })
                 .collect::<AppResult<Vec<_>>>()?;
+            let core = pkg
+                .get_part("docProps/core.xml")
+                .map(core_props::parse_core_properties)
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
             json!({
                 "slide_width": pres.slide_width,
                 "slide_height": pres.slide_height,
                 "slides": slides,
+                "core_properties": core,
             })
         }
         path::ResolvedPath::Slide { slide_idx, .. } => match slide_idx {

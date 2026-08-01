@@ -1451,6 +1451,44 @@ pub fn remove_slide_from_presentation(
     Ok((writer.into_inner(), removed_r_id))
 }
 
+/// Reorder slides in the presentation by moving the slide at `from_idx` to
+/// position `to_idx` (0-based in the final list). Returns the rewritten
+/// presentation.xml.
+pub fn reorder_slide(xml_bytes: &[u8], from_idx: usize, to_idx: usize) -> AppResult<Vec<u8>> {
+    let events = crate::engine::xml_edit::read_events(xml_bytes)?;
+
+    let mut sld_ids: Vec<usize> = Vec::new();
+    for (i, ev) in events.iter().enumerate() {
+        if matches!(ev, Event::Empty(e) if e.name().as_ref() == b"p:sldId") {
+            sld_ids.push(i);
+        }
+    }
+
+    let n = sld_ids.len();
+    if from_idx >= n {
+        return Err(AppError::SlideIndexOutOfBounds(from_idx));
+    }
+    if to_idx >= n {
+        return Err(AppError::SlideIndexOutOfBounds(to_idx));
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    let el = order.remove(from_idx);
+    order.insert(to_idx, el);
+
+    let first = sld_ids.first().copied().unwrap();
+    let last = sld_ids.last().copied().unwrap();
+
+    let mut new_events: Vec<Event<'static>> = Vec::new();
+    new_events.extend_from_slice(&events[..first]);
+    for idx in order {
+        new_events.push(events[sld_ids[idx]].clone());
+    }
+    new_events.extend_from_slice(&events[last + 1..]);
+
+    crate::engine::xml_edit::write_events(new_events)
+}
+
 pub fn insert_slide_into_presentation(
     xml_bytes: &[u8],
     insert_after_idx: usize,
@@ -1543,4 +1581,46 @@ pub fn insert_slide_into_presentation(
         }
     }
     Ok(writer.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reorder_slide;
+
+    fn order(pres_xml: &[u8]) -> Vec<u32> {
+        let mut reader = quick_xml::Reader::from_reader(pres_xml);
+        let mut buf = Vec::new();
+        let mut ids = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Empty(e)) if e.name().as_ref() == b"p:sldId" => {
+                    for a in e.attributes().flatten() {
+                        if a.key.as_ref() == b"id" {
+                            ids.push(String::from_utf8_lossy(&a.value).parse().unwrap());
+                        }
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                _ => {}
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn reorders_slides() {
+        let xml = r#"<p:presentation xmlns:p="x" xmlns:r="y"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst></p:presentation>"#;
+        let out = reorder_slide(xml.as_bytes(), 2, 0).unwrap();
+        assert_eq!(order(&out), vec![258, 256, 257]);
+
+        let out = reorder_slide(&out, 0, 2).unwrap();
+        assert_eq!(order(&out), vec![256, 257, 258]);
+    }
+
+    #[test]
+    fn reorder_noop_with_single_slide() {
+        let xml = r#"<p:presentation xmlns:p="x" xmlns:r="y"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let out = reorder_slide(xml.as_bytes(), 0, 0).unwrap();
+        assert_eq!(order(&out), vec![256]);
+    }
 }
