@@ -63,6 +63,15 @@ fn parse_shapes(
     Ok(shapes.into_iter().map(|s| json!(s)).collect())
 }
 
+fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<serde_json::Value> {
+    let shapes = parse_shapes(pkg, uri, media_dir)?;
+    let part_data = pkg
+        .get_part(uri)
+        .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
+    let background = crate::engine::xml_edit::parse_slide_background(part_data);
+    Ok(json!({ "shapes": shapes, "background": background }))
+}
+
 fn navigate_json(
     value: &serde_json::Value,
     segments: &[path::PathSegment],
@@ -108,10 +117,7 @@ pub fn execute(
             let slides = pres
                 .slide_uris
                 .iter()
-                .map(|uri| {
-                    let shapes = parse_shapes(&pkg, uri, media_dir)?;
-                    Ok(json!({ "shapes": shapes }))
-                })
+                .map(|uri| slide_json(&pkg, uri, media_dir))
                 .collect::<AppResult<Vec<_>>>()?;
             let core = pkg
                 .get_part("docProps/core.xml")
@@ -130,10 +136,7 @@ pub fn execute(
                 let slides = pres
                     .slide_uris
                     .iter()
-                    .map(|uri| {
-                        let shapes = parse_shapes(&pkg, uri, media_dir)?;
-                        Ok(json!({ "shapes": shapes }))
-                    })
+                    .map(|uri| slide_json(&pkg, uri, media_dir))
                     .collect::<AppResult<Vec<_>>>()?;
                 json!(slides)
             }
@@ -142,8 +145,7 @@ pub fn execute(
                     .slide_uris
                     .get(*idx)
                     .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
-                let shapes = parse_shapes(&pkg, uri, media_dir)?;
-                json!({ "shapes": shapes })
+                slide_json(&pkg, uri, media_dir)?
             }
         },
         path::ResolvedPath::Shape {

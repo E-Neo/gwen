@@ -208,6 +208,39 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 let scalar = scalar_string(value);
                 let new_data = editor::replace_shape_attr(&part_data, 0, remaining, &scalar)?;
                 pkg.set_part(slide_uri, new_data);
+            } else if first_prop == "background" {
+                match remaining.get(1).and_then(|s| {
+                    if let path::PathSegment::Field(name) = s {
+                        Some(name.as_str())
+                    } else {
+                        None
+                    }
+                }) {
+                    Some("fill") => match remaining.get(2).and_then(|s| {
+                        if let path::PathSegment::Field(name) = s {
+                            Some(name.as_str())
+                        } else {
+                            None
+                        }
+                    }) {
+                        Some("color") => {
+                            let scalar = scalar_string(value);
+                            let new_data =
+                                crate::engine::xml_edit::set_slide_background(&part_data, &scalar)?;
+                            pkg.set_part(slide_uri, new_data);
+                        }
+                        other => {
+                            return Err(AppError::PathParse(format!(
+                                "Unsupported background property '{other:?}'"
+                            )));
+                        }
+                    },
+                    other => {
+                        return Err(AppError::PathParse(format!(
+                            "Unsupported background path '{other:?}'"
+                        )));
+                    }
+                }
             } else {
                 return Err(AppError::PathParse(format!(
                     "Unsupported slide property '{first_prop}'"

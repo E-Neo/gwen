@@ -3,6 +3,8 @@ use quick_xml::Writer;
 use quick_xml::escape::escape;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
+use serde_json::json;
+
 use crate::error::{AppError, AppResult};
 use crate::path;
 
@@ -1396,6 +1398,136 @@ pub fn replace_core_property(xml_bytes: &[u8], name: &str, value: &str) -> AppRe
     write_events(events)
 }
 
+const BG_FILL_TAGS: [&[u8]; 7] = [
+    b"a:solidFill",
+    b"a:noFill",
+    b"a:gradFill",
+    b"a:blipFill",
+    b"a:pattFill",
+    b"a:grpFill",
+    b"a:bgFill",
+];
+
+fn remove_children_by_name(
+    events: &mut Vec<Event<'static>>,
+    parent_start: usize,
+    parent_end: usize,
+    names: &[&[u8]],
+) {
+    let mut to_remove: Vec<usize> = Vec::new();
+    let mut i = parent_start + 1;
+    while i < parent_end {
+        if let Event::Start(e) = &events[i]
+            && names.contains(&e.name().as_ref())
+            && let Some(range) = find_elem_range(events, e.name().as_ref(), i)
+        {
+            for j in (range.0..=range.1).rev() {
+                to_remove.push(j);
+            }
+            i = range.1 + 1;
+            continue;
+        } else if let Event::Empty(e) = &events[i]
+            && names.contains(&e.name().as_ref())
+        {
+            to_remove.push(i);
+        }
+        i += 1;
+    }
+    to_remove.sort_unstable();
+    to_remove.dedup();
+    for j in to_remove.into_iter().rev() {
+        events.remove(j);
+    }
+}
+
+pub fn set_slide_background(xml_bytes: &[u8], color: &str) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+
+    let csld_start = events
+        .iter()
+        .position(|e| matches!(e, Event::Start(ev) if ev.name().as_ref() == b"p:cSld"))
+        .ok_or_else(|| AppError::PathParse("No p:cSld found in slide".to_string()))?;
+
+    let fill_events = color_xml_events(color);
+
+    let bg_range = find_elem_range(&events, b"p:bg", csld_start);
+
+    if let Some((bs, be)) = bg_range {
+        let bgpr = find_elem_range(&events, b"p:bgPr", bs).filter(|r| r.0 <= be);
+        match bgpr {
+            Some((ps, pe)) => {
+                remove_children_by_name(&mut events, ps, pe, &BG_FILL_TAGS);
+                for (j, ev) in fill_events.into_iter().enumerate() {
+                    events.insert(ps + 1 + j, ev);
+                }
+            }
+            None => {
+                remove_children_by_name(&mut events, bs, be, &[b"p:bgRef"]);
+                events.insert(bs + 1, Event::End(BytesEnd::new("p:bgPr")));
+                for ev in fill_events.into_iter().rev() {
+                    events.insert(bs + 1, ev);
+                }
+                events.insert(bs + 1, Event::Start(BytesStart::new("p:bgPr")));
+            }
+        }
+    } else {
+        events.insert(csld_start + 1, Event::End(BytesEnd::new("p:bg")));
+        events.insert(csld_start + 1, Event::End(BytesEnd::new("p:bgPr")));
+        for ev in fill_events.into_iter().rev() {
+            events.insert(csld_start + 1, ev);
+        }
+        events.insert(csld_start + 1, Event::Start(BytesStart::new("p:bgPr")));
+        events.insert(csld_start + 1, Event::Start(BytesStart::new("p:bg")));
+    }
+
+    write_events(events)
+}
+
+pub fn parse_slide_background(xml_bytes: &[u8]) -> serde_json::Value {
+    let events = match read_events(xml_bytes) {
+        Ok(e) => e,
+        Err(_) => return serde_json::Value::Null,
+    };
+    let csld_start = match events
+        .iter()
+        .position(|e| matches!(e, Event::Start(ev) if ev.name().as_ref() == b"p:cSld"))
+    {
+        Some(i) => i,
+        None => return serde_json::Value::Null,
+    };
+    let Some((bs, be)) = find_elem_range(&events, b"p:bg", csld_start) else {
+        return json!({ "fill": { "type": serde_json::Value::Null } });
+    };
+    if let Some((ps, pe)) = find_elem_range(&events, b"p:bgPr", bs).filter(|r| r.0 <= be) {
+        if let Some((fs, fe)) = find_elem_range(&events, b"a:solidFill", ps).filter(|r| r.0 <= pe) {
+            let color = (fs..=fe)
+                .find(|&i| {
+                    matches!(&events[i], Event::Empty(e) | Event::Start(e) if e.name().as_ref() == b"a:srgbClr")
+                })
+                .and_then(|i| {
+                    let (Event::Empty(e) | Event::Start(e)) = &events[i] else {
+                        return None;
+                    };
+                    e.attributes()
+                        .flatten()
+                        .find(|a| a.key.as_ref() == b"val")
+                        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+                });
+            return json!({
+                "fill": {
+                    "type": "SOLID",
+                    "color": color.unwrap_or_default(),
+                }
+            });
+        }
+        return json!({ "fill": { "type": "GRADIENT" } });
+    }
+    if find_elem_range(&events, b"p:bgRef", bs).is_some_and(|r| r.0 <= be) {
+        return json!({ "fill": { "type": "THEME" } });
+    }
+    json!({ "fill": { "type": serde_json::Value::Null } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1440,6 +1572,47 @@ mod tests {
         let tx = find_txbody_range(&events, s, e).unwrap();
         assert!(matches!(&events[tx.0], Event::Start(ev) if ev.name().as_ref() == b"p:txBody"));
         println!("shape={s}..={e} txbody={tx:?}");
+    }
+
+    #[test]
+    fn background_inserted_when_absent() {
+        let out = set_slide_background(SLIDE.as_bytes(), "FF0000").unwrap();
+        let parsed = parse_slide_background(&out);
+        assert_eq!(parsed["fill"]["type"], "SOLID");
+        assert_eq!(parsed["fill"]["color"], "FF0000");
+        let out_str = String::from_utf8(out).unwrap();
+        let bg = out_str
+            .find("<p:bg>")
+            .map(|i| &out_str[i..i + 100])
+            .expect("p:bg must be inserted");
+        assert!(
+            bg.contains(
+                "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></p:bgPr></p:bg>"
+            ),
+            "got: {bg}"
+        );
+        assert!(out_str.contains("<p:spTree>"), "spTree preserved");
+    }
+
+    #[test]
+    fn background_replaced_when_present() {
+        let first = set_slide_background(SLIDE.as_bytes(), "FF0000").unwrap();
+        let second = set_slide_background(&first, "0000FF").unwrap();
+        let parsed = parse_slide_background(&second);
+        assert_eq!(parsed["fill"]["color"], "0000FF");
+        let out_str = String::from_utf8(second).unwrap();
+        let bg = out_str
+            .find("<p:bg>")
+            .map(|i| &out_str[i..out_str.find("</p:bg>").unwrap() + 7])
+            .unwrap();
+        assert_eq!(bg.matches("a:srgbClr").count(), 1, "only one fill in bg");
+        assert!(bg.contains("val=\"0000FF\""));
+    }
+
+    #[test]
+    fn background_none_when_missing() {
+        let parsed = parse_slide_background(SLIDE.as_bytes());
+        assert!(parsed["fill"]["type"].is_null());
     }
 
     #[test]
