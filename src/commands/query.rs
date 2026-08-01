@@ -4,6 +4,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::model::notes;
 use crate::model::presentation::Presentation;
 use crate::model::slide;
 use crate::opc::Package;
@@ -148,6 +149,46 @@ pub fn execute(
                 .get(*slide_idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
             let shapes = parse_shapes(&pkg, uri, media_dir)?;
+            match shape_idx {
+                None => json!(shapes),
+                Some(idx) => shapes
+                    .get(*idx)
+                    .ok_or(AppError::ShapeIndexOutOfBounds(*idx))?
+                    .clone(),
+            }
+        }
+        path::ResolvedPath::Notes {
+            slide_idx: Some(idx),
+            ..
+        } => {
+            let slide_uri = pres
+                .slide_uris
+                .get(*idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
+            let notes_uri = notes::resolve_notes_uri(&pkg, slide_uri)
+                .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?;
+            let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
+            json!({ "shapes": shapes })
+        }
+        path::ResolvedPath::Notes {
+            slide_idx: None, ..
+        } => {
+            return Err(AppError::PathParse(
+                "Slide index required (e.g. p.slides[0].notes)".to_string(),
+            ));
+        }
+        path::ResolvedPath::NotesShape {
+            slide_idx,
+            shape_idx,
+            ..
+        } => {
+            let slide_uri = pres
+                .slide_uris
+                .get(*slide_idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
+            let notes_uri = notes::resolve_notes_uri(&pkg, slide_uri)
+                .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?;
+            let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
             match shape_idx {
                 None => json!(shapes),
                 Some(idx) => shapes

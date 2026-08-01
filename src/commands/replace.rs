@@ -44,6 +44,91 @@ fn resolve_chart_part(pkg: &Package, slide_uri: &str, shape_idx: usize) -> AppRe
     Ok(parts.join("/"))
 }
 
+/// Decode a `--value` into the plain string form the editors expect.
+///
+/// `--value` is JSON, so `'"world"'` (a JSON string) must become `world` and
+/// `1200` (a JSON number) must become `1200`. Values that are not valid JSON
+/// are passed through untouched for backwards compatibility.
+fn scalar_string(value: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(serde_json::Value::String(s)) => s,
+        Ok(serde_json::Value::Number(n)) => n.to_string(),
+        Ok(serde_json::Value::Bool(b)) => b.to_string(),
+        Ok(serde_json::Value::Null) => String::new(),
+        _ => value.to_string(),
+    }
+}
+
+/// Replace a property of a single shape. `container_uri` is the part holding
+/// the shape (a slide or a notes slide).
+fn replace_shape_properties(
+    pkg: &mut Package,
+    container_uri: &str,
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<()> {
+    let part_data = pkg
+        .get_part(container_uri)
+        .ok_or_else(|| AppError::PartNotFound(container_uri.to_string()))?
+        .to_vec();
+
+    let scalar = scalar_string(value);
+
+    let first_seg = remaining.first().and_then(|s| {
+        if let path::PathSegment::Field(name) = s {
+            Some(name.as_str())
+        } else {
+            None
+        }
+    });
+
+    const SHAPE_ATTRS: [&str; 6] = ["left", "top", "width", "height", "rotation", "name"];
+
+    match (first_seg, remaining.len()) {
+        (Some("text"), 1) => {
+            let new_data = editor::replace_shape_text(&part_data, shape_idx, "text", &scalar)?;
+            pkg.set_part(container_uri, new_data);
+        }
+        (Some(name), 1) if SHAPE_ATTRS.contains(&name) => {
+            let new_data = editor::replace_shape_attr(&part_data, shape_idx, remaining, &scalar)?;
+            pkg.set_part(container_uri, new_data);
+        }
+        (Some("text_frame"), _) => {
+            let new_data = crate::engine::xml_edit::replace_shape_property_lossless(
+                &part_data, shape_idx, remaining, &scalar,
+            )?;
+            pkg.set_part(container_uri, new_data);
+        }
+        (Some("table"), n) if n >= 2 => {
+            let new_data = crate::engine::xml_edit::replace_table_cell_property_lossless(
+                &part_data, shape_idx, remaining, &scalar,
+            )?;
+            pkg.set_part(container_uri, new_data);
+        }
+        (Some("chart"), n) if n >= 2 => {
+            // Chart data lives in a separate OPC part; route through package
+            let chart_part_uri = resolve_chart_part(pkg, container_uri, shape_idx)?;
+            let chart_data = pkg
+                .get_part(&chart_part_uri)
+                .ok_or_else(|| AppError::PartNotFound(chart_part_uri.clone()))?
+                .to_vec();
+            let new_chart_data = crate::engine::xml_edit::replace_chart_property_lossless(
+                &chart_data,
+                remaining,
+                &scalar,
+            )?;
+            pkg.set_part(&chart_part_uri, new_chart_data);
+        }
+        _ => {
+            // Fallback: lossy txBody round-trip for unknown paths
+            let new_data = editor::replace_shape_property(&part_data, shape_idx, remaining, value)?;
+            pkg.set_part(container_uri, new_data);
+        }
+    }
+    Ok(())
+}
+
 pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
 
@@ -97,7 +182,8 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
             };
             let attr_attrs = ["name", "left", "top", "width", "height", "rotation"];
             if attr_attrs.contains(&first_prop) {
-                let new_data = editor::replace_shape_attr(&part_data, 0, remaining, value)?;
+                let scalar = scalar_string(value);
+                let new_data = editor::replace_shape_attr(&part_data, 0, remaining, &scalar)?;
                 pkg.set_part(slide_uri, new_data);
             } else {
                 return Err(AppError::PathParse(format!(
@@ -121,60 +207,7 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 .slide_uris
                 .get(*slide_idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
-            let part_data = pkg
-                .get_part(slide_uri)
-                .ok_or(AppError::PartNotFound(slide_uri.to_string()))?
-                .to_vec();
-
-            let first_seg = remaining.first().and_then(|s| {
-                if let path::PathSegment::Field(name) = s {
-                    Some(name.as_str())
-                } else {
-                    None
-                }
-            });
-
-            const SHAPE_ATTRS: [&str; 6] = ["left", "top", "width", "height", "rotation", "name"];
-
-            let new_data = match (first_seg, remaining.len()) {
-                (Some("text"), 1) => {
-                    editor::replace_shape_text(&part_data, *shape_idx, "text", value)?
-                }
-                (Some(name), 1) if SHAPE_ATTRS.contains(&name) => {
-                    editor::replace_shape_attr(&part_data, *shape_idx, remaining, value)?
-                }
-                (Some("text_frame"), _) => {
-                    crate::engine::xml_edit::replace_shape_property_lossless(
-                        &part_data, *shape_idx, remaining, value,
-                    )?
-                }
-                (Some("table"), n) if n >= 2 => {
-                    crate::engine::xml_edit::replace_table_cell_property_lossless(
-                        &part_data, *shape_idx, remaining, value,
-                    )?
-                }
-                (Some("chart"), n) if n >= 2 => {
-                    // Chart data lives in a separate OPC part; route through package
-                    let chart_part_uri = resolve_chart_part(&pkg, slide_uri, *shape_idx)?;
-                    let chart_data = pkg
-                        .get_part(&chart_part_uri)
-                        .ok_or_else(|| AppError::PartNotFound(chart_part_uri.clone()))?
-                        .to_vec();
-                    let new_chart_data = crate::engine::xml_edit::replace_chart_property_lossless(
-                        &chart_data,
-                        remaining,
-                        value,
-                    )?;
-                    pkg.set_part(&chart_part_uri, new_chart_data);
-                    // Return original slide data unchanged
-                    part_data.clone()
-                }
-                _ => {
-                    // Fallback: lossy txBody round-trip for unknown paths
-                    editor::replace_shape_property(&part_data, *shape_idx, remaining, value)?
-                }
-            };
-            pkg.set_part(slide_uri, new_data);
+            replace_shape_properties(&mut pkg, slide_uri, *shape_idx, remaining, value)?;
         }
         path::ResolvedPath::Shape {
             shape_idx: None, ..
@@ -183,8 +216,68 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 "Shape index required (e.g. p.slides[0].shapes[0])".to_string(),
             ));
         }
+        path::ResolvedPath::Notes {
+            slide_idx: Some(_), ..
+        } => {
+            return Err(AppError::PathParse(
+                "Notes-level property replacement not supported; use slides[N].notes.shapes[M]"
+                    .to_string(),
+            ));
+        }
+        path::ResolvedPath::Notes {
+            slide_idx: None, ..
+        } => {
+            return Err(AppError::PathParse(
+                "Slide index required (e.g. p.slides[0].notes)".to_string(),
+            ));
+        }
+        path::ResolvedPath::NotesShape {
+            slide_idx,
+            shape_idx: Some(shape_idx),
+            ..
+        } => {
+            let slide_uri = pres
+                .slide_uris
+                .get(*slide_idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
+            let notes_uri = crate::model::notes::resolve_notes_uri(&pkg, slide_uri)
+                .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?;
+            replace_shape_properties(&mut pkg, &notes_uri, *shape_idx, remaining, value)?;
+        }
+        path::ResolvedPath::NotesShape {
+            shape_idx: None, ..
+        } => {
+            return Err(AppError::PathParse(
+                "Shape index required (e.g. p.slides[0].notes.shapes[0])".to_string(),
+            ));
+        }
     }
 
     pkg.save(Path::new(output))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar_string;
+
+    #[test]
+    fn decodes_json_strings() {
+        assert_eq!(scalar_string("\"world\""), "world");
+        assert_eq!(scalar_string("\"a & b\""), "a & b");
+    }
+
+    #[test]
+    fn decodes_json_numbers_and_bools() {
+        assert_eq!(scalar_string("1200"), "1200");
+        assert_eq!(scalar_string("42.5"), "42.5");
+        assert_eq!(scalar_string("true"), "true");
+        assert_eq!(scalar_string("null"), "");
+    }
+
+    #[test]
+    fn passes_through_non_json() {
+        assert_eq!(scalar_string("plain text"), "plain text");
+        assert_eq!(scalar_string(""), "");
+    }
 }

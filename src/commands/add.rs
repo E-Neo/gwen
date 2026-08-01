@@ -33,15 +33,44 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         }
     }
 
-    let slide_idx = resolved.slide_index()?;
-    let slide_uri = pres
-        .slide_uris
-        .get(slide_idx)
-        .ok_or(AppError::SlideIndexOutOfBounds(slide_idx))?;
+    // Determine the part that owns the shapes being targeted: a slide or a
+    // notes slide.
+    let container_uri = match &resolved {
+        path::ResolvedPath::Notes {
+            slide_idx: Some(_), ..
+        } => {
+            return Err(AppError::PathParse(
+                "Adding a notes slide is not supported; use slides[N].notes.shapes to add a shape"
+                    .to_string(),
+            ));
+        }
+        path::ResolvedPath::Notes {
+            slide_idx: None, ..
+        } => {
+            return Err(AppError::PathParse(
+                "Slide index required (e.g. p.slides[0].notes)".to_string(),
+            ));
+        }
+        path::ResolvedPath::NotesShape { slide_idx, .. } => {
+            let slide_uri = pres
+                .slide_uris
+                .get(*slide_idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
+            crate::model::notes::resolve_notes_uri(&pkg, slide_uri)
+                .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?
+        }
+        _ => {
+            let slide_idx = resolved.slide_index()?;
+            pres.slide_uris
+                .get(slide_idx)
+                .ok_or(AppError::SlideIndexOutOfBounds(slide_idx))?
+                .clone()
+        }
+    };
 
     let part_data = pkg
-        .get_part(slide_uri)
-        .ok_or_else(|| AppError::PartNotFound(slide_uri.to_string()))?
+        .get_part(&container_uri)
+        .ok_or_else(|| AppError::PartNotFound(container_uri.clone()))?
         .to_vec();
 
     if remaining.len() >= 2
@@ -49,13 +78,13 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
     {
         let shape_idx = resolved.shape_index()?;
         let new_data = editor::add_to_text_frame(&part_data, shape_idx, remaining, value)?;
-        pkg.set_part(slide_uri, new_data);
+        pkg.set_part(&container_uri, new_data);
     } else if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
     {
         let shape_idx = resolved.shape_index()?;
         let new_data = editor::add_to_table(&part_data, shape_idx, remaining, value)?;
-        pkg.set_part(slide_uri, new_data);
+        pkg.set_part(&container_uri, new_data);
     } else if remaining.is_empty() {
         // Add shape
         let mut add_shape: AddShape = serde_json::from_str(value)
@@ -68,7 +97,7 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
             let media_uri = pkg.add_image_file(img_path)?;
             let rel_target = media_uri.strip_prefix("ppt/").unwrap_or(&media_uri);
             let r_id = pkg.add_relationship(
-                slide_uri,
+                &container_uri,
                 Relationship {
                     id: String::new(),
                     target: format!("../{}", rel_target),
@@ -95,7 +124,7 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
             )?;
             let rel_target = chart_uri.strip_prefix("ppt/").unwrap_or(&chart_uri);
             let r_id = pkg.add_relationship(
-                slide_uri,
+                &container_uri,
                 Relationship {
                     id: String::new(),
                     target: format!("../{}", rel_target),
@@ -119,7 +148,7 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         };
 
         let new_data = editor::insert_shape_after(&part_data, shape_idx, &new_shape_xml)?;
-        pkg.set_part(slide_uri, new_data);
+        pkg.set_part(&container_uri, new_data);
     } else {
         return Err(AppError::PathParse(format!(
             "add does not support path: {}",

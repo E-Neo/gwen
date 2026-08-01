@@ -20,6 +20,15 @@ pub enum ResolvedPath {
         shape_idx: Option<usize>,
         remaining: Vec<PathSegment>,
     },
+    Notes {
+        slide_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
+    NotesShape {
+        slide_idx: usize,
+        shape_idx: Option<usize>,
+        remaining: Vec<PathSegment>,
+    },
 }
 
 pub fn parse_path(path_str: &str) -> AppResult<Vec<PathSegment>> {
@@ -114,6 +123,43 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
                                 )),
                             }
                         }
+                        PathSegment::Field(name) if name == "notes" => {
+                            let tail2 = &after_idx[1..];
+                            if tail2.is_empty() {
+                                return Ok(ResolvedPath::Notes {
+                                    slide_idx: Some(*idx),
+                                    remaining: Vec::new(),
+                                });
+                            }
+                            match &tail2[0] {
+                                PathSegment::Field(n) if n == "shapes" => {
+                                    let tail3 = &tail2[1..];
+                                    if tail3.is_empty() {
+                                        return Ok(ResolvedPath::NotesShape {
+                                            slide_idx: *idx,
+                                            shape_idx: None,
+                                            remaining: Vec::new(),
+                                        });
+                                    }
+                                    match &tail3[0] {
+                                        PathSegment::Index(shape_idx) => {
+                                            Ok(ResolvedPath::NotesShape {
+                                                slide_idx: *idx,
+                                                shape_idx: Some(*shape_idx),
+                                                remaining: tail3[1..].to_vec(),
+                                            })
+                                        }
+                                        _ => Err(AppError::PathParse(
+                                            "Expected shape index after notes.shapes".to_string(),
+                                        )),
+                                    }
+                                }
+                                _ => Ok(ResolvedPath::Notes {
+                                    slide_idx: Some(*idx),
+                                    remaining: tail2.to_vec(),
+                                }),
+                            }
+                        }
                         PathSegment::Field(_) => Ok(ResolvedPath::Slide {
                             slide_idx: Some(*idx),
                             remaining: after_idx.to_vec(),
@@ -128,6 +174,41 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
                     shape_idx: None,
                     remaining: Vec::new(),
                 }),
+                PathSegment::Field(name) if name == "notes" => {
+                    let tail2 = &tail[1..];
+                    if tail2.is_empty() {
+                        return Ok(ResolvedPath::Notes {
+                            slide_idx: None,
+                            remaining: Vec::new(),
+                        });
+                    }
+                    match &tail2[0] {
+                        PathSegment::Field(n) if n == "shapes" => {
+                            let tail3 = &tail2[1..];
+                            if tail3.is_empty() {
+                                return Ok(ResolvedPath::NotesShape {
+                                    slide_idx: 0,
+                                    shape_idx: None,
+                                    remaining: Vec::new(),
+                                });
+                            }
+                            match &tail3[0] {
+                                PathSegment::Index(shape_idx) => Ok(ResolvedPath::NotesShape {
+                                    slide_idx: 0,
+                                    shape_idx: Some(*shape_idx),
+                                    remaining: tail3[1..].to_vec(),
+                                }),
+                                _ => Err(AppError::PathParse(
+                                    "Expected shape index after notes.shapes".to_string(),
+                                )),
+                            }
+                        }
+                        _ => Ok(ResolvedPath::Notes {
+                            slide_idx: None,
+                            remaining: tail2.to_vec(),
+                        }),
+                    }
+                }
                 PathSegment::Field(_) => Ok(ResolvedPath::Slide {
                     slide_idx: None,
                     remaining: tail.to_vec(),
@@ -150,13 +231,19 @@ impl ResolvedPath {
             ResolvedPath::Presentation { remaining } => remaining,
             ResolvedPath::Slide { remaining, .. } => remaining,
             ResolvedPath::Shape { remaining, .. } => remaining,
+            ResolvedPath::Notes { remaining, .. } => remaining,
+            ResolvedPath::NotesShape { remaining, .. } => remaining,
         }
     }
 
     pub fn slide_index(&self) -> AppResult<usize> {
         match self {
             ResolvedPath::Shape { slide_idx, .. } => Ok(*slide_idx),
+            ResolvedPath::NotesShape { slide_idx, .. } => Ok(*slide_idx),
             ResolvedPath::Slide {
+                slide_idx: Some(i), ..
+            } => Ok(*i),
+            ResolvedPath::Notes {
                 slide_idx: Some(i), ..
             } => Ok(*i),
             _ => Err(AppError::PathParse("No slide index in path".to_string())),
@@ -168,7 +255,62 @@ impl ResolvedPath {
             ResolvedPath::Shape {
                 shape_idx: Some(i), ..
             } => Ok(*i),
+            ResolvedPath::NotesShape {
+                shape_idx: Some(i), ..
+            } => Ok(*i),
             _ => Err(AppError::PathParse("No shape index in path".to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolve(path_str: &str) -> ResolvedPath {
+        resolve_path(&parse_path(path_str).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parses_slide_shapes() {
+        match resolve("slides[2].shapes[3]") {
+            ResolvedPath::Shape {
+                slide_idx: 2,
+                shape_idx: Some(3),
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_notes_slide() {
+        match resolve("slides[1].notes") {
+            ResolvedPath::Notes {
+                slide_idx: Some(1),
+                remaining,
+            } => assert!(remaining.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_notes_shape() {
+        match resolve("slides[1].notes.shapes[2].text_frame.paragraphs") {
+            ResolvedPath::NotesShape {
+                slide_idx: 1,
+                shape_idx: Some(2),
+                remaining,
+            } => {
+                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "text_frame"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notes_requires_slide_index() {
+        assert!(resolve_path(&parse_path("slides.notes").unwrap()).is_ok());
+        assert!(resolve_path(&parse_path("slides[0].notes").unwrap()).is_ok());
     }
 }
