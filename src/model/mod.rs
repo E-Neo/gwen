@@ -1,3 +1,4 @@
+pub mod chart;
 pub mod core_props;
 pub mod notes;
 pub mod parts;

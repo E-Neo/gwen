@@ -2,6 +2,7 @@ use quick_xml::Reader;
 use quick_xml::Writer;
 use quick_xml::escape::escape;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use std::io::Write;
 
 use serde_json::json;
 
@@ -799,7 +800,358 @@ pub fn replace_table_cell_property_lossless(
     write_events(events)
 }
 
-fn is_chart_type_tag(name: &[u8]) -> bool {
+/// Generate the `<a:tr>` XML string for a new table row, padded with empty
+/// cells up to `col_count`.
+fn table_row_to_xml(row: &crate::dto::TableRowDto, col_count: usize) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut tr = BytesStart::new("a:tr");
+    if let Some(h) = row.height {
+        tr.push_attribute(("h", h.to_string().as_str()));
+    }
+    writer.write_event(Event::Start(tr)).ok();
+    for cell in &row.cells {
+        let body: Vec<u8> = if let Some(ref tf) = cell.text_frame {
+            let mut w2 = Writer::new(Vec::new());
+            w2.write_event(Event::Start(BytesStart::new("a:txBody")))
+                .ok();
+            w2.write_event(Event::Start(BytesStart::new("a:bodyPr")))
+                .ok();
+            w2.write_event(Event::End(BytesEnd::new("a:bodyPr"))).ok();
+            w2.write_event(Event::Empty(BytesStart::new("a:lstStyle")))
+                .ok();
+            for p in &tf.paragraphs {
+                crate::dto::xml::write_paragraph(p, &mut w2);
+            }
+            w2.write_event(Event::End(BytesEnd::new("a:txBody"))).ok();
+            w2.into_inner()
+        } else {
+            b"<a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/></a:p></a:txBody>".to_vec()
+        };
+        writer.get_mut().write_all(b"<a:tc>").ok();
+        writer.get_mut().write_all(&body).ok();
+        writer.get_mut().write_all(b"</a:tc>").ok();
+    }
+    // Pad with empty cells up to the column count.
+    for _ in row.cells.len()..col_count {
+        writer
+            .get_mut()
+            .write_all(
+                b"<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/></a:p></a:txBody></a:tc>",
+            )
+            .ok();
+    }
+    writer.write_event(Event::End(BytesEnd::new("a:tr"))).ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Find the `a:tbl` element range within a shape.
+fn find_table_range(events: &[Event<'_>], shape_idx: usize) -> Option<(usize, usize)> {
+    let (shape_start, shape_end) = find_shape_range(events, shape_idx)?;
+    find_elem_range(events, b"a:tbl", shape_start).filter(|r| r.0 <= shape_end)
+}
+
+/// Count the `a:gridCol` elements inside the table grid.
+fn count_grid_cols(events: &[Event<'_>], tbl_start: usize, tbl_end: usize) -> usize {
+    find_elem_range(events, b"a:tblGrid", tbl_start)
+        .filter(|r| r.0 <= tbl_end)
+        .map(|(s, e)| count_children(events, s, e, b"a:gridCol"))
+        .unwrap_or(0)
+}
+
+/// Count direct children with the given tag name inside `[start, end]`.
+fn count_children(events: &[Event<'_>], start: usize, end: usize, name: &[u8]) -> usize {
+    let mut count = 0;
+    let mut depth = 0u32;
+    let mut i = start + 1;
+    while i < end {
+        match &events[i] {
+            Event::Start(e) => {
+                if depth == 0 && e.name().as_ref() == name {
+                    count += 1;
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Empty(e) if depth == 0 && e.name().as_ref() == name => {
+                count += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Add a table row (`table.rows` appends, `table.rows[N]` inserts after N).
+pub fn add_table_row_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value_json: &str,
+) -> AppResult<Vec<u8>> {
+    let inner = if remaining.len() > 1
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let insert_after = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "rows" => Some(*i),
+        [path::PathSegment::Field(n)] if n == "rows" => None,
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected table.rows or table.rows[N]".to_string(),
+            ));
+        }
+    };
+
+    let row: crate::dto::TableRowDto = serde_json::from_str(value_json)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid row JSON: {e}")))?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (tbl_start, tbl_end) =
+        find_table_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let col_count = count_grid_cols(&events, tbl_start, tbl_end);
+    let new_row = table_row_to_xml(&row, col_count);
+    let new_events = read_events(new_row.as_bytes())?;
+
+    // Insert position: after the (insert_after)th a:tr end, else before tbl end.
+    let insert_pos = if let Some(after) = insert_after {
+        let mut count = 0usize;
+        let mut pos = None;
+        let mut i = tbl_start + 1;
+        while i < tbl_end {
+            if let Event::Start(e) = &events[i]
+                && e.name().as_ref() == b"a:tr"
+            {
+                if count == after {
+                    let (_, e) = find_elem_range(&events, b"a:tr", i).unwrap();
+                    pos = Some(e + 1);
+                    break;
+                }
+                count += 1;
+            }
+            i += 1;
+        }
+        pos.unwrap_or(tbl_end)
+    } else {
+        tbl_end
+    };
+
+    for ev in new_events.into_iter().rev() {
+        events.insert(insert_pos, ev);
+    }
+    write_events(events)
+}
+
+/// Remove a table row (`table.rows[N]`).
+pub fn remove_table_row_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    let inner = if remaining.len() > 1
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let row_idx = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "rows" => *i,
+        _ => {
+            return Err(AppError::PathParse("Expected table.rows[N]".to_string()));
+        }
+    };
+
+    let mut events = read_events(xml_bytes)?;
+    let (tbl_start, tbl_end) =
+        find_table_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (row_start, row_end) = find_nth_child_range(&events, tbl_start, tbl_end, b"a:tr", row_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Table row {row_idx} not found")))?;
+    for j in (row_start..=row_end).rev() {
+        events.remove(j);
+    }
+    write_events(events)
+}
+
+/// Add a table column (`table.grid` appends, `table.grid[N]` inserts after N).
+/// Inserts a `<a:gridCol>` into the table grid and an empty `<a:tc>` into every
+/// row.
+pub fn add_table_column_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+    value_json: &str,
+) -> AppResult<Vec<u8>> {
+    let inner = if remaining.len() > 1
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let insert_after = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "grid" => Some(*i),
+        [path::PathSegment::Field(n)] if n == "grid" => None,
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected table.grid or table.grid[N]".to_string(),
+            ));
+        }
+    };
+
+    let col: crate::dto::GridColDto = serde_json::from_str(value_json)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid column JSON: {e}")))?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (tbl_start, tbl_end) =
+        find_table_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (grid_start, grid_end) = find_elem_range(&events, b"a:tblGrid", tbl_start)
+        .filter(|r| r.0 <= tbl_end)
+        .ok_or_else(|| AppError::PathParse("Table has no grid".to_string()))?;
+
+    // Insert position for the new gridCol.
+    let grid_insert_pos = if let Some(after) = insert_after {
+        let mut count = 0usize;
+        let mut pos = None;
+        let mut i = grid_start + 1;
+        while i < grid_end {
+            if let Event::Start(e) = &events[i]
+                && e.name().as_ref() == b"a:gridCol"
+            {
+                if count == after {
+                    pos = Some(i + 1);
+                    break;
+                }
+                count += 1;
+            } else if let Event::Empty(e) = &events[i]
+                && e.name().as_ref() == b"a:gridCol"
+            {
+                if count == after {
+                    pos = Some(i + 1);
+                    break;
+                }
+                count += 1;
+            }
+            i += 1;
+        }
+        pos.unwrap_or(grid_end)
+    } else {
+        grid_end
+    };
+
+    let mut grid_col = BytesStart::new("a:gridCol");
+    grid_col.push_attribute(("w", col.width.to_string().as_str()));
+
+    // Insert gridCol.
+    events.insert(grid_insert_pos, Event::Empty(grid_col));
+
+    // Insert an empty a:tc into every row.
+    let empty_cell = "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/></a:p></a:txBody></a:tc>".to_string();
+    let cell_events = read_events(empty_cell.as_bytes())?;
+    let mut i = tbl_start + 1;
+    while i < tbl_end {
+        if let Event::Start(e) = &events[i]
+            && e.name().as_ref() == b"a:tr"
+        {
+            let (_, row_end) = find_elem_range(&events, b"a:tr", i).unwrap();
+            for ev in cell_events.iter().rev() {
+                events.insert(row_end, ev.clone());
+            }
+            i = row_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    write_events(events)
+}
+
+/// Remove a table column (`table.grid[N]`). Removes the Nth `<a:gridCol>` and
+/// the Nth `<a:tc>` from every row.
+pub fn remove_table_column_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    let inner = if remaining.len() > 1
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
+    {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let col_idx = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "grid" => *i,
+        _ => {
+            return Err(AppError::PathParse("Expected table.grid[N]".to_string()));
+        }
+    };
+
+    let mut events = read_events(xml_bytes)?;
+    let (tbl_start, tbl_end) =
+        find_table_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (grid_start, grid_end) = find_elem_range(&events, b"a:tblGrid", tbl_start)
+        .filter(|r| r.0 <= tbl_end)
+        .ok_or_else(|| AppError::PathParse("Table has no grid".to_string()))?;
+
+    // Remove the Nth gridCol.
+    let mut count = 0usize;
+    let mut i = grid_start + 1;
+    let mut removed_col = false;
+    while i < grid_end {
+        let is_col = matches!(&events[i], Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"a:gridCol");
+        if is_col {
+            if count == col_idx {
+                events.remove(i);
+                removed_col = true;
+                break;
+            }
+            count += 1;
+        }
+        i += 1;
+    }
+    if !removed_col {
+        return Err(AppError::PathParse(format!(
+            "Table column {col_idx} not found"
+        )));
+    }
+
+    // Removing the gridCol shifted subsequent indices; re-locate the table.
+    let (tbl_start, tbl_end) =
+        find_table_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+
+    // Remove the Nth a:tc from every row. Collect row ranges first and process
+    // in reverse so earlier indices stay stable while we remove cells.
+    let mut rows = Vec::new();
+    let mut i = tbl_start + 1;
+    while i < tbl_end {
+        if let Event::Start(e) = &events[i]
+            && e.name().as_ref() == b"a:tr"
+        {
+            let (row_start, row_end) = find_elem_range(&events, b"a:tr", i).unwrap();
+            rows.push((row_start, row_end));
+            i = row_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    for (row_start, row_end) in rows.into_iter().rev() {
+        let (cell_start, cell_end) = find_nth_child_range(
+            &events, row_start, row_end, b"a:tc", col_idx,
+        )
+        .ok_or_else(|| AppError::PathParse(format!("Table cell {col_idx} not found in row")))?;
+        for j in (cell_start..=cell_end).rev() {
+            events.remove(j);
+        }
+    }
+
+    write_events(events)
+}
+
+pub(crate) fn is_chart_type_tag(name: &[u8]) -> bool {
     matches!(
         name,
         b"c:barChart"
@@ -969,6 +1321,203 @@ pub fn replace_chart_property_lossless(
         }
     }
 
+    write_events(events)
+}
+
+/// Build the XML events for a new `<c:ser>` element from a chart series DTO.
+fn chart_series_events(series: &crate::dto::ChartSeriesDto, idx: usize) -> Vec<Event<'static>> {
+    let mut out = Vec::new();
+    out.push(Event::Start(BytesStart::new("c:ser")));
+    let mut idx_el = BytesStart::new("c:idx");
+    idx_el.push_attribute(("val", idx.to_string().as_str()));
+    out.push(Event::Empty(idx_el));
+    let mut order_el = BytesStart::new("c:order");
+    order_el.push_attribute(("val", idx.to_string().as_str()));
+    out.push(Event::Empty(order_el));
+
+    if let Some(name) = &series.name {
+        out.push(Event::Start(BytesStart::new("c:tx")));
+        out.push(Event::Start(BytesStart::new("c:strRef")));
+        out.push(Event::Start(BytesStart::new("c:strCache")));
+        let mut pt_count = BytesStart::new("c:ptCount");
+        pt_count.push_attribute(("val", "1"));
+        out.push(Event::Empty(pt_count));
+        out.push(Event::Start(BytesStart::new("c:pt")));
+        out.push(Event::Start(BytesStart::new("c:v")));
+        out.push(Event::Text(BytesText::from_escaped(escape(name.clone()))));
+        out.push(Event::End(BytesEnd::new("c:v")));
+        out.push(Event::End(BytesEnd::new("c:pt")));
+        out.push(Event::End(BytesEnd::new("c:strCache")));
+        out.push(Event::End(BytesEnd::new("c:strRef")));
+        out.push(Event::End(BytesEnd::new("c:tx")));
+    }
+
+    out.push(Event::Start(BytesStart::new("c:cat")));
+    out.push(Event::Start(BytesStart::new("c:strRef")));
+    out.push(Event::Start(BytesStart::new("c:strCache")));
+    let mut pt_count = BytesStart::new("c:ptCount");
+    pt_count.push_attribute(("val", series.categories.len().to_string().as_str()));
+    out.push(Event::Empty(pt_count));
+    for (j, cat) in series.categories.iter().enumerate() {
+        let mut pt = BytesStart::new("c:pt");
+        pt.push_attribute(("idx", j.to_string().as_str()));
+        out.push(Event::Start(pt));
+        out.push(Event::Start(BytesStart::new("c:v")));
+        out.push(Event::Text(BytesText::from_escaped(escape(cat.clone()))));
+        out.push(Event::End(BytesEnd::new("c:v")));
+        out.push(Event::End(BytesEnd::new("c:pt")));
+    }
+    out.push(Event::End(BytesEnd::new("c:strCache")));
+    out.push(Event::End(BytesEnd::new("c:strRef")));
+    out.push(Event::End(BytesEnd::new("c:cat")));
+
+    out.push(Event::Start(BytesStart::new("c:val")));
+    out.push(Event::Start(BytesStart::new("c:numRef")));
+    out.push(Event::Start(BytesStart::new("c:numCache")));
+    let format = BytesStart::new("c:formatCode");
+    out.push(Event::Start(format));
+    out.push(Event::Text(BytesText::from_escaped(escape(
+        "General".to_string(),
+    ))));
+    out.push(Event::End(BytesEnd::new("c:formatCode")));
+    let mut pt_count = BytesStart::new("c:ptCount");
+    pt_count.push_attribute(("val", series.values.len().to_string().as_str()));
+    out.push(Event::Empty(pt_count));
+    for (j, val) in series.values.iter().enumerate() {
+        let mut pt = BytesStart::new("c:pt");
+        pt.push_attribute(("idx", j.to_string().as_str()));
+        out.push(Event::Start(pt));
+        out.push(Event::Start(BytesStart::new("c:v")));
+        out.push(Event::Text(BytesText::from_escaped(escape(
+            val.to_string(),
+        ))));
+        out.push(Event::End(BytesEnd::new("c:v")));
+        out.push(Event::End(BytesEnd::new("c:pt")));
+    }
+    out.push(Event::End(BytesEnd::new("c:numCache")));
+    out.push(Event::End(BytesEnd::new("c:numRef")));
+    out.push(Event::End(BytesEnd::new("c:val")));
+
+    out.push(Event::End(BytesEnd::new("c:ser")));
+    out
+}
+
+/// Find the range of the chart-type element (e.g. `c:barChart`) inside plotArea.
+fn find_chart_type_range(events: &[Event<'_>]) -> Option<(usize, usize)> {
+    let chart_range = find_elem_range(events, b"c:chart", 0)?;
+    let plot_range =
+        find_elem_range(events, b"c:plotArea", chart_range.0).filter(|r| r.0 <= chart_range.1)?;
+    let mut i = plot_range.0 + 1;
+    while i < plot_range.1 {
+        if let Event::Start(e) = &events[i]
+            && is_chart_type_tag(e.name().as_ref())
+        {
+            return find_elem_range(events, e.name().as_ref(), i).filter(|r| r.0 <= plot_range.1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Count the `c:ser` elements inside the chart-type element.
+fn count_series(events: &[Event<'_>], ct_start: usize, ct_end: usize) -> usize {
+    let mut count = 0;
+    let mut i = ct_start + 1;
+    while i < ct_end {
+        if let Event::Start(e) = &events[i]
+            && e.name().as_ref() == b"c:ser"
+        {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Add a chart series (`chart.series` appends, `chart.series[N]` inserts after N).
+pub fn add_chart_series_lossless(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+    value_json: &str,
+) -> AppResult<Vec<u8>> {
+    let inner = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    if !matches!(inner, [path::PathSegment::Field(n), ..] if n == "series") {
+        return Err(AppError::PathParse(
+            "Expected chart.series or chart.series[N]".to_string(),
+        ));
+    }
+    let insert_after = match inner.get(1) {
+        Some(path::PathSegment::Index(i)) => Some(*i),
+        Some(path::PathSegment::Field(_)) | None => None,
+    };
+
+    let series: crate::dto::ChartSeriesDto = serde_json::from_str(value_json)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid series JSON: {e}")))?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (ct_start, ct_end) = find_chart_type_range(&events)
+        .ok_or_else(|| AppError::PathParse("Chart type element not found".to_string()))?;
+    let next_idx = count_series(&events, ct_start, ct_end);
+    let new_events = chart_series_events(&series, next_idx);
+
+    // Insert position: after the (insert_after)th c:ser end, else before ct_end.
+    let insert_pos = if let Some(after) = insert_after {
+        let mut count = 0usize;
+        let mut pos = None;
+        let mut i = ct_start + 1;
+        while i < ct_end {
+            if let Event::Start(e) = &events[i]
+                && e.name().as_ref() == b"c:ser"
+            {
+                if count == after {
+                    let (_, e) = find_elem_range(&events, b"c:ser", i).unwrap();
+                    pos = Some(e + 1);
+                    break;
+                }
+                count += 1;
+            }
+            i += 1;
+        }
+        pos.unwrap_or(ct_end)
+    } else {
+        ct_end
+    };
+
+    for ev in new_events.into_iter().rev() {
+        events.insert(insert_pos, ev);
+    }
+    write_events(events)
+}
+
+/// Remove a chart series (`chart.series[N]`).
+pub fn remove_chart_series_lossless(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    let inner = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let ser_idx = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "series" => *i,
+        _ => {
+            return Err(AppError::PathParse("Expected chart.series[N]".to_string()));
+        }
+    };
+
+    let mut events = read_events(xml_bytes)?;
+    let (ct_start, ct_end) = find_chart_type_range(&events)
+        .ok_or_else(|| AppError::PathParse("Chart type element not found".to_string()))?;
+    let (ser_start, ser_end) = find_nth_elem_range(&events, b"c:ser", ct_start, ct_end, ser_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Series {ser_idx} not found")))?;
+    for j in (ser_start..=ser_end).rev() {
+        events.remove(j);
+    }
     write_events(events)
 }
 
@@ -1681,8 +2230,8 @@ mod tests {
         <p:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></p:xfrm>
         <a:graphic><a:graphicData uri="table"><a:tbl>
           <a:tblPr/><a:tblGrid><a:gridCol w="5"/><a:gridCol w="6"/></a:tblGrid>
-          <a:tr h="7"><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>X</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
-          <a:tr h="8"><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>Y</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+          <a:tr h="7"><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>X</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>X2</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+          <a:tr h="8"><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>Y</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>Y2</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
         </a:tbl></a:graphicData></a:graphic>
       </p:graphicFrame>
     </p:spTree>
@@ -2032,5 +2581,86 @@ mod tests {
         let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>"#;
         let path = path::parse_path("theme.nope.accent1").unwrap();
         assert!(replace_theme_property(xml.as_bytes(), &path[1..], "000000").is_err());
+    }
+
+    #[test]
+    fn add_chart_series_appends() {
+        let path = path::parse_path("chart.series").unwrap();
+        let out = add_chart_series_lossless(
+            CHART.as_bytes(),
+            &path,
+            r#"{"name":"S2","categories":["North","South"],"values":[7,8]}"#,
+        )
+        .unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<c:ser>").count(), 2, "got: {out_str}");
+        assert!(out_str.contains(">S2<"), "got: {out_str}");
+        assert!(out_str.contains(">7</c:v>"), "got: {out_str}");
+        // Existing series unchanged.
+        assert!(out_str.contains(">Series 1<"), "got: {out_str}");
+    }
+
+    #[test]
+    fn add_chart_series_inserts_after_index() {
+        let path = path::parse_path("chart.series[0]").unwrap();
+        let out =
+            add_chart_series_lossless(CHART.as_bytes(), &path, r#"{"name":"S2","values":[1]}"#)
+                .unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<c:ser>").count(), 2, "got: {out_str}");
+    }
+
+    #[test]
+    fn remove_chart_series() {
+        let path = path::parse_path("chart.series[0]").unwrap();
+        let out = remove_chart_series_lossless(CHART.as_bytes(), &path).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<c:ser>").count(), 0, "got: {out_str}");
+        assert!(!out_str.contains("Series 1"), "got: {out_str}");
+    }
+
+    #[test]
+    fn add_table_row_appends() {
+        let path = path::parse_path("table.rows").unwrap();
+        let out = add_table_row_lossless(
+            SLIDE.as_bytes(),
+            1,
+            &path,
+            r#"{"height":9,"cells":[{},{}]}"#,
+        )
+        .unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<a:tr").count(), 3, "got: {out_str}");
+        assert!(out_str.contains("h=\"9\""), "got: {out_str}");
+    }
+
+    #[test]
+    fn add_table_column_adds_cell_to_each_row() {
+        let path = path::parse_path("table.grid").unwrap();
+        let out = add_table_column_lossless(SLIDE.as_bytes(), 1, &path, r#"{"width":7}"#).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<a:gridCol").count(), 3, "got: {out_str}");
+        // Both rows now have 3 cells each.
+        assert_eq!(out_str.matches("<a:tc>").count(), 6, "got: {out_str}");
+    }
+
+    #[test]
+    fn remove_table_row() {
+        let path = path::parse_path("table.rows[0]").unwrap();
+        let out = remove_table_row_lossless(SLIDE.as_bytes(), 1, &path).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<a:tr").count(), 1, "got: {out_str}");
+        assert!(!out_str.contains(">X<"), "got: {out_str}");
+        assert!(out_str.contains(">Y<"), "got: {out_str}");
+    }
+
+    #[test]
+    fn remove_table_column_removes_grid_and_cells() {
+        let path = path::parse_path("table.grid[1]").unwrap();
+        let out = remove_table_column_lossless(SLIDE.as_bytes(), 1, &path)
+            .unwrap_or_else(|e| panic!("remove failed: {e:?}"));
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches("<a:gridCol").count(), 1, "got: {out_str}");
+        assert_eq!(out_str.matches("<a:tc>").count(), 2, "got: {out_str}");
     }
 }

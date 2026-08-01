@@ -342,3 +342,102 @@ fn master_shape_replace_persists() {
     ]);
     assert_eq!(query(&out, "p.slideMasters[0].shapes[0].left"), 100000);
 }
+
+#[test]
+fn chart_query_reads_series_data() {
+    let v = query(&fixture("table_chart.pptx"), "slides[0].shapes[2].chart");
+    let obj = v.as_object().unwrap();
+    assert_eq!(obj["chart_type"], "c:barChart");
+    assert_eq!(obj["series"][0]["name"], "S1");
+    assert_eq!(
+        obj["series"][0]["categories"],
+        serde_json::json!(["Q1", "Q2"])
+    );
+    assert_eq!(obj["series"][0]["values"], serde_json::json!([10.0, 20.0]));
+}
+
+#[test]
+fn chart_series_add_and_remove_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("chart_series.pptx");
+    run_ok(&[
+        "add",
+        fixture("table_chart.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[2].chart.series",
+        "--value",
+        r#"{"name":"S2","categories":["Q1","Q2"],"values":[30,40]}"#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let series = query(&out, "slides[0].shapes[2].chart.series");
+    assert_eq!(series.as_array().unwrap().len(), 2);
+
+    run_ok(&[
+        "remove",
+        out.to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[2].chart.series[0]",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let series = query(&out, "slides[0].shapes[2].chart.series");
+    let arr = series.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "S2");
+}
+
+#[test]
+fn table_row_and_column_add_remove_roundtrip() {
+    let dir = tmp();
+    let out = dir.join("tbl_edit.pptx");
+    run_ok(&[
+        "add",
+        fixture("table_chart.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[1].table.rows",
+        "--value",
+        r#"{"height":370840,"cells":[{"text_frame":{"paragraphs":[{"runs":[{"text":"New"}]}]}},{}]}"#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let rows = query(&out, "slides[0].shapes[1].table.rows");
+    assert_eq!(rows.as_array().unwrap().len(), 3);
+
+    run_ok(&[
+        "add",
+        out.to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[1].table.grid",
+        "--value",
+        r#"{"width":2000000}"#,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let tbl = query(&out, "slides[0].shapes[1].table");
+    assert_eq!(tbl["grid"].as_array().unwrap().len(), 3);
+    assert_eq!(tbl["rows"][0]["cells"].as_array().unwrap().len(), 3);
+
+    run_ok(&[
+        "remove",
+        out.to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[1].table.rows[1]",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let tbl = query(&out, "slides[0].shapes[1].table");
+    assert_eq!(tbl["rows"].as_array().unwrap().len(), 2);
+
+    run_ok(&[
+        "remove",
+        out.to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[1].table.grid[1]",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let tbl = query(&out, "slides[0].shapes[1].table");
+    assert_eq!(tbl["grid"].as_array().unwrap().len(), 2);
+    assert_eq!(tbl["rows"][0]["cells"].as_array().unwrap().len(), 2);
+}

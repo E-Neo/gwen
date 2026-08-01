@@ -87,6 +87,48 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
         let new_data = editor::add_to_text_frame(&part_data, shape_idx, remaining, value)?;
         pkg.set_part(&container_uri, new_data);
     } else if remaining.len() >= 2
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart")
+        && matches!(&remaining.get(1), Some(path::PathSegment::Field(n)) if n == "series")
+    {
+        let shape_idx = resolved.shape_index()?;
+        let chart_uri = crate::model::parts::resolve_chart_part(&pkg, &container_uri, shape_idx)?;
+        let chart_data = pkg
+            .get_part(&chart_uri)
+            .ok_or_else(|| AppError::PartNotFound(chart_uri.clone()))?
+            .to_vec();
+        let new_data =
+            crate::engine::xml_edit::add_chart_series_lossless(&chart_data, remaining, value)?;
+        pkg.set_part(&chart_uri, new_data);
+    } else if matches!(
+        &remaining,
+        [
+            path::PathSegment::Field(t),
+            path::PathSegment::Field(r),
+        ] if t == "table" && (r == "rows" || r == "grid")
+    ) || matches!(
+        &remaining,
+        [
+            path::PathSegment::Field(t),
+            path::PathSegment::Field(r),
+            path::PathSegment::Index(_),
+        ] if t == "table" && (r == "rows" || r == "grid")
+    ) {
+        let shape_idx = resolved.shape_index()?;
+        let new_data = match &remaining[1] {
+            path::PathSegment::Field(n) if n == "rows" => {
+                crate::engine::xml_edit::add_table_row_lossless(
+                    &part_data, shape_idx, remaining, value,
+                )?
+            }
+            path::PathSegment::Field(n) if n == "grid" => {
+                crate::engine::xml_edit::add_table_column_lossless(
+                    &part_data, shape_idx, remaining, value,
+                )?
+            }
+            _ => unreachable!(),
+        };
+        pkg.set_part(&container_uri, new_data);
+    } else if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
     {
         let shape_idx = resolved.shape_index()?;

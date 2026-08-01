@@ -104,6 +104,43 @@ pub fn execute(input: &str, path_str: &str, output: &str) -> AppResult<()> {
         let shape_idx = resolved.shape_index()?;
         let new_data = editor::remove_from_text_frame(&part_data, shape_idx, remaining)?;
         pkg.set_part(&container_uri, new_data);
+    } else if remaining.len() >= 3
+        && matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart")
+        && matches!(&remaining[1], path::PathSegment::Field(n) if n == "series")
+        && matches!(&remaining[2], path::PathSegment::Index(_))
+    {
+        let shape_idx = resolved.shape_index()?;
+        let chart_uri = crate::model::parts::resolve_chart_part(&pkg, &container_uri, shape_idx)?;
+        let chart_data = pkg
+            .get_part(&chart_uri)
+            .ok_or_else(|| AppError::PartNotFound(chart_uri.clone()))?
+            .to_vec();
+        let new_data =
+            crate::engine::xml_edit::remove_chart_series_lossless(&chart_data, remaining)?;
+        pkg.set_part(&chart_uri, new_data);
+    } else if matches!(
+        &remaining,
+        [
+            path::PathSegment::Field(t),
+            path::PathSegment::Field(r),
+            path::PathSegment::Index(_),
+        ] if t == "table" && (r == "rows" || r == "grid")
+    ) {
+        let shape_idx = resolved.shape_index()?;
+        let new_data = match &remaining[1] {
+            path::PathSegment::Field(n) if n == "rows" => {
+                crate::engine::xml_edit::remove_table_row_lossless(
+                    &part_data, shape_idx, remaining,
+                )?
+            }
+            path::PathSegment::Field(n) if n == "grid" => {
+                crate::engine::xml_edit::remove_table_column_lossless(
+                    &part_data, shape_idx, remaining,
+                )?
+            }
+            _ => unreachable!(),
+        };
+        pkg.set_part(&container_uri, new_data);
     } else if remaining.len() >= 2
         && matches!(&remaining[0], path::PathSegment::Field(n) if n == "table")
     {

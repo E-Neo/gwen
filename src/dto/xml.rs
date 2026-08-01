@@ -93,7 +93,7 @@ fn write_body_pr(tf: &TextFrameDto, writer: &mut Writer<Vec<u8>>) {
         .ok();
 }
 
-fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
+pub(crate) fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
     writer
         .write_event(Event::Start(BytesStart::new("a:p")))
         .ok();

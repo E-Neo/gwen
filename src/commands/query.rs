@@ -151,19 +151,55 @@ pub fn execute(
         path::ResolvedPath::Shape {
             slide_idx,
             shape_idx,
-            ..
+            remaining,
         } => {
             let uri = pres
                 .slide_uris
                 .get(*slide_idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
             let shapes = parse_shapes(&pkg, uri, media_dir)?;
-            match shape_idx {
-                None => json!(shapes),
-                Some(idx) => shapes
-                    .get(*idx)
-                    .ok_or(AppError::ShapeIndexOutOfBounds(*idx))?
-                    .clone(),
+            // Chart data lives in a separate OPC part; resolve and parse it.
+            if let Some(path::PathSegment::Field(n)) = remaining.first()
+                && n == "chart"
+            {
+                let idx = shape_idx
+                    .ok_or_else(|| AppError::PathParse("Chart shape index required".to_string()))?;
+                let empty_map = HashMap::new();
+                let slide_data = pkg
+                    .get_part(uri)
+                    .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
+                let parsed = crate::model::slide::parse_slide_shapes(slide_data, &empty_map)?;
+                let shape = parsed
+                    .get(idx)
+                    .ok_or(AppError::ShapeIndexOutOfBounds(idx))?;
+                let r_id = shape
+                    .chart
+                    .as_ref()
+                    .and_then(|c| c.r_id.as_ref())
+                    .ok_or_else(|| {
+                        AppError::PathParse("Shape has no chart relationship".to_string())
+                    })?;
+                let rels = pkg
+                    .get_rels(uri)
+                    .ok_or_else(|| AppError::PartNotFound(format!("{uri} rels")))?;
+                let rel = rels.get(r_id).ok_or_else(|| {
+                    AppError::PathParse("Chart relationship not found".to_string())
+                })?;
+                let chart_uri = pkg.resolve_relationship_target(uri, rel).ok_or_else(|| {
+                    AppError::PathParse("Chart relationship target missing".to_string())
+                })?;
+                let chart_data = pkg
+                    .get_part(&chart_uri)
+                    .ok_or(AppError::PartNotFound(chart_uri.clone()))?;
+                json!({ "chart": crate::model::chart::parse_chart(chart_data) })
+            } else {
+                match shape_idx {
+                    None => json!(shapes),
+                    Some(idx) => shapes
+                        .get(*idx)
+                        .ok_or(AppError::ShapeIndexOutOfBounds(*idx))?
+                        .clone(),
+                }
             }
         }
         path::ResolvedPath::Theme { remaining: _ } => {
