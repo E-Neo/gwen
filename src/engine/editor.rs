@@ -9,6 +9,15 @@ use crate::dto::ShapeDto;
 use crate::error::{AppError, AppResult};
 use crate::path;
 
+/// True for any element that opens a shape: a regular shape, picture,
+/// connector, group, or graphic frame (table/chart).
+fn is_shape_tag(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame"
+    )
+}
+
 pub fn replace_text(xml_bytes: &[u8], shape_idx: usize, new_text: &str) -> AppResult<Vec<u8>> {
     let mut reader = Reader::from_reader(xml_bytes);
     reader.config_mut().trim_text(true);
@@ -20,10 +29,7 @@ pub fn replace_text(xml_bytes: &[u8], shape_idx: usize, new_text: &str) -> AppRe
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"p:sp"
-                    || e.name().as_ref() == b"p:pic"
-                    || e.name().as_ref() == b"p:graphicFrame"
-                {
+                if is_shape_tag(e.name().as_ref()) {
                     if shape_counter == shape_idx {
                         inside_target_shape = true;
                     }
@@ -53,9 +59,7 @@ pub fn replace_text(xml_bytes: &[u8], shape_idx: usize, new_text: &str) -> AppRe
                 }
             }
             Ok(Event::End(ref e)) => {
-                if inside_target_shape
-                    && (e.name().as_ref() == b"p:sp" || e.name().as_ref() == b"p:pic")
-                {
+                if inside_target_shape && (is_shape_tag(e.name().as_ref())) {
                     inside_target_shape = false;
                 }
                 writer
@@ -98,9 +102,7 @@ pub fn remove_shape(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp"
-                    || e.name().as_ref() == b"p:pic"
-                    || e.name().as_ref() == b"p:graphicFrame";
+                let is_shape = is_shape_tag(e.name().as_ref());
                 if is_shape && shape_counter == shape_idx {
                     skip_depth = Some(1);
                     shape_counter += 1;
@@ -163,9 +165,7 @@ pub fn extract_shape_subtree(xml_bytes: &[u8], shape_idx: usize) -> AppResult<(V
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp"
-                    || e.name().as_ref() == b"p:pic"
-                    || e.name().as_ref() == b"p:graphicFrame";
+                let is_shape = is_shape_tag(e.name().as_ref());
                 if is_shape && shape_counter == shape_idx {
                     depth = Some(1);
                     found = true;
@@ -281,9 +281,7 @@ pub fn insert_shape_after(
                 writer
                     .write_event(Event::Start(e.clone()))
                     .map_err(AppError::Io)?;
-                let is_shape = e.name().as_ref() == b"p:sp"
-                    || e.name().as_ref() == b"p:pic"
-                    || e.name().as_ref() == b"p:graphicFrame";
+                let is_shape = is_shape_tag(e.name().as_ref());
                 if is_shape {
                     if shape_counter == insert_idx {
                         writer
@@ -335,9 +333,7 @@ pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> 
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
-                let is_shape = e.name().as_ref() == b"p:sp"
-                    || e.name().as_ref() == b"p:pic"
-                    || e.name().as_ref() == b"p:graphicFrame";
+                let is_shape = is_shape_tag(e.name().as_ref());
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -380,11 +376,7 @@ pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> 
                     continue;
                 }
 
-                if inside_target
-                    && (e.name().as_ref() == b"p:sp"
-                        || e.name().as_ref() == b"p:pic"
-                        || e.name().as_ref() == b"p:graphicFrame")
-                {
+                if inside_target && (is_shape_tag(e.name().as_ref())) {
                     inside_target = false;
                 }
 
@@ -478,9 +470,7 @@ pub fn replace_shape_attr(
             Ok(Event::Start(ref e)) => {
                 let ename = e.name();
                 let ename_bytes = ename.as_ref();
-                let is_shape = ename_bytes == b"p:sp"
-                    || ename_bytes == b"p:pic"
-                    || ename_bytes == b"p:graphicFrame";
+                let is_shape = is_shape_tag(ename_bytes);
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -522,11 +512,7 @@ pub fn replace_shape_attr(
                 }
             }
             Ok(Event::End(ref e)) => {
-                if inside_target
-                    && (e.name().as_ref() == b"p:sp"
-                        || e.name().as_ref() == b"p:pic"
-                        || e.name().as_ref() == b"p:graphicFrame")
-                {
+                if inside_target && (is_shape_tag(e.name().as_ref())) {
                     inside_target = false;
                 }
                 writer
@@ -737,7 +723,7 @@ fn replace_table_tbl(xml_bytes: &[u8], shape_idx: usize, new_tbl: &[u8]) -> AppR
             Ok(Event::Start(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
-                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
+                let is_shape = is_shape_tag(enb);
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -771,8 +757,7 @@ fn replace_table_tbl(xml_bytes: &[u8], shape_idx: usize, new_tbl: &[u8]) -> AppR
                 writer
                     .write_event(Event::End(e.clone()))
                     .map_err(AppError::Io)?;
-                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
-                {
+                if inside_target && (is_shape_tag(enb)) {
                     inside_target = false;
                 }
             }
@@ -1079,7 +1064,7 @@ pub fn extract_txbody_element(
             Ok(Event::Start(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
-                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
+                let is_shape = is_shape_tag(enb);
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -1144,8 +1129,7 @@ pub fn extract_txbody_element(
                     extracted.extend_from_slice(enb);
                     extracted.extend_from_slice(b">");
                 }
-                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
-                {
+                if inside_target && (is_shape_tag(enb)) {
                     inside_target = false;
                 }
             }
@@ -1224,7 +1208,7 @@ pub fn insert_into_txbody(
             Ok(Event::Start(ref e)) => {
                 let en = e.name();
                 let enb = en.as_ref();
-                let is_shape = enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame";
+                let is_shape = is_shape_tag(enb);
                 if is_shape {
                     if shape_counter == shape_idx {
                         inside_target = true;
@@ -1302,8 +1286,7 @@ pub fn insert_into_txbody(
                 if inside_txbody && enb == b"p:txBody" {
                     inside_txbody = false;
                 }
-                if inside_target && (enb == b"p:sp" || enb == b"p:pic" || enb == b"p:graphicFrame")
-                {
+                if inside_target && (is_shape_tag(enb)) {
                     inside_target = false;
                 }
             }
