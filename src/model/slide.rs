@@ -125,7 +125,8 @@ fn shape_target<'a>(
     } else {
         group_stack.last_mut()
     }
-}pub fn parse_slide_shapes(
+}
+pub fn parse_slide_shapes(
     data: &[u8],
     image_map: &HashMap<String, String>,
 ) -> AppResult<Vec<ShapeDto>> {

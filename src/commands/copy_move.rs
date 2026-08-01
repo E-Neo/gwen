@@ -255,6 +255,19 @@ pub fn move_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> 
     let src = resolve_target(&pkg, from_path)?;
     let dst = resolve_target(&pkg, to_path)?;
 
+    // Pure z-order reorder within the same slide: no relationship/part
+    // duplication is needed, just move the shape subtree to a new index.
+    if src.slide_uri == dst.slide_uri && src.remaining.is_empty() && dst.remaining.is_empty() {
+        let src_data = pkg
+            .get_part(&src.slide_uri)
+            .ok_or_else(|| AppError::PartNotFound(src.slide_uri.clone()))?
+            .to_vec();
+        let new_data = editor::reorder_shape(&src_data, src.shape_idx, dst.shape_idx)?;
+        pkg.set_part(&src.slide_uri, new_data);
+        pkg.save(Path::new(output))?;
+        return Ok(());
+    }
+
     let src_data = pkg
         .get_part(&src.slide_uri)
         .ok_or_else(|| AppError::PartNotFound(src.slide_uri.clone()))?

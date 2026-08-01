@@ -273,6 +273,7 @@ pub fn insert_shape_after(
     let mut writer = Writer::new(Vec::new());
     let mut shape_counter = 0;
     let mut inserted = false;
+    let mut insert_after_depth: Option<usize> = None;
     let mut buffer = Vec::new();
 
     loop {
@@ -284,13 +285,12 @@ pub fn insert_shape_after(
                 let is_shape = is_shape_tag(e.name().as_ref());
                 if is_shape {
                     if shape_counter == insert_idx {
-                        writer
-                            .get_mut()
-                            .write_all(new_shape_xml)
-                            .map_err(AppError::Io)?;
-                        inserted = true;
+                        insert_after_depth = Some(0);
                     }
                     shape_counter += 1;
+                }
+                if let Some(ref mut d) = insert_after_depth {
+                    *d += 1;
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -305,6 +305,17 @@ pub fn insert_shape_after(
                 writer
                     .write_event(Event::End(e.clone()))
                     .map_err(AppError::Io)?;
+                if let Some(ref mut d) = insert_after_depth {
+                    *d -= 1;
+                    if *d == 0 {
+                        writer
+                            .get_mut()
+                            .write_all(new_shape_xml)
+                            .map_err(AppError::Io)?;
+                        inserted = true;
+                        insert_after_depth = None;
+                    }
+                }
             }
             Ok(Event::Empty(ref e)) => {
                 writer
@@ -319,6 +330,89 @@ pub fn insert_shape_after(
         }
     }
     Ok(writer.into_inner())
+}
+
+/// Insert `new_shape_xml` immediately *before* the shape at `insert_idx`
+/// (0-based across all shapes, including nested group children). If `insert_idx`
+/// is out of range, the shape is appended at the end of the shape tree.
+pub fn insert_shape_before(
+    xml_bytes: &[u8],
+    insert_idx: usize,
+    new_shape_xml: &[u8],
+) -> AppResult<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+    let mut writer = Writer::new(Vec::new());
+    let mut shape_counter = 0;
+    let mut inserted = false;
+    let mut buffer = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(ref e)) => {
+                let is_shape = is_shape_tag(e.name().as_ref());
+                if is_shape && !inserted && shape_counter == insert_idx {
+                    writer
+                        .get_mut()
+                        .write_all(new_shape_xml)
+                        .map_err(AppError::Io)?;
+                    inserted = true;
+                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(AppError::Io)?;
+                if is_shape {
+                    shape_counter += 1;
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::End(ref e)) => {
+                let is_sp_tree = e.name().as_ref() == b"p:spTree";
+                if is_sp_tree && !inserted {
+                    writer
+                        .get_mut()
+                        .write_all(new_shape_xml)
+                        .map_err(AppError::Io)?;
+                    inserted = true;
+                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(e)),
+            Ok(e) => {
+                writer.write_event(e).map_err(AppError::Io)?;
+            }
+        }
+    }
+    Ok(writer.into_inner())
+}
+
+/// Move the shape at `from_idx` so that it occupies index `to_idx` within the
+/// shape tree (0-based across all shapes, including nested group children).
+///
+/// This is a pure z-order reorder within the same shape tree: no relationship
+/// or part duplication is performed. Shape ids are left unchanged.
+pub fn reorder_shape(xml_bytes: &[u8], from_idx: usize, to_idx: usize) -> AppResult<Vec<u8>> {
+    if from_idx == to_idx {
+        return Ok(xml_bytes.to_vec());
+    }
+    let (subtree, _id) = extract_shape_subtree(xml_bytes, from_idx)?;
+    let after_remove = remove_shape(xml_bytes, from_idx)?;
+
+    // After removal the indices have shifted; insert the subtree so it lands at
+    // `to_idx`. Inserting before post-removal shape `to_idx - 1` is equivalent
+    // to inserting after it, except for the first position.
+    if to_idx == 0 {
+        insert_shape_before(&after_remove, 0, &subtree)
+    } else {
+        insert_shape_after(&after_remove, to_idx - 1, &subtree)
+    }
 }
 
 pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> AppResult<Vec<u8>> {
@@ -1585,7 +1679,7 @@ pub fn insert_slide_into_presentation(
 
 #[cfg(test)]
 mod tests {
-    use super::reorder_slide;
+    use super::{reorder_shape, reorder_slide};
 
     fn order(pres_xml: &[u8]) -> Vec<u32> {
         let mut reader = quick_xml::Reader::from_reader(pres_xml);
@@ -1607,6 +1701,45 @@ mod tests {
         ids
     }
 
+    fn shape_order(xml: &[u8]) -> Vec<String> {
+        let mut reader = quick_xml::Reader::from_reader(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut names = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Empty(e)) if e.name().as_ref() == b"p:cNvPr" => {
+                    for a in e.attributes().flatten() {
+                        if a.key.as_ref() == b"name" {
+                            let name = String::from_utf8_lossy(&a.value).to_string();
+                            if !name.is_empty() {
+                                names.push(name);
+                            }
+                        }
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn slide_with_shapes(names: &[&str]) -> Vec<u8> {
+        let mut body = String::new();
+        for (i, name) in names.iter().enumerate() {
+            body.push_str(&format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{}" name="{}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#,
+                i + 2,
+                name
+            ));
+        }
+        format!(
+            r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>{body}</p:spTree></p:cSld></p:sld>"#
+        )
+        .into_bytes()
+    }
+
     #[test]
     fn reorders_slides() {
         let xml = r#"<p:presentation xmlns:p="x" xmlns:r="y"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst></p:presentation>"#;
@@ -1622,5 +1755,29 @@ mod tests {
         let xml = r#"<p:presentation xmlns:p="x" xmlns:r="y"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
         let out = reorder_slide(xml.as_bytes(), 0, 0).unwrap();
         assert_eq!(order(&out), vec![256]);
+    }
+
+    #[test]
+    fn reorders_shapes_within_slide() {
+        let xml = slide_with_shapes(&["A", "B", "C"]);
+
+        // Bring C to front (index 2 -> 0)
+        let out = reorder_shape(&xml, 2, 0).unwrap();
+        assert_eq!(shape_order(&out), vec!["C", "A", "B"]);
+
+        // Move A to back (index 0 -> 2)
+        let out = reorder_shape(&xml, 0, 2).unwrap();
+        assert_eq!(shape_order(&out), vec!["B", "C", "A"]);
+
+        // Move middle to end
+        let out = reorder_shape(&xml, 1, 2).unwrap();
+        assert_eq!(shape_order(&out), vec!["A", "C", "B"]);
+    }
+
+    #[test]
+    fn reorder_shape_noop_when_same_index() {
+        let xml = slide_with_shapes(&["A", "B", "C"]);
+        let out = reorder_shape(&xml, 1, 1).unwrap();
+        assert_eq!(shape_order(&out), vec!["A", "B", "C"]);
     }
 }
