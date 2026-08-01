@@ -6,6 +6,7 @@ mod error;
 mod model;
 mod opc;
 mod path;
+mod template;
 
 use clap::Parser;
 use cli::Commands;
@@ -61,6 +62,10 @@ fn main() -> AppResult<()> {
             output,
         } => {
             commands::copy_move::copy_shape(&input, &from, &to, &output)?;
+        }
+        Commands::New { output, size } => {
+            let pkg = template::build_default_package(template::SlideSize::parse(&size)?)?;
+            pkg.save(std::path::Path::new(&output))?;
         }
     }
 

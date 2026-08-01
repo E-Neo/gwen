@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -22,6 +22,65 @@ impl Package {
     pub fn open(path: &Path) -> AppResult<Self> {
         let file = std::fs::File::open(path)?;
         let mut archive = ZipArchive::new(file)?;
+        Self::from_archive(&mut archive)
+    }
+
+    /// Build a package directly from in-memory parts and relationships.
+    pub fn from_parts(
+        parts: HashMap<String, Vec<u8>>,
+        relationships: HashMap<String, HashMap<String, Relationship>>,
+    ) -> Self {
+        Package {
+            parts,
+            relationships,
+        }
+    }
+
+    /// Resolve a relationship's target to the URI of the part it points at,
+    /// relative to the source part. Returns `None` for external targets.
+    pub fn resolve_relationship_target(
+        &self,
+        source_uri: &str,
+        rel: &Relationship,
+    ) -> Option<String> {
+        if rel.target_mode.as_deref() == Some("External") {
+            return None;
+        }
+        let target = if rel.target.starts_with('/') {
+            rel.target.trim_start_matches('/').to_string()
+        } else {
+            let base_dir = source_uri
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
+            let mut segments: Vec<&str> = if base_dir.is_empty() {
+                Vec::new()
+            } else {
+                base_dir.split('/').collect()
+            };
+            for seg in rel.target.split('/') {
+                match seg {
+                    "" | "." => {}
+                    ".." => {
+                        segments.pop();
+                    }
+                    _ => segments.push(seg),
+                }
+            }
+            segments.join("/")
+        };
+        self.parts.contains_key(&target).then_some(target)
+    }
+
+    /// Iterate over all relationship collections keyed by source part URI.
+    #[cfg(test)]
+    pub fn relationship_sources(
+        &self,
+    ) -> impl Iterator<Item = (&str, &HashMap<String, Relationship>)> {
+        self.relationships.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    fn from_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> AppResult<Self> {
         let mut parts = HashMap::new();
         let mut relationships = HashMap::new();
 
@@ -56,6 +115,10 @@ impl Package {
 
     pub fn get_rels(&self, uri: &str) -> Option<&HashMap<String, Relationship>> {
         self.relationships.get(uri)
+    }
+
+    pub fn set_rels(&mut self, uri: &str, rels: HashMap<String, Relationship>) {
+        self.relationships.insert(uri.to_string(), rels);
     }
 
     pub fn add_relationship(&mut self, source_uri: &str, rel: Relationship) -> String {
@@ -309,7 +372,7 @@ impl Package {
     }
 }
 
-fn rels_source_key(name: &str) -> String {
+pub(crate) fn rels_source_key(name: &str) -> String {
     if name == "_rels/.rels" {
         return String::new();
     }
@@ -346,7 +409,7 @@ fn build_rels_uri_map(
     map
 }
 
-fn parse_rels_xml(data: &[u8]) -> AppResult<HashMap<String, Relationship>> {
+pub(crate) fn parse_rels_xml(data: &[u8]) -> AppResult<HashMap<String, Relationship>> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().trim_text(true);
     let mut rels = HashMap::new();

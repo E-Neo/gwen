@@ -110,4 +110,13 @@ pub enum Commands {
         #[arg(long)]
         output: String,
     },
+    /// Create a new empty presentation from the built-in template
+    New {
+        /// Output PPTX file path
+        output: String,
+
+        /// Slide size: '16:9' or '4:3'
+        #[arg(long, default_value = "16:9")]
+        size: String,
+    },
 }

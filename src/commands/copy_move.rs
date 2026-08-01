@@ -10,8 +10,17 @@ use crate::opc::Package;
 use crate::opc::Relationship;
 use crate::path;
 
-/// Duplicate any chart parts referenced by the shape subtree and remap r:id.
-fn handle_chart_rels(
+const CHART_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+
+/// Duplicate any referenced parts (images, charts) and remap their r-attributes
+/// in the subtree. Returns the rewritten subtree.
+///
+/// - Image rels: the media part is shared; only a new relationship is added to
+///   the destination slide.
+/// - Chart rels: the chart XML part is duplicated (with its own rels and a
+///   content-type override) and a new relationship is added.
+fn remap_shape_rels(
     pkg: &mut Package,
     subtree: &[u8],
     src_slide_uri: &str,
@@ -22,66 +31,84 @@ fn handle_chart_rels(
         .ok_or_else(|| AppError::PartNotFound(format!("{src_slide_uri} rels")))?
         .clone();
 
-    let mut result = subtree.to_vec();
+    let mut r_id_map: HashMap<String, String> = HashMap::new();
 
     for (old_rid, rel) in &src_rels {
-        if !rel.rel_type.contains("chart") {
+        let is_image = rel.rel_type.contains("image");
+        let is_chart = rel.rel_type.contains("chart");
+        if !is_image && !is_chart {
             continue;
         }
-        let pattern = format!("c:chart r:id=\"{old_rid}\"");
+
+        // Only act if the subtree actually references this relationship
+        let pattern = if is_image {
+            format!("r:embed=\"{old_rid}\"")
+        } else {
+            format!("c:chart r:id=\"{old_rid}\"")
+        };
         let pattern_bytes = pattern.as_bytes();
-        if !result
+        if !subtree
             .windows(pattern_bytes.len())
             .any(|w| w == pattern_bytes)
         {
             continue;
         }
 
-        let src_chart_uri = format!("ppt/{}", rel.target);
-        let chart_data = pkg
-            .get_part(&src_chart_uri)
-            .ok_or(AppError::PartNotFound(src_chart_uri))?
-            .to_vec();
+        let new_rid = if is_image {
+            // Share the media part; add a relationship on the destination slide
+            pkg.add_relationship(
+                dst_slide_uri,
+                Relationship {
+                    id: String::new(),
+                    target: rel.target.clone(),
+                    rel_type: rel.rel_type.clone(),
+                    target_mode: rel.target_mode.clone(),
+                },
+            )
+        } else {
+            // Duplicate the chart part
+            let src_chart_uri = pkg
+                .resolve_relationship_target(src_slide_uri, rel)
+                .ok_or_else(|| AppError::PartNotFound(rel.target.clone()))?;
+            let chart_data = pkg
+                .get_part(&src_chart_uri)
+                .ok_or_else(|| AppError::PartNotFound(src_chart_uri.clone()))?
+                .to_vec();
 
-        // Create new chart part with a unique name
-        let new_chart_uri = format!(
-            "ppt/charts/{}_copy.xml",
-            rel.target.trim_end_matches(".xml")
-        );
-        pkg.set_part(&new_chart_uri, chart_data);
+            let new_chart_uri = format!(
+                "ppt/charts/{}_copy.xml",
+                rel.target.trim_end_matches(".xml")
+            );
+            pkg.set_part(&new_chart_uri, chart_data);
+            pkg.add_content_type_override(&format!("/{new_chart_uri}"), CHART_CONTENT_TYPE)?;
 
-        // Add relationship and get the new r:id
-        let new_rid = {
-            let new_rel = Relationship {
-                id: String::new(),
-                target: new_chart_uri
-                    .strip_prefix("ppt/")
-                    .unwrap_or(&new_chart_uri)
-                    .to_string(),
-                rel_type: rel.rel_type.clone(),
-                target_mode: rel.target_mode.clone(),
-            };
-            pkg.add_relationship(dst_slide_uri, new_rel)
+            // Copy the chart's own relationships (style/colors, …)
+            if let Some(chart_rels) = pkg.get_rels(&src_chart_uri).cloned() {
+                pkg.set_rels(&new_chart_uri, chart_rels);
+            }
+
+            pkg.add_relationship(
+                dst_slide_uri,
+                Relationship {
+                    id: String::new(),
+                    target: new_chart_uri
+                        .strip_prefix("ppt/")
+                        .unwrap_or(&new_chart_uri)
+                        .to_string(),
+                    rel_type: rel.rel_type.clone(),
+                    target_mode: rel.target_mode.clone(),
+                },
+            )
         };
 
-        // Replace r:id in subtree bytes
-        let old_bytes = format!("r:id=\"{old_rid}\"").into_bytes();
-        let new_bytes = format!("r:id=\"{new_rid}\"").into_bytes();
-        let mut new_result = Vec::with_capacity(result.len());
-        let mut i = 0;
-        while i < result.len() {
-            if i + old_bytes.len() <= result.len() && result[i..i + old_bytes.len()] == old_bytes {
-                new_result.extend_from_slice(&new_bytes);
-                i += old_bytes.len();
-            } else {
-                new_result.push(result[i]);
-                i += 1;
-            }
-        }
-        result = new_result;
+        r_id_map.insert(old_rid.clone(), new_rid);
     }
 
-    Ok(result)
+    if r_id_map.is_empty() {
+        Ok(subtree.to_vec())
+    } else {
+        Ok(sanitizer::replace_r_ids(subtree, &r_id_map))
+    }
 }
 
 struct ResolvedTarget {
@@ -148,8 +175,8 @@ pub fn copy_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> 
         // Copy shape
         let (subtree, _orig_id) = editor::extract_shape_subtree(&src_data, src.shape_idx)?;
 
-        // Duplicate chart parts if the shape contains chart references
-        let subtree = handle_chart_rels(&mut pkg, &subtree, &src.slide_uri, &dst.slide_uri)?;
+        // Duplicate chart/image parts and remap r-attributes
+        let subtree = remap_shape_rels(&mut pkg, &subtree, &src.slide_uri, &dst.slide_uri)?;
 
         let dst_data = pkg
             .get_part(&dst.slide_uri)
@@ -207,8 +234,8 @@ pub fn move_shape(input: &str, from_path: &str, to_path: &str, output: &str) -> 
     } else if src.remaining.is_empty() && dst.remaining.is_empty() {
         let (subtree, _orig_id) = editor::extract_shape_subtree(&src_data, src.shape_idx)?;
 
-        // Duplicate chart parts if the shape contains chart references
-        let subtree = handle_chart_rels(&mut pkg, &subtree, &src.slide_uri, &dst.slide_uri)?;
+        // Duplicate chart/image parts and remap r-attributes
+        let subtree = remap_shape_rels(&mut pkg, &subtree, &src.slide_uri, &dst.slide_uri)?;
 
         let src_after_remove = editor::remove_shape(&src_data, src.shape_idx)?;
         pkg.set_part(&src.slide_uri, src_after_remove);
