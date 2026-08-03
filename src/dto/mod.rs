@@ -20,7 +20,7 @@ pub enum ShapeType {
     Comment,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PlaceholderType {
     Title,
@@ -53,7 +53,7 @@ pub struct PlaceholderFormatDto {
     pub sz: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ColorType {
     Rgb,
@@ -64,7 +64,7 @@ pub enum ColorType {
     Preset,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColorFormatDto {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub color_type: Option<ColorType>,
@@ -76,7 +76,7 @@ pub struct ColorFormatDto {
     pub brightness: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FillType {
     Solid,
@@ -87,7 +87,7 @@ pub enum FillType {
     Group,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FillDto {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub fill_type: Option<FillType>,
@@ -97,7 +97,7 @@ pub struct FillDto {
     pub alpha: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineCap {
     Rnd,
@@ -105,7 +105,7 @@ pub enum LineCap {
     Flat,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompoundLine {
     Sng,
@@ -115,7 +115,7 @@ pub enum CompoundLine {
     Tri,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineDash {
     Solid,
@@ -131,7 +131,7 @@ pub enum LineDash {
     SysDashDotDot,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutlineDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<i64>,
@@ -145,7 +145,7 @@ pub struct OutlineDto {
     pub fill: Option<FillDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FontDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -161,7 +161,7 @@ pub struct FontDto {
     pub color: Option<ColorFormatDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HyperlinkDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
@@ -171,7 +171,7 @@ pub struct HyperlinkDto {
     pub r_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunDto {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,7 +180,7 @@ pub struct RunDto {
     pub hyperlink: Option<HyperlinkDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Alignment {
     Left,
@@ -192,7 +192,7 @@ pub enum Alignment {
     JustifiedLow,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MsoAutoSize {
     None,
@@ -200,7 +200,7 @@ pub enum MsoAutoSize {
     TextToFitShape,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VerticalAnchor {
     Top,
@@ -210,7 +210,7 @@ pub enum VerticalAnchor {
     Distributed,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParagraphDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunDto>,
@@ -228,7 +228,7 @@ pub struct ParagraphDto {
     pub font: Option<FontDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextFrameDto {
     pub paragraphs: Vec<ParagraphDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +245,9 @@ pub struct TextFrameDto {
     pub margin_top: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margin_bottom: Option<i64>,
+    /// Default level-0 paragraph style from `a:lstStyle/a:lvl1pPr`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_paragraph_style: Option<ParagraphDto>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

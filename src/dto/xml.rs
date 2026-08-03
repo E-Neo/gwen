@@ -16,9 +16,14 @@ pub fn txbody_to_xml(tf: &TextFrameDto) -> String {
 fn write_txbody(tf: &TextFrameDto, writer: &mut Writer<Vec<u8>>) {
     write_body_pr(tf, writer);
 
-    writer
-        .write_event(Event::Empty(BytesStart::new("a:lstStyle")))
-        .ok();
+    match &tf.default_paragraph_style {
+        Some(dps) => write_default_paragraph_style(dps, writer),
+        None => {
+            writer
+                .write_event(Event::Empty(BytesStart::new("a:lstStyle")))
+                .ok();
+        }
+    }
 
     for p in &tf.paragraphs {
         write_paragraph(p, writer);
@@ -122,49 +127,7 @@ pub(crate) fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
 
         writer.write_event(Event::Start(ppr)).ok();
 
-        if let Some(ls) = p.line_spacing {
-            writer
-                .write_event(Event::Start(BytesStart::new("a:lnSpc")))
-                .ok();
-            if (0.5..=10.0).contains(&ls) {
-                let mut pct = BytesStart::new("a:spcPct");
-                let val = (ls * 100000.0).round() as i64;
-                pct.push_attribute(("val", val.to_string().as_str()));
-                writer.write_event(Event::Empty(pct)).ok();
-            } else {
-                let mut pts = BytesStart::new("a:spcPts");
-                let val = (ls * 100.0).round() as i64;
-                pts.push_attribute(("val", val.to_string().as_str()));
-                writer.write_event(Event::Empty(pts)).ok();
-            }
-            writer
-                .write_event(Event::End(BytesEnd::new("a:lnSpc")))
-                .ok();
-        }
-
-        if let Some(sb) = p.space_before {
-            writer
-                .write_event(Event::Start(BytesStart::new("a:spcBef")))
-                .ok();
-            let mut pts = BytesStart::new("a:spcPts");
-            pts.push_attribute(("val", sb.to_string().as_str()));
-            writer.write_event(Event::Empty(pts)).ok();
-            writer
-                .write_event(Event::End(BytesEnd::new("a:spcBef")))
-                .ok();
-        }
-
-        if let Some(sa) = p.space_after {
-            writer
-                .write_event(Event::Start(BytesStart::new("a:spcAft")))
-                .ok();
-            let mut pts = BytesStart::new("a:spcPts");
-            pts.push_attribute(("val", sa.to_string().as_str()));
-            writer.write_event(Event::Empty(pts)).ok();
-            writer
-                .write_event(Event::End(BytesEnd::new("a:spcAft")))
-                .ok();
-        }
+        write_p_pr_children(p, writer);
 
         writer.write_event(Event::End(BytesEnd::new("a:pPr"))).ok();
     }
@@ -188,6 +151,105 @@ pub(crate) fn write_paragraph(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
     }
 
     writer.write_event(Event::End(BytesEnd::new("a:p"))).ok();
+}
+
+fn write_p_pr_children(p: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
+    if let Some(ls) = p.line_spacing {
+        writer
+            .write_event(Event::Start(BytesStart::new("a:lnSpc")))
+            .ok();
+        if (0.5..=10.0).contains(&ls) {
+            let mut pct = BytesStart::new("a:spcPct");
+            let val = (ls * 100000.0).round() as i64;
+            pct.push_attribute(("val", val.to_string().as_str()));
+            writer.write_event(Event::Empty(pct)).ok();
+        } else {
+            let mut pts = BytesStart::new("a:spcPts");
+            let val = (ls * 100.0).round() as i64;
+            pts.push_attribute(("val", val.to_string().as_str()));
+            writer.write_event(Event::Empty(pts)).ok();
+        }
+        writer
+            .write_event(Event::End(BytesEnd::new("a:lnSpc")))
+            .ok();
+    }
+
+    if let Some(sb) = p.space_before {
+        writer
+            .write_event(Event::Start(BytesStart::new("a:spcBef")))
+            .ok();
+        let mut pts = BytesStart::new("a:spcPts");
+        pts.push_attribute(("val", sb.to_string().as_str()));
+        writer.write_event(Event::Empty(pts)).ok();
+        writer
+            .write_event(Event::End(BytesEnd::new("a:spcBef")))
+            .ok();
+    }
+
+    if let Some(sa) = p.space_after {
+        writer
+            .write_event(Event::Start(BytesStart::new("a:spcAft")))
+            .ok();
+        let mut pts = BytesStart::new("a:spcPts");
+        pts.push_attribute(("val", sa.to_string().as_str()));
+        writer.write_event(Event::Empty(pts)).ok();
+        writer
+            .write_event(Event::End(BytesEnd::new("a:spcAft")))
+            .ok();
+    }
+}
+
+fn write_default_paragraph_style(dps: &ParagraphDto, writer: &mut Writer<Vec<u8>>) {
+    writer
+        .write_event(Event::Start(BytesStart::new("a:lstStyle")))
+        .ok();
+
+    let mut ppr = BytesStart::new("a:lvl1pPr");
+
+    if let Some(ref algn) = dps.alignment {
+        let val = match algn {
+            Alignment::Left => "l",
+            Alignment::Center => "ctr",
+            Alignment::Right => "r",
+            Alignment::Justify => "just",
+            Alignment::Distribute => "dist",
+            Alignment::ThaiDistribute => "thaiDist",
+            Alignment::JustifiedLow => "justLow",
+        };
+        ppr.push_attribute(("algn", val));
+    }
+
+    writer.write_event(Event::Start(ppr)).ok();
+
+    write_p_pr_children(dps, writer);
+
+    if let Some(ref font) = dps.font {
+        let mut def = BytesStart::new("a:defRPr");
+        if let Some(sz) = font.size {
+            def.push_attribute(("sz", sz.to_string().as_str()));
+        }
+        if let Some(b) = font.bold {
+            def.push_attribute(("b", if b { "1" } else { "0" }));
+        }
+        if let Some(i) = font.italic {
+            def.push_attribute(("i", if i { "1" } else { "0" }));
+        }
+        if let Some(u) = font.underline {
+            def.push_attribute(("u", if u { "sng" } else { "none" }));
+        }
+        writer.write_event(Event::Start(def)).ok();
+        write_font_children(font, writer);
+        writer
+            .write_event(Event::End(BytesEnd::new("a:defRPr")))
+            .ok();
+    }
+
+    writer
+        .write_event(Event::End(BytesEnd::new("a:lvl1pPr")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("a:lstStyle")))
+        .ok();
 }
 
 fn write_run(r: &RunDto, writer: &mut Writer<Vec<u8>>) {

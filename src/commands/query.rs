@@ -39,7 +39,8 @@ fn parse_shapes(
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
     let rels = pkg.get_rels(uri);
     let image_map = build_image_map(rels);
-    let shapes = slide::parse_slide_shapes(part_data, &image_map)?;
+    let mut shapes = slide::parse_slide_shapes(part_data, &image_map)?;
+    crate::model::placeholder::resolve_placeholder_properties(pkg, uri, &mut shapes)?;
 
     if let Some(dir) = media_dir
         && let Some(rels) = rels

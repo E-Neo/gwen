@@ -567,3 +567,50 @@ fn replace_text_frame_rich_roundtrip() {
     assert_eq!(paras[1]["alignment"], "CENTER");
     assert_eq!(paras[1]["runs"][0]["text"], "There");
 }
+
+#[test]
+fn placeholder_inherits_geometry_and_style() {
+    let shape = query(&fixture("placeholder.pptx"), "slides[0].shapes[0]");
+    // Geometry inherited from the slide layout.
+    assert_eq!(shape["left"], 685800);
+    assert_eq!(shape["top"], 2130425);
+    assert_eq!(shape["width"], 7772400);
+    assert_eq!(shape["height"], 1470025);
+    // Fill inherited from the layout spPr.
+    assert_eq!(shape["fill"]["type"], "solid");
+    assert_eq!(shape["fill"]["color"]["rgb"], "C7000B");
+    // Text defaults inherited from the layout lstStyle.
+    let dps = &shape["text_frame"]["default_paragraph_style"];
+    assert_eq!(dps["alignment"], "CENTER");
+    assert_eq!(dps["font"]["name"], "Calibri");
+    assert_eq!(dps["font"]["size"], 3200);
+    assert_eq!(dps["font"]["bold"], true);
+    assert_eq!(dps["font"]["color"]["theme_color"], "tx1");
+}
+
+#[test]
+fn placeholder_default_style_roundtrips_via_text_frame_replace() {
+    let dir = tmp();
+    let out = dir.join("ph_roundtrip.pptx");
+    let text_frame = query(
+        &fixture("placeholder.pptx"),
+        "slides[0].shapes[0].text_frame",
+    );
+    run_ok(&[
+        "replace",
+        fixture("placeholder.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].text_frame",
+        "--value",
+        &text_frame.to_string(),
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let dps = query(
+        &out,
+        "slides[0].shapes[0].text_frame.default_paragraph_style",
+    );
+    assert_eq!(dps["alignment"], "CENTER");
+    assert_eq!(dps["font"]["name"], "Calibri");
+    assert_eq!(dps["font"]["size"], 3200);
+}

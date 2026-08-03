@@ -66,6 +66,23 @@ fn fresh_shape(shape_type: ShapeType) -> ShapeDto {
     }
 }
 
+fn font_has_content(f: &FontDto) -> bool {
+    f.name.is_some()
+        || f.size.is_some()
+        || f.bold.is_some()
+        || f.italic.is_some()
+        || f.underline.is_some()
+        || f.color.is_some()
+}
+
+fn para_has_content(p: &ParagraphDto) -> bool {
+    p.alignment.is_some()
+        || p.line_spacing.is_some()
+        || p.space_before.is_some()
+        || p.space_after.is_some()
+        || p.font.is_some()
+}
+
 fn parse_placeholder_type(raw: &str) -> Option<PlaceholderType> {
     match raw {
         "title" => Some(PlaceholderType::Title),
@@ -164,6 +181,11 @@ pub fn parse_slide_shapes(
     let mut body_pr_margin_r: Option<i64> = None;
     let mut body_pr_margin_t: Option<i64> = None;
     let mut body_pr_margin_b: Option<i64> = None;
+
+    let mut in_lst_style = false;
+    let mut in_lvl1 = false;
+    let mut in_def_rpr = false;
+    let mut default_para_style: Option<ParagraphDto> = None;
 
     let mut in_sp_pr = false;
     let mut in_shape_fill = false;
@@ -596,6 +618,54 @@ pub fn parse_slide_shapes(
                     }
                     b"a:noAutofit" if in_body_pr => {
                         body_pr_auto_size = Some(MsoAutoSize::None);
+                    }
+                    b"a:lstStyle" if in_text_frame => {
+                        in_lst_style = true;
+                        default_para_style = None;
+                    }
+                    b"a:lvl1pPr" if in_lst_style => {
+                        in_lvl1 = true;
+                        in_para_props = true;
+                        para = fresh_para();
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"algn" {
+                                para.alignment = String::from_utf8_lossy(&a.value)
+                                    .parse::<String>()
+                                    .ok()
+                                    .and_then(|s| parse_alignment(&s));
+                            }
+                        }
+                    }
+                    b"a:defRPr" if in_lvl1 => {
+                        run_font = Some(fresh_font());
+                        in_run_props = true;
+                        in_def_rpr = true;
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"sz" => {
+                                    if let Some(ref mut font) = run_font {
+                                        font.size = String::from_utf8_lossy(&a.value).parse().ok();
+                                    }
+                                }
+                                b"b" | b"i" => {
+                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    if let Some(ref mut font) = run_font {
+                                        if a.key.as_ref() == b"b" {
+                                            font.bold = Some(v);
+                                        } else {
+                                            font.italic = Some(v);
+                                        }
+                                    }
+                                }
+                                b"u" => {
+                                    if let Some(ref mut font) = run_font {
+                                        font.underline =
+                                            Some(String::from_utf8_lossy(&a.value) != "none");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     b"a:p" if in_text_frame || in_cell_text => {
                         in_paragraph = true;
@@ -1228,6 +1298,46 @@ pub fn parse_slide_shapes(
                             para.font = Some(font);
                         }
                     }
+                    b"a:lvl1pPr" if in_lst_style => {
+                        let mut p = fresh_para();
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"algn" {
+                                p.alignment = String::from_utf8_lossy(&a.value)
+                                    .parse::<String>()
+                                    .ok()
+                                    .and_then(|s| parse_alignment(&s));
+                            }
+                        }
+                        if para_has_content(&p) {
+                            default_para_style = Some(p);
+                        }
+                        in_lvl1 = false;
+                    }
+                    b"a:defRPr" if in_lvl1 => {
+                        let mut font = fresh_font();
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"sz" => font.size = String::from_utf8_lossy(&a.value).parse().ok(),
+                                b"b" | b"i" => {
+                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    if a.key.as_ref() == b"b" {
+                                        font.bold = Some(v);
+                                    } else {
+                                        font.italic = Some(v);
+                                    }
+                                }
+                                b"u" => {
+                                    font.underline =
+                                        Some(String::from_utf8_lossy(&a.value) != "none");
+                                }
+                                _ => {}
+                            }
+                        }
+                        if font_has_content(&font) {
+                            para.font = Some(font);
+                        }
+                        in_def_rpr = false;
+                    }
                     b"a:solidFill" if in_run_props => {
                         in_solid_fill = true;
                     }
@@ -1373,6 +1483,43 @@ pub fn parse_slide_shapes(
                     b"a:bodyPr" if in_cell_text => {
                         in_body_pr = true;
                     }
+                    b"a:bodyPr" if in_text_frame => {
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"wrap" => {
+                                    body_pr_word_wrap = Some(
+                                        String::from_utf8_lossy(&a.value) == "1"
+                                            || String::from_utf8_lossy(&a.value)
+                                                .to_lowercase()
+                                                .contains("sq"),
+                                    );
+                                }
+                                b"anchor" => {
+                                    body_pr_anchor = String::from_utf8_lossy(&a.value)
+                                        .parse::<String>()
+                                        .ok()
+                                        .and_then(|s| parse_anchor(&s));
+                                }
+                                b"lIns" => {
+                                    body_pr_margin_l =
+                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                b"rIns" => {
+                                    body_pr_margin_r =
+                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                b"tIns" => {
+                                    body_pr_margin_t =
+                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                b"bIns" => {
+                                    body_pr_margin_b =
+                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1401,6 +1548,7 @@ pub fn parse_slide_shapes(
                                     margin_right: body_pr_margin_r.take(),
                                     margin_top: body_pr_margin_t.take(),
                                     margin_bottom: body_pr_margin_b.take(),
+                                    default_paragraph_style: default_para_style.take(),
                                 });
                             } else {
                                 body_pr_auto_size = None;
@@ -1410,6 +1558,7 @@ pub fn parse_slide_shapes(
                                 body_pr_margin_r = None;
                                 body_pr_margin_t = None;
                                 body_pr_margin_b = None;
+                                default_para_style = None;
                             }
                             paragraphs = Vec::new();
                             if let Some(parent) = group_stack.last_mut() {
@@ -1430,6 +1579,9 @@ pub fn parse_slide_shapes(
                         in_spc_bef = false;
                         in_spc_aft = false;
                         in_body_pr = false;
+                        in_lst_style = false;
+                        in_lvl1 = false;
+                        in_def_rpr = false;
                         in_table = false;
                         in_tr = false;
                         in_tc = false;
@@ -1468,6 +1620,29 @@ pub fn parse_slide_shapes(
                     }
                     b"a:bodyPr" if in_body_pr => {
                         in_body_pr = false;
+                    }
+                    b"a:lstStyle" if in_lst_style => {
+                        in_lst_style = false;
+                    }
+                    b"a:lvl1pPr" if in_lvl1 => {
+                        in_lvl1 = false;
+                        in_para_props = false;
+                        in_ln_spc = false;
+                        in_spc_bef = false;
+                        in_spc_aft = false;
+                        if para_has_content(&para) {
+                            default_para_style = Some(std::mem::replace(&mut para, fresh_para()));
+                        }
+                    }
+                    b"a:defRPr" if in_def_rpr => {
+                        if let Some(font) = run_font.take()
+                            && font_has_content(&font)
+                        {
+                            para.font = Some(font);
+                        }
+                        in_run_props = false;
+                        in_solid_fill = false;
+                        in_def_rpr = false;
                     }
                     b"a:r" if in_run => {
                         run.text = text_buf.trim().to_string();
@@ -1629,6 +1804,7 @@ pub fn parse_slide_shapes(
                                     margin_right: None,
                                     margin_top: None,
                                     margin_bottom: None,
+                                    default_paragraph_style: None,
                                 })
                             },
                         };
@@ -1810,5 +1986,56 @@ mod tests {
         assert_eq!(crop.top, Some(0.05));
         assert_eq!(crop.right, Some(0.0));
         assert_eq!(crop.bottom, Some(0.0));
+    }
+
+    #[test]
+    fn parses_lst_style_level1_defaults() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr/>
+            <p:sp><p:nvSpPr><p:cNvPr id="2" name="s"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn="ctr"><a:lnSpc><a:spcPct val="150000"/></a:lnSpc><a:defRPr sz="3200" b="1" i="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Calibri"/></a:defRPr></a:lvl1pPr></a:lstStyle><a:p><a:r><a:t>hi</a:t></a:r></a:p></p:txBody></p:sp>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        let tf = shapes[0].text_frame.as_ref().unwrap();
+        let dps = tf.default_paragraph_style.as_ref().expect("default style");
+        assert_eq!(dps.alignment, Some(Alignment::Center));
+        assert_eq!(dps.line_spacing, Some(1.5));
+        let font = dps.font.as_ref().unwrap();
+        assert_eq!(font.name.as_deref(), Some("Calibri"));
+        assert_eq!(font.size, Some(3200));
+        assert_eq!(font.bold, Some(true));
+        assert_eq!(font.italic, Some(false));
+        assert_eq!(
+            font.color.as_ref().unwrap().theme_color.as_deref(),
+            Some("tx1")
+        );
+    }
+
+    #[test]
+    fn empty_lst_style_yields_no_default_style() {
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr/>
+            <p:sp><p:nvSpPr><p:cNvPr id="2" name="s"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>hi</a:t></a:r></a:p></p:txBody></p:sp>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        assert!(
+            shapes[0]
+                .text_frame
+                .as_ref()
+                .unwrap()
+                .default_paragraph_style
+                .is_none()
+        );
     }
 }
