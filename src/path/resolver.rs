@@ -36,10 +36,6 @@ pub enum ResolvedPath {
         master_idx: Option<usize>,
         remaining: Vec<PathSegment>,
     },
-    Layout {
-        layout_idx: Option<usize>,
-        remaining: Vec<PathSegment>,
-    },
 }
 
 pub fn parse_path(path_str: &str) -> AppResult<Vec<PathSegment>> {
@@ -229,7 +225,7 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
         PathSegment::Field(name) if name == "theme" => Ok(ResolvedPath::Theme {
             remaining: segments[1..].to_vec(),
         }),
-        PathSegment::Field(name) if name == "slideMasters" => {
+        PathSegment::Field(name) if name == "slide_masters" => {
             let tail = &segments[1..];
             if tail.is_empty() {
                 return Ok(ResolvedPath::Master {
@@ -243,25 +239,7 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
                     remaining: tail[1..].to_vec(),
                 }),
                 _ => Err(AppError::PathParse(
-                    "Expected index after slideMasters".to_string(),
-                )),
-            }
-        }
-        PathSegment::Field(name) if name == "slideLayouts" => {
-            let tail = &segments[1..];
-            if tail.is_empty() {
-                return Ok(ResolvedPath::Layout {
-                    layout_idx: None,
-                    remaining: Vec::new(),
-                });
-            }
-            match &tail[0] {
-                PathSegment::Index(idx) => Ok(ResolvedPath::Layout {
-                    layout_idx: Some(*idx),
-                    remaining: tail[1..].to_vec(),
-                }),
-                _ => Err(AppError::PathParse(
-                    "Expected index after slideLayouts".to_string(),
+                    "Expected index after slide_masters".to_string(),
                 )),
             }
         }
@@ -285,7 +263,6 @@ impl ResolvedPath {
             ResolvedPath::NotesShape { remaining, .. } => remaining,
             ResolvedPath::Theme { remaining } => remaining,
             ResolvedPath::Master { remaining, .. } => remaining,
-            ResolvedPath::Layout { remaining, .. } => remaining,
         }
     }
 
@@ -380,7 +357,7 @@ mod tests {
 
     #[test]
     fn master_path_resolves() {
-        match resolve_path(&parse_path("p.slideMasters[0].shapes[1].left").unwrap()).unwrap() {
+        match resolve_path(&parse_path("p.slide_masters[0].shapes[1].left").unwrap()).unwrap() {
             ResolvedPath::Master {
                 master_idx: Some(0),
                 remaining,
@@ -391,7 +368,7 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
         assert!(matches!(
-            resolve_path(&parse_path("p.slideMasters").unwrap()).unwrap(),
+            resolve_path(&parse_path("p.slide_masters").unwrap()).unwrap(),
             ResolvedPath::Master {
                 master_idx: None,
                 ..
@@ -400,13 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn layout_path_resolves() {
-        match resolve_path(&parse_path("p.slideLayouts[0].shapes").unwrap()).unwrap() {
-            ResolvedPath::Layout {
-                layout_idx: Some(0),
+    fn master_layout_path_resolves() {
+        match resolve_path(&parse_path("p.slide_masters[0].slide_layouts[2].shapes").unwrap())
+            .unwrap()
+        {
+            ResolvedPath::Master {
+                master_idx: Some(0),
                 remaining,
             } => {
-                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "shapes"));
+                assert!(matches!(&remaining[0], PathSegment::Field(n) if n == "slide_layouts"));
+                assert!(matches!(&remaining[1], PathSegment::Index(2)));
+                assert!(matches!(&remaining[2], PathSegment::Field(n) if n == "shapes"));
             }
             other => panic!("unexpected: {other:?}"),
         }

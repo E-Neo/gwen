@@ -1,3 +1,6 @@
+use quick_xml::Reader;
+use quick_xml::events::Event;
+
 use crate::error::{AppError, AppResult};
 use crate::opc::Package;
 
@@ -48,7 +51,7 @@ pub fn theme_uri(pkg: &Package) -> Option<String> {
     None
 }
 
-/// Resolve the slide master part URIs, in relationship order.
+/// Resolve the slide master part URIs, deterministically sorted by URI.
 pub fn master_uris(pkg: &Package) -> Vec<String> {
     let mut out = Vec::new();
     let Some(rels) = pkg.get_rels("ppt/presentation.xml") else {
@@ -61,23 +64,71 @@ pub fn master_uris(pkg: &Package) -> Vec<String> {
             out.push(uri);
         }
     }
+    out.sort();
     out
 }
 
-/// Resolve all slide layout part URIs (walking each master's relationships).
-pub fn layout_uris(pkg: &Package) -> Vec<String> {
+/// Resolve the slide layout part URIs owned by a master, sorted by URI.
+pub fn master_slide_layout_uris(pkg: &Package, master_uri: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for master in master_uris(pkg) {
-        let Some(rels) = pkg.get_rels(&master) else {
-            continue;
-        };
-        for rel in rels.values() {
-            if rel.rel_type.contains("slideLayout")
-                && let Some(uri) = pkg.resolve_relationship_target(&master, rel)
-            {
-                out.push(uri);
-            }
+    let Some(rels) = pkg.get_rels(master_uri) else {
+        return out;
+    };
+    for rel in rels.values() {
+        if rel.rel_type.contains("slideLayout")
+            && let Some(uri) = pkg.resolve_relationship_target(master_uri, rel)
+        {
+            out.push(uri);
         }
     }
+    out.sort();
     out
+}
+
+/// Resolve the slide layout part URI referenced by a slide, if any.
+pub fn slide_layout_uri(pkg: &Package, slide_uri: &str) -> Option<String> {
+    let rels = pkg.get_rels(slide_uri)?;
+    for rel in rels.values() {
+        if rel.rel_type.contains("slideLayout") {
+            return pkg.resolve_relationship_target(slide_uri, rel);
+        }
+    }
+    None
+}
+
+/// Resolve which master owns a slide's layout, returning `(master_idx, layout_idx)`
+/// into `master_uris` and `master_slide_layout_uris` respectively.
+pub fn slide_layout_ref(pkg: &Package, slide_uri: &str) -> Option<(usize, usize)> {
+    let layout_uri = slide_layout_uri(pkg, slide_uri)?;
+    for (m, master) in master_uris(pkg).iter().enumerate() {
+        if let Some(l) = master_slide_layout_uris(pkg, master)
+            .iter()
+            .position(|u| u == &layout_uri)
+        {
+            return Some((m, l));
+        }
+    }
+    None
+}
+
+/// Read the `name` attribute of a slide/master/layout's `p:cSld` element
+/// (python-pptx `_BaseSlide.name`).
+pub fn c_sld_name(pkg: &Package, uri: &str) -> Option<String> {
+    let data = pkg.get_part(uri)?;
+    let mut reader = Reader::from_reader(data);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"p:cSld" => {
+                return e
+                    .attributes()
+                    .flatten()
+                    .find(|a| a.key.as_ref() == b"name")
+                    .map(|a| String::from_utf8_lossy(&a.value).to_string());
+            }
+            Ok(Event::Eof) => return None,
+            Err(_) => return None,
+            _ => {}
+        }
+    }
 }

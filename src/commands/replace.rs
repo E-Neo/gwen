@@ -303,22 +303,29 @@ pub fn execute(input: &str, path_str: &str, value: &str, output: &str) -> AppRes
                 .get(*idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*idx))?
                 .clone();
-            replace_in_shapes_part(&mut pkg, &master_uri, remaining, value)?;
+            let (target_uri, remaining) = match remaining.split_first() {
+                Some((path::PathSegment::Field(n), tail))
+                    if n == "slide_layouts"
+                        && matches!(tail.first(), Some(path::PathSegment::Index(_))) =>
+                {
+                    let (layout_idx, tail) = tail.split_at(1);
+                    let path::PathSegment::Index(li) = &layout_idx[0] else {
+                        unreachable!();
+                    };
+                    let layouts = crate::model::parts::master_slide_layout_uris(&pkg, &master_uri);
+                    let layout_uri = layouts
+                        .get(*li)
+                        .ok_or(AppError::SlideIndexOutOfBounds(*li))?
+                        .clone();
+                    (layout_uri, tail.to_vec())
+                }
+                _ => (master_uri, remaining.to_vec()),
+            };
+            replace_in_shapes_part(&mut pkg, &target_uri, &remaining, value)?;
         }
-        path::ResolvedPath::Layout {
-            layout_idx: Some(idx),
-            remaining,
-        } => {
-            let layouts = crate::model::parts::layout_uris(&pkg);
-            let layout_uri = layouts
-                .get(*idx)
-                .ok_or(AppError::SlideIndexOutOfBounds(*idx))?
-                .clone();
-            replace_in_shapes_part(&mut pkg, &layout_uri, remaining, value)?;
-        }
-        path::ResolvedPath::Master { .. } | path::ResolvedPath::Layout { .. } => {
+        path::ResolvedPath::Master { .. } => {
             return Err(AppError::PathParse(
-                "Index required (e.g. p.slideMasters[0].shapes[0])".to_string(),
+                "Index required (e.g. p.slide_masters[0].shapes[0])".to_string(),
             ));
         }
         path::ResolvedPath::Notes {

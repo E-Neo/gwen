@@ -70,7 +70,38 @@ fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<se
         .get_part(uri)
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
     let background = crate::engine::xml_edit::parse_slide_background(part_data);
-    Ok(json!({ "shapes": shapes, "background": background }))
+
+    let notes = notes::resolve_notes_uri(pkg, uri).map(|notes_uri| {
+        let shapes = parse_shapes(pkg, &notes_uri, media_dir).ok();
+        json!({ "shapes": shapes })
+    });
+
+    let slide_layout = crate::model::parts::slide_layout_ref(pkg, uri).map(|(m, l)| {
+        let name = crate::model::parts::slide_layout_uri(pkg, uri)
+            .and_then(|u| crate::model::parts::c_sld_name(pkg, &u));
+        json!({ "master": m, "layout": l, "name": name })
+    });
+
+    Ok(json!({
+        "shapes": shapes,
+        "background": background,
+        "notes": notes,
+        "slide_layout": slide_layout,
+    }))
+}
+
+fn master_json(pkg: &Package, master_uri: &str) -> serde_json::Value {
+    let shapes = parse_shapes(pkg, master_uri, None).unwrap_or_default();
+    let name = crate::model::parts::c_sld_name(pkg, master_uri);
+    let slide_layouts = crate::model::parts::master_slide_layout_uris(pkg, master_uri)
+        .into_iter()
+        .map(|layout_uri| {
+            let shapes = parse_shapes(pkg, &layout_uri, None).unwrap_or_default();
+            let name = crate::model::parts::c_sld_name(pkg, &layout_uri);
+            json!({ "name": name, "shapes": shapes })
+        })
+        .collect::<Vec<_>>();
+    json!({ "name": name, "slide_layouts": slide_layouts, "shapes": shapes })
 }
 
 fn navigate_json(
@@ -93,12 +124,7 @@ fn navigate_json(
     Ok(current)
 }
 
-pub fn execute(
-    input: &str,
-    path_str: &str,
-    media_dir: Option<&str>,
-    pretty: bool,
-) -> AppResult<()> {
+pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResult<()> {
     let pkg = Package::open(Path::new(input))?;
 
     let pres_part = pkg
@@ -125,10 +151,19 @@ pub fn execute(
                 .map(core_props::parse_core_properties)
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
+            let slide_masters = crate::model::parts::master_uris(&pkg)
+                .iter()
+                .map(|m| master_json(&pkg, m))
+                .collect::<Vec<_>>();
+            let theme = crate::model::parts::theme_uri(&pkg)
+                .and_then(|u| pkg.get_part(&u))
+                .map(crate::model::theme::parse_theme);
             json!({
                 "slide_width": pres.slide_width,
                 "slide_height": pres.slide_height,
                 "slides": slides,
+                "slide_masters": slide_masters,
+                "theme": theme,
                 "core_properties": core,
             })
         }
@@ -217,43 +252,17 @@ pub fn execute(
         } => {
             let masters = crate::model::parts::master_uris(&pkg);
             match master_idx {
-                Some(i) => {
-                    let m = masters.get(*i).ok_or(AppError::SlideIndexOutOfBounds(*i))?;
-                    let shapes = parse_shapes(&pkg, m, None)?;
-                    json!({ "shapes": shapes })
-                }
-                None => json!(
+                Some(i) => masters
+                    .get(*i)
+                    .ok_or(AppError::SlideIndexOutOfBounds(*i))
+                    .map(|m| master_json(&pkg, m)),
+                None => Ok(json!(
                     masters
                         .iter()
-                        .map(|m| {
-                            let shapes = parse_shapes(&pkg, m, None)?;
-                            Ok(json!({ "shapes": shapes }))
-                        })
-                        .collect::<AppResult<Vec<_>>>()?
-                ),
-            }
-        }
-        path::ResolvedPath::Layout {
-            layout_idx,
-            remaining: _,
-        } => {
-            let layouts = crate::model::parts::layout_uris(&pkg);
-            match layout_idx {
-                Some(i) => {
-                    let l = layouts.get(*i).ok_or(AppError::SlideIndexOutOfBounds(*i))?;
-                    let shapes = parse_shapes(&pkg, l, None)?;
-                    json!({ "shapes": shapes })
-                }
-                None => json!(
-                    layouts
-                        .iter()
-                        .map(|l| {
-                            let shapes = parse_shapes(&pkg, l, None)?;
-                            Ok(json!({ "shapes": shapes }))
-                        })
-                        .collect::<AppResult<Vec<_>>>()?
-                ),
-            }
+                        .map(|m| master_json(&pkg, m))
+                        .collect::<Vec<_>>()
+                )),
+            }?
         }
         path::ResolvedPath::Notes {
             slide_idx: Some(idx),
@@ -263,10 +272,13 @@ pub fn execute(
                 .slide_uris
                 .get(*idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
-            let notes_uri = notes::resolve_notes_uri(&pkg, slide_uri)
-                .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?;
-            let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
-            json!({ "shapes": shapes })
+            match notes::resolve_notes_uri(&pkg, slide_uri) {
+                Some(notes_uri) => {
+                    let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
+                    json!({ "shapes": shapes })
+                }
+                None => serde_json::Value::Null,
+            }
         }
         path::ResolvedPath::Notes {
             slide_idx: None, ..
@@ -298,11 +310,7 @@ pub fn execute(
     };
 
     let result = navigate_json(&value, resolved.remaining_segments())?;
-    let output = if pretty {
-        serde_json::to_string_pretty(&result)?
-    } else {
-        serde_json::to_string(&result)?
-    };
+    let output = serde_json::to_string(&result)?;
     println!("{output}");
 
     Ok(())

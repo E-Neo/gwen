@@ -311,19 +311,35 @@ fn theme_query_reads_whole_scheme() {
 
 #[test]
 fn master_and_layout_query_expose_shapes() {
-    let masters = query(&fixture("two_slides.pptx"), "p.slideMasters");
+    let masters = query(&fixture("two_slides.pptx"), "p.slide_masters");
     let arr = masters.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert!(arr[0]["shapes"].is_array());
+    assert!(arr[0]["slide_layouts"].is_array());
 
-    let layouts = query(&fixture("two_slides.pptx"), "p.slideLayouts");
-    assert!(!layouts.as_array().unwrap().is_empty());
-
-    let first_layout = query(
+    let first_layout_name = query(
         &fixture("two_slides.pptx"),
-        "p.slideLayouts[0].shapes[0].name",
+        "p.slide_masters[0].slide_layouts[0].name",
     );
-    assert!(first_layout.is_string());
+    assert!(first_layout_name.is_string());
+
+    let first_layout_shape = query(
+        &fixture("two_slides.pptx"),
+        "p.slide_masters[0].slide_layouts[0].shapes[0].name",
+    );
+    assert!(first_layout_shape.is_string());
+}
+
+#[test]
+fn slide_layout_reference_points_to_master_layout() {
+    let reference = query(&fixture("two_slides.pptx"), "slides[0].slide_layout");
+    let m = reference["master"].as_u64().unwrap() as usize;
+    let l = reference["layout"].as_u64().unwrap() as usize;
+    let expected = query(
+        &fixture("two_slides.pptx"),
+        &format!("p.slide_masters[{m}].slide_layouts[{l}].name"),
+    );
+    assert_eq!(reference["name"], expected);
 }
 
 #[test]
@@ -334,13 +350,13 @@ fn master_shape_replace_persists() {
         "replace",
         fixture("two_slides.pptx").to_str().unwrap(),
         "--path",
-        "p.slideMasters[0].shapes[0].left",
+        "p.slide_masters[0].shapes[0].left",
         "--value",
         "100000",
         "--output",
         out.to_str().unwrap(),
     ]);
-    assert_eq!(query(&out, "p.slideMasters[0].shapes[0].left"), 100000);
+    assert_eq!(query(&out, "p.slide_masters[0].shapes[0].left"), 100000);
 }
 
 #[test]
