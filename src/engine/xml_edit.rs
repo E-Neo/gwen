@@ -347,6 +347,32 @@ fn replace_text_frame_json_lossless(
     write_events(events)
 }
 
+/// Replace the plain text of a shape, rebuilding its txBody with a single
+/// paragraph/run containing `value`. Unlike patching existing `<a:t>` elements
+/// in place, this also creates text when the shape has an empty text frame and
+/// collapses multiple runs/paragraphs down to one.
+pub fn replace_shape_text_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let tf: crate::dto::TextFrameDto = serde_json::from_value(json!({
+        "paragraphs": [{ "runs": [{ "text": value }] }]
+    }))
+    .map_err(|e| AppError::InvalidValue(format!("Invalid text value: {e}")))?;
+    let inner_xml = crate::dto::xml::txbody_to_xml(&tf);
+    let inner_events = read_events(inner_xml.as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+
+    events.splice(txbody_start + 1..txbody_end, inner_events);
+    write_events(events)
+}
+
 /// Set one crop side (left/top/right/bottom) of a picture shape's `a:srcRect`
 /// child of its `a:blip`. `value` is a fraction 0.0-1.0 of the amount cropped.
 /// The `a:srcRect` element is created if the picture has none.
@@ -3323,5 +3349,68 @@ mod tests {
     fn text_frame_json_rejects_non_object() {
         let path = path::parse_path("text_frame").unwrap();
         assert!(replace_shape_property_lossless(SLIDE.as_bytes(), 0, &path, "hello").is_err());
+    }
+
+    #[test]
+    fn replace_shape_text_overwrites_existing_text() {
+        let out = replace_shape_text_lossless(SLIDE.as_bytes(), 0, "Hi").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(out_str.matches(">Hi</a:t>").count(), 1, "got: {out_str}");
+        assert!(!out_str.contains(">Hello</a:t>"), "got: {out_str}");
+        // Non-text shape-level content preserved.
+        assert!(out_str.contains("gradFill"), "got: {out_str}");
+        assert!(out_str.contains("id=\"2\""), "got: {out_str}");
+    }
+
+    #[test]
+    fn replace_shape_text_creates_text_when_empty() {
+        const XML: &str = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="1" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+          <p:spPr/>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody>
+        </p:sp>"#;
+        let out = replace_shape_text_lossless(XML.as_bytes(), 0, "Hello World").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out_str.matches(">Hello World</a:t>").count(),
+            1,
+            "got: {out_str}"
+        );
+        // The run must precede the end-paragraph run keep mark.
+        let before_endpara = out_str.split("<a:endParaRPr").next().unwrap();
+        assert!(
+            before_endpara.contains("<a:t>Hello World</a:t>"),
+            "got: {out_str}"
+        );
+    }
+
+    #[test]
+    fn replace_shape_text_collapses_multiple_paragraphs() {
+        const XML: &str = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="1" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+          <p:spPr/>
+          <p:txBody>
+            <a:bodyPr/>
+            <a:p><a:r><a:t>部门：</a:t></a:r></a:p>
+            <a:p><a:r><a:t>作者：</a:t></a:r></a:p>
+            <a:p><a:r><a:t>日期：</a:t></a:r></a:p>
+          </p:txBody>
+        </p:sp>"#;
+        let out = replace_shape_text_lossless(XML.as_bytes(), 0, "Hello World").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out_str.matches(">Hello World</a:t>").count(),
+            1,
+            "expected one collapsed run, got: {out_str}"
+        );
+        assert_eq!(out_str.matches("<a:p>").count(), 1, "got: {out_str}");
+    }
+
+    #[test]
+    fn replace_shape_text_rejects_shape_without_text_frame() {
+        // shape_idx 2 is the picture (p:pic) with no txBody.
+        assert!(replace_shape_text_lossless(SLIDE.as_bytes(), 2, "Hi").is_err());
     }
 }

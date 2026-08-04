@@ -77,7 +77,9 @@ fn replace_shape_properties(
 
     match (first_seg, remaining.len()) {
         (Some("text"), 1) => {
-            let new_data = editor::replace_shape_text(&part_data, shape_idx, "text", &scalar)?;
+            let new_data = crate::engine::xml_edit::replace_shape_text_lossless(
+                &part_data, shape_idx, &scalar,
+            )?;
             pkg.set_part(container_uri, new_data);
         }
         (Some(name), 1) if SHAPE_ATTRS.contains(&name) => {

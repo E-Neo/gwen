@@ -3,7 +3,7 @@ use std::io::Write;
 
 use quick_xml::Reader;
 use quick_xml::Writer;
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesStart, Event};
 
 use crate::dto::ShapeDto;
 use crate::error::{AppError, AppResult};
@@ -16,79 +16,6 @@ fn is_shape_tag(name: &[u8]) -> bool {
         name,
         b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame"
     )
-}
-
-pub fn replace_text(xml_bytes: &[u8], shape_idx: usize, new_text: &str) -> AppResult<Vec<u8>> {
-    let mut reader = Reader::from_reader(xml_bytes);
-    reader.config_mut().trim_text(true);
-    let mut writer = Writer::new(Vec::new());
-    let mut shape_counter = 0;
-    let mut inside_target_shape = false;
-    let mut buffer = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(Event::Start(ref e)) => {
-                if is_shape_tag(e.name().as_ref()) {
-                    if shape_counter == shape_idx {
-                        inside_target_shape = true;
-                    }
-                    shape_counter += 1;
-                }
-                writer
-                    .write_event(Event::Start(e.clone()))
-                    .map_err(AppError::Io)?;
-
-                if inside_target_shape && e.name().as_ref() == b"a:t" {
-                    writer
-                        .write_event(Event::Text(BytesText::new(new_text)))
-                        .map_err(AppError::Io)?;
-                    loop {
-                        match reader.read_event_into(&mut buffer) {
-                            Ok(Event::End(ref end)) if end.name().as_ref() == b"a:t" => {
-                                writer
-                                    .write_event(Event::End(end.clone()))
-                                    .map_err(AppError::Io)?;
-                                break;
-                            }
-                            Ok(Event::Eof) => break,
-                            Err(e) => return Err(AppError::Xml(e)),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                if inside_target_shape && (is_shape_tag(e.name().as_ref())) {
-                    inside_target_shape = false;
-                }
-                writer
-                    .write_event(Event::End(e.clone()))
-                    .map_err(AppError::Io)?;
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(AppError::Xml(e)),
-            Ok(e) => {
-                writer.write_event(e).map_err(AppError::Io)?;
-            }
-        }
-    }
-    Ok(writer.into_inner())
-}
-
-pub fn replace_shape_text(
-    xml_bytes: &[u8],
-    shape_idx: usize,
-    target: &str,
-    value: &str,
-) -> AppResult<Vec<u8>> {
-    match target {
-        "text" => replace_text(xml_bytes, shape_idx, value),
-        _ => Err(AppError::InvalidValue(format!(
-            "Unsupported target for replace: {:?}",
-            target
-        ))),
-    }
 }
 
 pub fn remove_shape(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {

@@ -614,3 +614,22 @@ fn placeholder_default_style_roundtrips_via_text_frame_replace() {
     assert_eq!(dps["font"]["name"], "Calibri");
     assert_eq!(dps["font"]["size"], 3200);
 }
+
+#[test]
+fn replace_shape_text_creates_text_and_collapses_runs() {
+    let dir = tmp();
+    let out = dir.join("text_replace.pptx");
+    run_ok(&[
+        "replace",
+        fixture("placeholder.pptx").to_str().unwrap(),
+        "--path",
+        "slides[0].shapes[0].text",
+        "--value",
+        "\"Hello World\"",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    let tf = query(&out, "slides[0].shapes[0].text_frame");
+    assert_eq!(tf["paragraphs"].as_array().unwrap().len(), 1);
+    assert_eq!(tf["paragraphs"][0]["runs"][0]["text"], "Hello World");
+}
