@@ -617,13 +617,11 @@ fn color_dto_from_value(
             color_type: Some(crate::dto::ColorType::Rgb),
             rgb: Some(value.to_string()),
             theme_color: None,
-            brightness: None,
         }),
         "theme_color" => Ok(crate::dto::ColorFormatDto {
             color_type: Some(crate::dto::ColorType::Scheme),
             rgb: None,
             theme_color: Some(value.to_string()),
-            brightness: None,
         }),
         _ => Err(AppError::PathParse(format!(
             "Unknown color property '{}'",
@@ -659,7 +657,6 @@ fn fill_dto_from_value(rest: &[path::PathSegment], value: &str) -> AppResult<cra
             Ok(crate::dto::FillDto {
                 fill_type: Some(t),
                 color: None,
-                alpha: None,
             })
         }
         "color" => {
@@ -672,7 +669,6 @@ fn fill_dto_from_value(rest: &[path::PathSegment], value: &str) -> AppResult<cra
             Ok(crate::dto::FillDto {
                 fill_type: Some(crate::dto::FillType::Solid),
                 color: Some(color),
-                alpha: None,
             })
         }
         _ => Err(AppError::PathParse(format!(
@@ -2708,6 +2704,941 @@ pub fn replace_theme_property(
         }
     }
 
+    write_events(events)
+}
+
+/// Replace the whole `a:lstStyle` of a shape's text frame (the
+/// `default_paragraph_style` field) with a freshly serialized level-1 style.
+pub fn replace_lst_style_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let dps: crate::dto::ParagraphDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid paragraph style JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::lst_style_to_xml(&dps).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let lst_start = txbody_start + 1;
+    let (lst_range, insert_pos) = if let Some(r) =
+        find_elem_range(&events, b"a:lstStyle", txbody_start)
+        && r.0 <= txbody_end
+    {
+        (Some(r), r.0)
+    } else {
+        (None, lst_start)
+    };
+    if let Some((s, e)) = lst_range {
+        events.splice(s..=e, inner_events);
+    } else {
+        for ev in inner_events.into_iter().rev() {
+            events.insert(insert_pos, ev);
+        }
+    }
+    write_events(events)
+}
+
+/// Replace the whole paragraph at `text_frame.paragraphs[k]` with a freshly
+/// serialized `ParagraphDto`, splicing the XML element in place.
+pub fn replace_paragraph_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let para: crate::dto::ParagraphDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid paragraph JSON: {e}")))?;
+    let mut writer = Writer::new(Vec::new());
+    crate::dto::xml::write_paragraph(&para, &mut writer);
+    let inner_events = read_events(&writer.into_inner())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+    events.splice(para_start..=para_end, inner_events);
+    write_events(events)
+}
+
+/// Replace the whole run at `text_frame.paragraphs[k].runs[m]` with a freshly
+/// serialized `RunDto`.
+pub fn replace_run_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    run_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let run: crate::dto::RunDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid run JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::run_to_xml(&run).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+    let (run_start, run_end) = find_nth_child_range(&events, para_start, para_end, b"a:r", run_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Run index {run_idx} not found")))?;
+    events.splice(run_start..=run_end, inner_events);
+    write_events(events)
+}
+
+/// Replace the `a:rPr` of a run with a freshly serialized `FontDto`, creating
+/// the property element when the run has none.
+pub fn replace_run_font_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    run_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let font: crate::dto::FontDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid font JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::rpr_to_xml(&font).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+    let (run_start, run_end) = find_nth_child_range(&events, para_start, para_end, b"a:r", run_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Run index {run_idx} not found")))?;
+
+    let (rpr_range, insert_pos) = find_rpr_in_run(&events, run_start, run_end);
+    if let Some((s, e)) = rpr_range {
+        events.splice(s..=e, inner_events);
+    } else {
+        for ev in inner_events.into_iter().rev() {
+            events.insert(insert_pos, ev);
+        }
+    }
+    write_events(events)
+}
+
+/// Replace the `a:endParaRPr` of a paragraph with a freshly serialized
+/// `FontDto`, creating it when absent.
+pub fn replace_para_font_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let font: crate::dto::FontDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid font JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::end_para_rpr_to_xml(&font).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+
+    let end_rpr = find_elem_range(&events, b"a:endParaRPr", para_start).filter(|r| r.0 <= para_end);
+    match end_rpr {
+        Some((s, e)) => {
+            events.splice(s..=e, inner_events);
+        }
+        None => {
+            for ev in inner_events.into_iter().rev() {
+                events.insert(para_end, ev);
+            }
+        }
+    }
+    write_events(events)
+}
+
+/// Remove the text frame (`p:txBody`) from a shape.
+pub fn delete_shape_text_frame(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let Some((s, e)) =
+        find_elem_range(&events, b"p:txBody", shape_start).filter(|r| r.0 <= shape_end)
+    else {
+        return Err(AppError::PathParse("Shape has no text frame".to_string()));
+    };
+    for j in (s..=e).rev() {
+        events.remove(j);
+    }
+    write_events(events)
+}
+
+/// Remove the fill child elements from a shape's `p:spPr`. When the shape has
+/// no local property element (the fill is inherited from the layout), there is
+/// nothing to remove and the document is returned unchanged.
+pub fn delete_shape_fill(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let Some((sppr_start, sppr_end)) = find_sppr_range(&events, shape_start, shape_end) else {
+        return Ok(xml_bytes.to_vec());
+    };
+    remove_children_by_name(&mut events, sppr_start, sppr_end, &SHAPE_FILL_TAGS);
+    write_events(events)
+}
+
+/// Remove the outline (`a:ln`) from a shape's `p:spPr`, no-op when the shape
+/// has no local properties element.
+pub fn delete_shape_outline(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let Some((sppr_start, sppr_end)) = find_sppr_range(&events, shape_start, shape_end) else {
+        return Ok(xml_bytes.to_vec());
+    };
+    remove_children_by_name(&mut events, sppr_start, sppr_end, &[b"a:ln"]);
+    write_events(events)
+}
+
+/// Replace the whole table (`a:tbl`) of a table shape.
+pub fn replace_whole_table_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let table: crate::dto::TableDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid table JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::table_to_xml(&table).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (tbl_start, tbl_end) = find_elem_range(&events, b"a:tbl", shape_start)
+        .filter(|r| r.0 <= shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no table".to_string()))?;
+    events.splice(tbl_start..=tbl_end, inner_events);
+    write_events(events)
+}
+
+/// Replace a single table row (`a:tr`) with a freshly serialized `TableRowDto`,
+/// padded to the table's current column count.
+pub fn replace_table_row_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    row_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let row: crate::dto::TableRowDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid table row JSON: {e}")))?;
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (tbl_start, tbl_end) = find_elem_range(&events, b"a:tbl", shape_start)
+        .filter(|r| r.0 <= shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no table".to_string()))?;
+    let col_count = count_grid_cols(&events, tbl_start, tbl_end);
+    let (row_start, row_end) = find_nth_child_range(&events, tbl_start, tbl_end, b"a:tr", row_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Table row {row_idx} not found")))?;
+    let inner_events = read_events(table_row_to_xml(&row, col_count).as_bytes())?;
+    events.splice(row_start..=row_end, inner_events);
+    write_events(events)
+}
+
+/// Replace a single table cell (`a:tc`) with a freshly serialized `TableCellDto`.
+pub fn replace_table_cell_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    row_idx: usize,
+    cell_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let cell: crate::dto::TableCellDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid table cell JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::table_cell_to_xml(&cell).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (tbl_start, tbl_end) = find_elem_range(&events, b"a:tbl", shape_start)
+        .filter(|r| r.0 <= shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no table".to_string()))?;
+    let (row_start, row_end) = find_nth_child_range(&events, tbl_start, tbl_end, b"a:tr", row_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Table row {row_idx} not found")))?;
+    let (cell_start, cell_end) =
+        find_nth_child_range(&events, row_start, row_end, b"a:tc", cell_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Table cell {cell_idx} not found")))?;
+    events.splice(cell_start..=cell_end, inner_events);
+    write_events(events)
+}
+
+/// Replace a single table grid column (`a:gridCol`).
+pub fn replace_table_grid_col_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    col_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let col: crate::dto::GridColDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid grid column JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::grid_col_to_xml(&col).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (tbl_start, tbl_end) = find_elem_range(&events, b"a:tbl", shape_start)
+        .filter(|r| r.0 <= shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no table".to_string()))?;
+    let (grid_start, grid_end) = find_elem_range(&events, b"a:tblGrid", tbl_start)
+        .filter(|r| r.0 <= tbl_end)
+        .ok_or_else(|| AppError::PathParse("Table has no grid".to_string()))?;
+    let (col_start, col_end) =
+        find_nth_child_range(&events, grid_start, grid_end, b"a:gridCol", col_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Grid column {col_idx} not found")))?;
+    events.splice(col_start..=col_end, inner_events);
+    write_events(events)
+}
+
+/// Replace a single chart series (`c:ser`) with a freshly serialized
+/// `ChartSeriesDto`. `remaining` is `chart.series[N]`.
+pub fn replace_chart_series_lossless(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let inner = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let ser_idx = match inner {
+        [path::PathSegment::Field(n), path::PathSegment::Index(i)] if n == "series" => *i,
+        _ => {
+            return Err(AppError::PathParse("Expected chart.series[N]".to_string()));
+        }
+    };
+    let series: crate::dto::ChartSeriesDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid chart series JSON: {e}")))?;
+    let inner_events =
+        read_events(crate::dto::xml::chart_series_to_xml(&series, ser_idx).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (ct_start, ct_end) = find_chart_type_range(&events)
+        .ok_or_else(|| AppError::PathParse("Chart type element not found".to_string()))?;
+    let (ser_start, ser_end) = find_nth_elem_range(&events, b"c:ser", ct_start, ct_end, ser_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Series {ser_idx} not found")))?;
+    events.splice(ser_start..=ser_end, inner_events);
+    write_events(events)
+}
+
+/// Append a chart point (`c:pt`) to a series' categories or values cache,
+/// bumping the `ptCount`. `remaining` is `chart.series[N].categories` or
+/// `chart.series[N].values`; the index comes from `pt_idx` being one past the
+/// current end. `value` is the new category/value.
+pub fn add_chart_point_lossless(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+    pt_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let inner = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let (ser_idx, prop) = match inner {
+        [
+            path::PathSegment::Field(n),
+            path::PathSegment::Index(i),
+            path::PathSegment::Field(p),
+        ] if n == "series" && (p == "categories" || p == "values") => (*i, p.as_str()),
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected chart.series[N].categories or .values".to_string(),
+            ));
+        }
+    };
+
+    let mut events = read_events(xml_bytes)?;
+    let (ct_start, ct_end) = find_chart_type_range(&events)
+        .ok_or_else(|| AppError::PathParse("Chart type element not found".to_string()))?;
+    let (ser_start, ser_end) = find_nth_elem_range(&events, b"c:ser", ct_start, ct_end, ser_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Series {ser_idx} not found")))?;
+
+    let (target_name, cache_names): (&[u8], [&[u8]; 2]) = if prop == "categories" {
+        (b"c:cat", [b"c:strCache", b"c:strLit"])
+    } else {
+        (b"c:val", [b"c:numCache", b"c:numLit"])
+    };
+    let target_range = find_elem_range(&events, target_name, ser_start)
+        .filter(|r| r.0 <= ser_end)
+        .ok_or_else(|| AppError::PathParse(format!("Series has no {prop}")))?;
+    let cache_range = cache_names
+        .iter()
+        .find_map(|n| find_elem_range(&events, n, target_range.0).filter(|r| r.0 <= target_range.1))
+        .ok_or_else(|| AppError::PathParse(format!("Series {prop} cache not found")))?;
+
+    let mut pt = BytesStart::new("c:pt");
+    pt.push_attribute(("idx", pt_idx.to_string().as_str()));
+    let v = BytesStart::new("c:v");
+    let text = if prop == "values" {
+        value
+            .parse::<f64>()
+            .map(|f| f.to_string())
+            .unwrap_or_else(|_| value.to_string())
+    } else {
+        value.to_string()
+    };
+    let new_events = vec![
+        Event::Start(pt),
+        Event::Start(v),
+        Event::Text(BytesText::from_escaped(escape(text))),
+        Event::End(BytesEnd::new("c:v")),
+        Event::End(BytesEnd::new("c:pt")),
+    ];
+    let insert_at = cache_range.1;
+    for ev in new_events.into_iter().rev() {
+        events.insert(insert_at, ev);
+    }
+
+    // Bump the ptCount attribute.
+    let mut i = cache_range.0 + 1;
+    while i < cache_range.1 {
+        if let Event::Empty(e) = &events[i]
+            && e.name().as_ref() == b"c:ptCount"
+        {
+            let count: usize = e
+                .attributes()
+                .flatten()
+                .find(|a| a.key.as_ref() == b"val")
+                .and_then(|a| String::from_utf8_lossy(&a.value).parse().ok())
+                .unwrap_or(0);
+            events[i] = Event::Empty(copy_attrs(e, b"val", &(count + 1).to_string()));
+            break;
+        }
+        i += 1;
+    }
+    write_events(events)
+}
+
+/// Remove a chart point (`c:pt`) from a series' categories or values cache,
+/// decrementing the `ptCount`. `remaining` is `chart.series[N].categories[K]`
+/// or `chart.series[N].values[K]`.
+pub fn remove_chart_point_lossless(
+    xml_bytes: &[u8],
+    remaining: &[path::PathSegment],
+) -> AppResult<Vec<u8>> {
+    let inner = if matches!(&remaining[0], path::PathSegment::Field(n) if n == "chart") {
+        &remaining[1..]
+    } else {
+        remaining
+    };
+    let (ser_idx, prop, pt_idx) = match inner {
+        [
+            path::PathSegment::Field(n),
+            path::PathSegment::Index(i),
+            path::PathSegment::Field(p),
+            path::PathSegment::Index(k),
+        ] if n == "series" && (p == "categories" || p == "values") => (*i, p.as_str(), *k),
+        _ => {
+            return Err(AppError::PathParse(
+                "Expected chart.series[N].categories[K] or .values[K]".to_string(),
+            ));
+        }
+    };
+
+    let mut events = read_events(xml_bytes)?;
+    let (ct_start, ct_end) = find_chart_type_range(&events)
+        .ok_or_else(|| AppError::PathParse("Chart type element not found".to_string()))?;
+    let (ser_start, ser_end) = find_nth_elem_range(&events, b"c:ser", ct_start, ct_end, ser_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Series {ser_idx} not found")))?;
+
+    let (target_name, cache_names): (&[u8], [&[u8]; 2]) = if prop == "categories" {
+        (b"c:cat", [b"c:strCache", b"c:strLit"])
+    } else {
+        (b"c:val", [b"c:numCache", b"c:numLit"])
+    };
+    let target_range = find_elem_range(&events, target_name, ser_start)
+        .filter(|r| r.0 <= ser_end)
+        .ok_or_else(|| AppError::PathParse(format!("Series has no {prop}")))?;
+    let cache_range = cache_names
+        .iter()
+        .find_map(|n| find_elem_range(&events, n, target_range.0).filter(|r| r.0 <= target_range.1))
+        .ok_or_else(|| AppError::PathParse(format!("Series {prop} cache not found")))?;
+    let (pt_start, pt_end) =
+        find_nth_child_range(&events, cache_range.0, cache_range.1, b"c:pt", pt_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Chart point {pt_idx} not found")))?;
+    for j in (pt_start..=pt_end).rev() {
+        events.remove(j);
+    }
+
+    // Decrement the ptCount attribute.
+    let mut i = cache_range.0 + 1;
+    while i < cache_range.1 {
+        if let Event::Empty(e) = &events[i]
+            && e.name().as_ref() == b"c:ptCount"
+        {
+            let count: usize = e
+                .attributes()
+                .flatten()
+                .find(|a| a.key.as_ref() == b"val")
+                .and_then(|a| String::from_utf8_lossy(&a.value).parse().ok())
+                .unwrap_or(0);
+            let new_count = count.saturating_sub(1);
+            events[i] = Event::Empty(copy_attrs(e, b"val", &new_count.to_string()));
+            break;
+        }
+        i += 1;
+    }
+    write_events(events)
+}
+
+/// Remove a core document property element from core.xml (a field set to
+/// `null` in the overlay).
+pub fn delete_core_property(xml_bytes: &[u8], name: &str) -> AppResult<Vec<u8>> {
+    let tag = core_prop_tag(name)
+        .ok_or_else(|| AppError::PathParse(format!("Unknown core property '{name}'")))?;
+
+    let mut events = read_events(xml_bytes)?;
+    let root_start = events
+        .iter()
+        .position(|e| matches!(e, Event::Start(ev) if ev.name().as_ref() == b"cp:coreProperties"))
+        .ok_or_else(|| AppError::PathParse("No cp:coreProperties root".to_string()))?;
+    let mut root_end: Option<usize> = None;
+    {
+        let mut depth = 0u32;
+        for (j, ev2) in events.iter().enumerate().skip(root_start) {
+            match ev2 {
+                Event::Start(_) => depth += 1,
+                Event::End(e2) => {
+                    depth = depth.saturating_sub(1);
+                    if e2.name().as_ref() == b"cp:coreProperties" && depth == 0 {
+                        root_end = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let root_end = root_end
+        .ok_or_else(|| AppError::PathParse("No cp:coreProperties root found".to_string()))?;
+
+    let tag_bytes = tag.as_bytes();
+    let mut found: Option<(usize, usize)> = None;
+    {
+        let mut depth = 0u32;
+        let mut start: Option<usize> = None;
+        for (j, ev) in events
+            .iter()
+            .enumerate()
+            .skip(root_start + 1)
+            .take(root_end - root_start - 1)
+        {
+            match ev {
+                Event::Start(e) => {
+                    if depth == 0 && e.name().as_ref() == tag_bytes {
+                        start = Some(j);
+                    }
+                    depth += 1;
+                }
+                Event::Empty(e) if depth == 0 && e.name().as_ref() == tag_bytes => {
+                    found = Some((j, j));
+                    break;
+                }
+                Event::End(e) => {
+                    if let Some(s) = start
+                        && depth == 1
+                        && e.name().as_ref() == tag_bytes
+                    {
+                        found = Some((s, j));
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    match found {
+        Some((s, e)) => {
+            for j in (s..=e).rev() {
+                events.remove(j);
+            }
+            Ok(write_events(events)?)
+        }
+        None => Ok(xml_bytes.to_vec()),
+    }
+}
+
+/// Remove a text frame body property (a field set to `null`). For attribute
+/// props the attribute is dropped; for `auto_size` the autofit child is removed.
+pub fn delete_txbody_prop(xml_bytes: &[u8], shape_idx: usize, prop: &str) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let bodypr_range =
+        find_elem_range(&events, b"a:bodyPr", txbody_start).filter(|r| r.0 <= txbody_end);
+
+    let Some((s, e)) = bodypr_range else {
+        return Ok(xml_bytes.to_vec());
+    };
+    match prop {
+        "auto_size" => {
+            let mut to_remove: Vec<usize> = Vec::new();
+            let mut j = s + 1;
+            while j < e {
+                let should = matches!(
+                    &events[j],
+                    Event::Start(ev) | Event::Empty(ev)
+                        if matches!(ev.name().as_ref(), b"a:spAutoFit" | b"a:normAutofit" | b"a:noAutofit")
+                );
+                if should {
+                    to_remove.push(j);
+                }
+                j += 1;
+            }
+            for idx in to_remove.into_iter().rev() {
+                events.remove(idx);
+            }
+        }
+        "word_wrap" | "vertical_anchor" | "margin_left" | "margin_right" | "margin_top"
+        | "margin_bottom" => {
+            let attr_key: &[u8] = match prop {
+                "word_wrap" => b"wrap",
+                "vertical_anchor" => b"anchor",
+                "margin_left" => b"lIns",
+                "margin_right" => b"rIns",
+                "margin_top" => b"tIns",
+                "margin_bottom" => b"bIns",
+                _ => unreachable!(),
+            };
+            remove_attr(&mut events, s, attr_key);
+        }
+        _ => {
+            return Err(AppError::PathParse(format!(
+                "Unknown text frame property '{prop}'"
+            )));
+        }
+    }
+    write_events(events)
+}
+
+/// Remove an attribute from an element at `start` (handles both empty and
+/// non-empty forms).
+fn remove_attr(events: &mut [Event<'static>], start: usize, key: &[u8]) {
+    let (Event::Empty(orig) | Event::Start(orig)) = &events[start] else {
+        return;
+    };
+    let name = String::from_utf8_lossy(orig.name().as_ref()).to_string();
+    let mut elem = BytesStart::new(name);
+    for attr in orig.attributes().flatten() {
+        if attr.key.as_ref() != key {
+            let ak = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+            let av = String::from_utf8_lossy(&attr.value).to_string();
+            elem.push_attribute((ak.as_str(), av.as_str()));
+        }
+    }
+    events[start] = match &events[start] {
+        Event::Empty(_) => Event::Empty(elem),
+        _ => Event::Start(elem),
+    };
+}
+
+/// Remove a paragraph property (a field set to `null`): drops the `algn`/`lvl`
+/// attribute or the spacing child element.
+pub fn delete_para_prop(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    prop: &str,
+) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+
+    match prop {
+        "alignment" | "level" => {
+            let attr_key: &[u8] = if prop == "alignment" { b"algn" } else { b"lvl" };
+            let (ppr_range, _) = find_ppr_in_para(&events, para_start, para_end);
+            if let Some((s, _e)) = ppr_range {
+                remove_attr(&mut events, s, attr_key);
+            }
+        }
+        "line_spacing" | "space_before" | "space_after" => {
+            let tag: &[u8] = match prop {
+                "line_spacing" => b"a:lnSpc",
+                "space_before" => b"a:spcBef",
+                _ => b"a:spcAft",
+            };
+            if let Some((s, e)) =
+                find_elem_range(&events, tag, para_start).filter(|r| r.0 <= para_end)
+            {
+                for j in (s..=e).rev() {
+                    events.remove(j);
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::PathParse(format!(
+                "Unknown paragraph property '{prop}'"
+            )));
+        }
+    }
+    write_events(events)
+}
+
+/// Remove one crop side from a picture's `a:srcRect`, restoring full display.
+pub fn delete_picture_crop_side(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    side: &str,
+) -> AppResult<Vec<u8>> {
+    let attr_key: &[u8] = match side {
+        "left" => b"l",
+        "top" => b"t",
+        "right" => b"r",
+        "bottom" => b"b",
+        other => {
+            return Err(AppError::PathParse(format!(
+                "Unsupported crop side '{other}'"
+            )));
+        }
+    };
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let src_rect = {
+        let mut i = shape_start;
+        let mut found: Option<(usize, usize)> = None;
+        while i < shape_end {
+            match &events[i] {
+                Event::Start(e) if e.name().as_ref() == b"a:srcRect" => {
+                    found = find_elem_range(&events, b"a:srcRect", i);
+                    break;
+                }
+                Event::Empty(e) if e.name().as_ref() == b"a:srcRect" => {
+                    found = Some((i, i));
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    };
+    match src_rect {
+        Some((s, e)) if s == e => {
+            if let Event::Empty(orig) = &events[s] {
+                events[s] = Event::Empty(remove_attr_from_start(orig, attr_key));
+            }
+        }
+        Some((s, _e)) => {
+            if let Event::Start(orig) = &events[s] {
+                events[s] = Event::Start(remove_attr_from_start(orig, attr_key));
+            }
+        }
+        None => {}
+    }
+    write_events(events)
+}
+
+fn remove_attr_from_start(orig: &BytesStart<'_>, key: &[u8]) -> BytesStart<'static> {
+    let name = String::from_utf8_lossy(orig.name().as_ref()).to_string();
+    let mut elem = BytesStart::new(name);
+    for attr in orig.attributes().flatten() {
+        if attr.key.as_ref() != key {
+            let ak = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+            let av = String::from_utf8_lossy(&attr.value).to_string();
+            elem.push_attribute((ak.as_str(), av.as_str()));
+        }
+    }
+    elem
+}
+
+/// Remove the `a:rPr` from a run (a `null` font in the overlay).
+pub fn delete_run_font_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    run_idx: usize,
+) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+    let (run_start, run_end) = find_nth_child_range(&events, para_start, para_end, b"a:r", run_idx)
+        .ok_or_else(|| AppError::PathParse(format!("Run index {run_idx} not found")))?;
+    if let Some((s, e)) = find_elem_range(&events, b"a:rPr", run_start).filter(|r| r.0 <= run_end) {
+        for j in (s..=e).rev() {
+            events.remove(j);
+        }
+    }
+    write_events(events)
+}
+
+/// Remove the `a:endParaRPr` from a paragraph (a `null` font).
+pub fn delete_para_font_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+    if let Some((s, e)) =
+        find_elem_range(&events, b"a:endParaRPr", para_start).filter(|r| r.0 <= para_end)
+    {
+        for j in (s..=e).rev() {
+            events.remove(j);
+        }
+    }
+    write_events(events)
+}
+
+/// Set the `prst` attribute of a shape's `a:prstGeom` (the `auto_shape_type`
+/// field).
+pub fn set_auto_shape_type_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let geom = find_elem_range(&events, b"a:prstGeom", shape_start).filter(|r| r.0 <= shape_end);
+    match geom {
+        Some((s, e)) => {
+            let (Event::Empty(orig) | Event::Start(orig)) = &events[s] else {
+                return Err(AppError::PathParse(
+                    "Shape has no prstGeom element".to_string(),
+                ));
+            };
+            let name = String::from_utf8_lossy(orig.name().as_ref()).to_string();
+            let mut elem = BytesStart::new(name);
+            let mut set = false;
+            for attr in orig.attributes().flatten() {
+                if attr.key.as_ref() == b"prst" {
+                    elem.push_attribute(("prst", value));
+                    set = true;
+                } else {
+                    let ak = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let av = String::from_utf8_lossy(&attr.value).to_string();
+                    elem.push_attribute((ak.as_str(), av.as_str()));
+                }
+            }
+            if !set {
+                elem.push_attribute(("prst", value));
+            }
+            events[s] = if e == s {
+                Event::Empty(elem)
+            } else {
+                Event::Start(elem)
+            };
+        }
+        None => {
+            return Err(AppError::PathParse(
+                "Shape has no prstGeom element".to_string(),
+            ));
+        }
+    }
+    write_events(events)
+}
+
+/// Remove the `a:srcRect` (whole crop) from a picture shape.
+pub fn delete_picture_crop(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let src_rect = {
+        let mut i = shape_start;
+        let mut found: Option<(usize, usize)> = None;
+        while i < shape_end {
+            match &events[i] {
+                Event::Start(e) if e.name().as_ref() == b"a:srcRect" => {
+                    found = find_elem_range(&events, b"a:srcRect", i);
+                    break;
+                }
+                Event::Empty(e) if e.name().as_ref() == b"a:srcRect" => {
+                    found = Some((i, i));
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    };
+    if let Some((s, e)) = src_rect {
+        for j in (s..=e).rev() {
+            events.remove(j);
+        }
+    }
+    write_events(events)
+}
+
+/// Replace a shape's entire text frame with freshly serialized `TextFrameDto`,
+/// creating the `p:txBody` element when the shape has none.
+pub fn replace_or_create_text_frame_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let tf: crate::dto::TextFrameDto = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid text_frame JSON: {e}")))?;
+    let inner_events = read_events(crate::dto::xml::txbody_to_xml(&tf).as_bytes())?;
+
+    let mut events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+
+    match find_txbody_range(&events, shape_start, shape_end) {
+        Some((txbody_start, txbody_end)) => {
+            events.splice(txbody_start + 1..txbody_end, inner_events);
+        }
+        None => {
+            // Find the end of the shape's spPr block to insert txBody after it.
+            let sppr = find_elem_range(&events, b"p:spPr", shape_start)
+                .filter(|r| r.0 <= shape_end)
+                .or_else(|| {
+                    find_elem_range(&events, b"p:blipFill", shape_start)
+                        .filter(|r| r.0 <= shape_end)
+                });
+            let insert_at = match sppr {
+                Some((_, e)) => e + 1,
+                None => shape_start + 1,
+            };
+            events.insert(insert_at, Event::End(BytesEnd::new("p:txBody")));
+            for ev in inner_events.into_iter().rev() {
+                events.insert(insert_at, ev);
+            }
+            events.insert(insert_at, Event::Start(BytesStart::new("p:txBody")));
+        }
+    }
     write_events(events)
 }
 

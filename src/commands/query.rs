@@ -42,16 +42,37 @@ fn parse_shapes(
     let mut shapes = slide::parse_slide_shapes(part_data, &image_map)?;
     crate::model::placeholder::resolve_placeholder_properties(pkg, uri, &mut shapes)?;
 
+    // Chart data lives in separate OPC parts; resolve each chart shape's part
+    // and merge the full chart (type + series) into the shape JSON so query
+    // output round-trips through `update`.
+    for shape in &mut shapes {
+        if shape.chart.is_some() {
+            let r_id = shape.chart.as_ref().and_then(|c| c.r_id.as_ref()).cloned();
+            if let Some(r_id) = r_id
+                && let Ok(chart_uri) =
+                    crate::model::parts::resolve_chart_part_by_rid(pkg, uri, &r_id)
+                && let Some(chart_data) = pkg.get_part(&chart_uri)
+            {
+                let chart_json = crate::model::chart::parse_chart(chart_data);
+                if let Ok(mut chart) = serde_json::from_value::<crate::dto::ChartDto>(chart_json) {
+                    chart.r_id = Some(r_id);
+                    shape.chart = Some(chart);
+                }
+            }
+        }
+    }
+
     if let Some(dir) = media_dir
         && let Some(rels) = rels
     {
         for rel in rels.values() {
             if rel.rel_type.contains("image")
-                && let Some(data) = pkg.get_part(&format!("ppt/{}", rel.target))
+                && let Some(target_uri) = pkg.resolve_relationship_target(uri, rel)
+                && let Some(data) = pkg.get_part(&target_uri)
             {
-                let filename = Path::new(&rel.target)
+                let filename = Path::new(&target_uri)
                     .file_name()
-                    .unwrap_or(rel.target.as_ref());
+                    .unwrap_or(target_uri.as_ref());
                 let target_path = Path::new(dir).join(filename);
                 if let Some(parent) = target_path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -90,13 +111,13 @@ fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<se
     }))
 }
 
-fn master_json(pkg: &Package, master_uri: &str) -> serde_json::Value {
-    let shapes = parse_shapes(pkg, master_uri, None).unwrap_or_default();
+fn master_json(pkg: &Package, master_uri: &str, media_dir: Option<&str>) -> serde_json::Value {
+    let shapes = parse_shapes(pkg, master_uri, media_dir).unwrap_or_default();
     let name = crate::model::parts::c_sld_name(pkg, master_uri);
     let slide_layouts = crate::model::parts::master_slide_layout_uris(pkg, master_uri)
         .into_iter()
         .map(|layout_uri| {
-            let shapes = parse_shapes(pkg, &layout_uri, None).unwrap_or_default();
+            let shapes = parse_shapes(pkg, &layout_uri, media_dir).unwrap_or_default();
             let name = crate::model::parts::c_sld_name(pkg, &layout_uri);
             json!({ "name": name, "shapes": shapes })
         })
@@ -124,9 +145,22 @@ fn navigate_json(
     Ok(current)
 }
 
-pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResult<()> {
-    let pkg = Package::open(Path::new(input))?;
+/// Query a single dotted path and return the JSON at it, sharing the exact
+/// logic of the `update` command when diffing against a snapshot.
+pub fn query_path(
+    pkg: &Package,
+    pres: &Presentation,
+    path_str: &str,
+) -> AppResult<serde_json::Value> {
+    let segments = path::parse_path(path_str)?;
+    let resolved = path::resolve_path(&segments)?;
+    let value = query_value(pkg, pres, &resolved, None)?;
+    navigate_json(&value, resolved.remaining_segments())
+}
 
+/// Open a presentation and resolve its slide URIs, sharing the boilerplate
+/// between `query` and `update`.
+pub fn load_presentation(pkg: &Package) -> AppResult<Presentation> {
     let pres_part = pkg
         .get_part("ppt/presentation.xml")
         .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml".to_string()))?;
@@ -135,27 +169,34 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
         .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml rels".to_string()))?;
     let mut pres = Presentation::parse(pres_part)?;
     pres.slide_uris = pres.resolve_slide_uris(pres_rels);
+    Ok(pres)
+}
 
-    let segments = path::parse_path(path_str)?;
-    let resolved = path::resolve_path(&segments)?;
-
-    let value = match &resolved {
+/// Build the JSON projection for a resolved path (the body of the `jsonfy`
+/// command). `media_dir` extracts referenced media when given.
+pub fn query_value(
+    pkg: &Package,
+    pres: &Presentation,
+    resolved: &path::ResolvedPath,
+    media_dir: Option<&str>,
+) -> AppResult<serde_json::Value> {
+    let value = match resolved {
         path::ResolvedPath::Presentation { .. } => {
             let slides = pres
                 .slide_uris
                 .iter()
-                .map(|uri| slide_json(&pkg, uri, media_dir))
+                .map(|uri| slide_json(pkg, uri, media_dir))
                 .collect::<AppResult<Vec<_>>>()?;
             let core = pkg
                 .get_part("docProps/core.xml")
                 .map(core_props::parse_core_properties)
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
-            let slide_masters = crate::model::parts::master_uris(&pkg)
+            let slide_masters = crate::model::parts::master_uris(pkg)
                 .iter()
-                .map(|m| master_json(&pkg, m))
+                .map(|m| master_json(pkg, m, media_dir))
                 .collect::<Vec<_>>();
-            let theme = crate::model::parts::theme_uri(&pkg)
+            let theme = crate::model::parts::theme_uri(pkg)
                 .and_then(|u| pkg.get_part(&u))
                 .map(crate::model::theme::parse_theme);
             json!({
@@ -172,7 +213,7 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
                 let slides = pres
                     .slide_uris
                     .iter()
-                    .map(|uri| slide_json(&pkg, uri, media_dir))
+                    .map(|uri| slide_json(pkg, uri, media_dir))
                     .collect::<AppResult<Vec<_>>>()?;
                 json!(slides)
             }
@@ -181,7 +222,7 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
                     .slide_uris
                     .get(*idx)
                     .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
-                slide_json(&pkg, uri, media_dir)?
+                slide_json(pkg, uri, media_dir)?
             }
         },
         path::ResolvedPath::Shape {
@@ -193,41 +234,18 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
                 .slide_uris
                 .get(*slide_idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
-            let shapes = parse_shapes(&pkg, uri, media_dir)?;
-            // Chart data lives in a separate OPC part; resolve and parse it.
+            let shapes = parse_shapes(pkg, uri, media_dir)?;
+            // Chart data is merged into the shape by `parse_shapes`.
             if let Some(path::PathSegment::Field(n)) = remaining.first()
                 && n == "chart"
             {
                 let idx = shape_idx
                     .ok_or_else(|| AppError::PathParse("Chart shape index required".to_string()))?;
-                let empty_map = HashMap::new();
-                let slide_data = pkg
-                    .get_part(uri)
-                    .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
-                let parsed = crate::model::slide::parse_slide_shapes(slide_data, &empty_map)?;
-                let shape = parsed
+                let chart = shapes
                     .get(idx)
-                    .ok_or(AppError::ShapeIndexOutOfBounds(idx))?;
-                let r_id = shape
-                    .chart
-                    .as_ref()
-                    .and_then(|c| c.r_id.as_ref())
-                    .ok_or_else(|| {
-                        AppError::PathParse("Shape has no chart relationship".to_string())
-                    })?;
-                let rels = pkg
-                    .get_rels(uri)
-                    .ok_or_else(|| AppError::PartNotFound(format!("{uri} rels")))?;
-                let rel = rels.get(r_id).ok_or_else(|| {
-                    AppError::PathParse("Chart relationship not found".to_string())
-                })?;
-                let chart_uri = pkg.resolve_relationship_target(uri, rel).ok_or_else(|| {
-                    AppError::PathParse("Chart relationship target missing".to_string())
-                })?;
-                let chart_data = pkg
-                    .get_part(&chart_uri)
-                    .ok_or(AppError::PartNotFound(chart_uri.clone()))?;
-                json!({ "chart": crate::model::chart::parse_chart(chart_data) })
+                    .and_then(|s| s.get("chart").cloned())
+                    .ok_or_else(|| AppError::PathParse("Shape has no chart".to_string()))?;
+                json!({ "chart": chart })
             } else {
                 match shape_idx {
                     None => json!(shapes),
@@ -239,7 +257,7 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
             }
         }
         path::ResolvedPath::Theme { remaining: _ } => {
-            let theme_uri = crate::model::parts::theme_uri(&pkg)
+            let theme_uri = crate::model::parts::theme_uri(pkg)
                 .ok_or_else(|| AppError::PathParse("Presentation has no theme".to_string()))?;
             let part_data = pkg
                 .get_part(&theme_uri)
@@ -250,16 +268,16 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
             master_idx,
             remaining: _,
         } => {
-            let masters = crate::model::parts::master_uris(&pkg);
+            let masters = crate::model::parts::master_uris(pkg);
             match master_idx {
                 Some(i) => masters
                     .get(*i)
                     .ok_or(AppError::SlideIndexOutOfBounds(*i))
-                    .map(|m| master_json(&pkg, m)),
+                    .map(|m| master_json(pkg, m, media_dir)),
                 None => Ok(json!(
                     masters
                         .iter()
-                        .map(|m| master_json(&pkg, m))
+                        .map(|m| master_json(pkg, m, media_dir))
                         .collect::<Vec<_>>()
                 )),
             }?
@@ -272,9 +290,9 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
                 .slide_uris
                 .get(*idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*idx))?;
-            match notes::resolve_notes_uri(&pkg, slide_uri) {
+            match notes::resolve_notes_uri(pkg, slide_uri) {
                 Some(notes_uri) => {
-                    let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
+                    let shapes = parse_shapes(pkg, &notes_uri, media_dir)?;
                     json!({ "shapes": shapes })
                 }
                 None => serde_json::Value::Null,
@@ -296,9 +314,9 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
                 .slide_uris
                 .get(*slide_idx)
                 .ok_or(AppError::SlideIndexOutOfBounds(*slide_idx))?;
-            let notes_uri = notes::resolve_notes_uri(&pkg, slide_uri)
+            let notes_uri = notes::resolve_notes_uri(pkg, slide_uri)
                 .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))?;
-            let shapes = parse_shapes(&pkg, &notes_uri, media_dir)?;
+            let shapes = parse_shapes(pkg, &notes_uri, media_dir)?;
             match shape_idx {
                 None => json!(shapes),
                 Some(idx) => shapes
@@ -309,9 +327,5 @@ pub fn execute(input: &str, path_str: &str, media_dir: Option<&str>) -> AppResul
         }
     };
 
-    let result = navigate_json(&value, resolved.remaining_segments())?;
-    let output = serde_json::to_string(&result)?;
-    println!("{output}");
-
-    Ok(())
+    Ok(value)
 }

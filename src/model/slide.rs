@@ -517,7 +517,6 @@ pub fn parse_slide_shapes(
                                     color_type: Some(ColorType::Rgb),
                                     rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
                                     theme_color: None,
-                                    brightness: None,
                                 });
                             }
                         }
@@ -531,7 +530,6 @@ pub fn parse_slide_shapes(
                                     theme_color: Some(
                                         String::from_utf8_lossy(&a.value).to_string(),
                                     ),
-                                    brightness: None,
                                 });
                             }
                         }
@@ -543,7 +541,6 @@ pub fn parse_slide_shapes(
                                     color_type: Some(ColorType::Rgb),
                                     rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
                                     theme_color: None,
-                                    brightness: None,
                                 });
                             }
                         }
@@ -557,7 +554,6 @@ pub fn parse_slide_shapes(
                                     theme_color: Some(
                                         String::from_utf8_lossy(&a.value).to_string(),
                                     ),
-                                    brightness: None,
                                 });
                             }
                         }
@@ -1195,7 +1191,6 @@ pub fn parse_slide_shapes(
                                     color_type: Some(ColorType::Rgb),
                                     rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
                                     theme_color: None,
-                                    brightness: None,
                                 });
                             }
                         }
@@ -1209,7 +1204,6 @@ pub fn parse_slide_shapes(
                                     theme_color: Some(
                                         String::from_utf8_lossy(&a.value).to_string(),
                                     ),
-                                    brightness: None,
                                 });
                             }
                         }
@@ -1221,7 +1215,6 @@ pub fn parse_slide_shapes(
                                     color_type: Some(ColorType::Rgb),
                                     rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
                                     theme_color: None,
-                                    brightness: None,
                                 });
                             }
                         }
@@ -1235,7 +1228,6 @@ pub fn parse_slide_shapes(
                                     theme_color: Some(
                                         String::from_utf8_lossy(&a.value).to_string(),
                                     ),
-                                    brightness: None,
                                 });
                             }
                         }
@@ -1424,7 +1416,6 @@ pub fn parse_slide_shapes(
                                         theme_color: Some(
                                             String::from_utf8_lossy(&a.value).to_string(),
                                         ),
-                                        brightness: None,
                                     });
                                 }
                             }
@@ -1438,7 +1429,6 @@ pub fn parse_slide_shapes(
                                         color_type: Some(ColorType::Rgb),
                                         rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
                                         theme_color: None,
-                                        brightness: None,
                                     });
                                 }
                             }
@@ -1657,13 +1647,11 @@ pub fn parse_slide_shapes(
                                 shape.fill = Some(FillDto {
                                     fill_type: Some(ft),
                                     color: shape_fill_color.take(),
-                                    alpha: None,
                                 });
                             } else if let Some(color) = shape_fill_color.take() {
                                 shape.fill = Some(FillDto {
                                     fill_type: Some(FillType::Solid),
                                     color: Some(color),
-                                    alpha: None,
                                 });
                             }
                             let ln_fill = ln_fill_type
@@ -1684,7 +1672,6 @@ pub fn parse_slide_shapes(
                                     fill: ln_fill.map(|ft| FillDto {
                                         fill_type: Some(ft),
                                         color: ln_fill_color.take(),
-                                        alpha: None,
                                     }),
                                 });
                             }

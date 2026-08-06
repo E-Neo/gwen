@@ -19,13 +19,22 @@ pub fn resolve_chart_part(pkg: &Package, slide_uri: &str, shape_idx: usize) -> A
         .as_ref()
         .and_then(|c| c.r_id.as_ref())
         .ok_or_else(|| AppError::PathParse("Shape has no chart relationship".to_string()))?;
+    resolve_chart_part_by_rid(pkg, slide_uri, r_id)
+}
+
+/// Resolve a chart part URI from a relationship id on a container part.
+pub fn resolve_chart_part_by_rid(
+    pkg: &Package,
+    container_uri: &str,
+    r_id: &str,
+) -> AppResult<String> {
     let rels = pkg
-        .get_rels(slide_uri)
-        .ok_or_else(|| AppError::PartNotFound(format!("{slide_uri} rels")))?;
+        .get_rels(container_uri)
+        .ok_or_else(|| AppError::PartNotFound(format!("{container_uri} rels")))?;
     let rel = rels
         .get(r_id)
         .ok_or_else(|| AppError::PathParse(format!("Chart relationship {r_id} not found")))?;
-    let base_dir = slide_uri.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let base_dir = container_uri.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     let rel_path = rel.target.trim_start_matches('/');
     let mut parts: Vec<&str> = base_dir.split('/').collect();
     for seg in rel_path.split('/') {

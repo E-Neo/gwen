@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod xml;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ShapeType {
     AutoShape,
@@ -44,7 +44,7 @@ pub enum PlaceholderType {
     VerticalBody,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceholderFormatDto {
     pub idx: i32,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -72,19 +72,13 @@ pub struct ColorFormatDto {
     pub rgb: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brightness: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FillType {
     Solid,
-    Gradient,
-    Pattern,
-    Picture,
     NoFill,
-    Group,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,8 +87,6 @@ pub struct FillDto {
     pub fill_type: Option<FillType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorFormatDto>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alpha: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,12 +242,12 @@ pub struct TextFrameDto {
     pub default_paragraph_style: Option<ParagraphDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridColDto {
     pub width: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableCellDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_span: Option<u32>,
@@ -269,20 +261,20 @@ pub struct TableCellDto {
     pub text_frame: Option<TextFrameDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableRowDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<i64>,
     pub cells: Vec<TableCellDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDto {
     pub grid: Vec<GridColDto>,
     pub rows: Vec<TableRowDto>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartSeriesDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -292,7 +284,7 @@ pub struct ChartSeriesDto {
     pub values: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chart_type: Option<String>,
@@ -302,7 +294,7 @@ pub struct ChartDto {
     pub series: Vec<ChartSeriesDto>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CropDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left: Option<f64>,
@@ -314,7 +306,7 @@ pub struct CropDto {
     pub bottom: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShapeDto {
     pub shape_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -381,17 +373,15 @@ pub struct SlideDto {
     pub shapes: Vec<ShapeDto>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeTypeInput {
     Textbox,
-    Picture,
     Table,
-    Chart,
     AutoShape,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddShape {
     #[serde(rename = "type")]
     pub shape_type: ShapeTypeInput,
@@ -400,17 +390,10 @@ pub struct AddShape {
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub text: Option<String>,
-    pub image: Option<String>,
     pub shape_id: Option<u32>,
+    /// Optional display name for the new shape; falls back to a generated one.
+    pub name: Option<String>,
     pub auto_shape_type: Option<String>,
-    /// For picture shapes: set by add.rs after storing the image; used as r:embed
-    pub image_r_id: Option<String>,
-    /// For chart shapes: inline chart data for creating a new chart part
-    pub chart: Option<ChartDto>,
-    /// For chart shapes: set by add.rs after creating the chart part; used as r:id in c:chart
-    pub chart_r_id: Option<String>,
-    /// For chart shapes: relationship ID to an existing chart part
-    pub r_id: Option<String>,
     /// For table shapes: table definition (grid, rows, cells)
     pub table: Option<TableDto>,
     /// Fill for auto/text shapes

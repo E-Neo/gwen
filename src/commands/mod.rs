@@ -1,5 +1,3 @@
-pub mod add;
-pub mod copy_move;
+pub mod jsonfy;
 pub mod query;
-pub mod remove;
-pub mod replace;
+pub mod update;

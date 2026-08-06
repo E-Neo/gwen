@@ -8,9 +8,7 @@ use crate::error::AppResult;
 pub fn generate_shape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     match shape.shape_type {
         ShapeTypeInput::Textbox => generate_textbox_xml(shape, new_id),
-        ShapeTypeInput::Picture => generate_picture_xml(shape, new_id),
         ShapeTypeInput::Table => generate_table_xml(shape, new_id),
-        ShapeTypeInput::Chart => generate_chart_xml(shape, new_id),
         ShapeTypeInput::AutoShape => generate_autoshape_xml(shape, new_id),
     }
 }
@@ -20,7 +18,10 @@ fn generate_table_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     let top = shape.top.unwrap_or(0);
     let width = shape.width.unwrap_or(6096000);
     let height = shape.height.unwrap_or(3048000);
-    let name = format!("Table {}", new_id);
+    let name = shape
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("Table {}", new_id));
     let table = shape.table.as_ref().ok_or_else(|| {
         crate::error::AppError::InvalidValue("table definition required".to_string())
     })?;
@@ -125,66 +126,16 @@ fn generate_table_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     Ok(inner)
 }
 
-fn generate_chart_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
-    let left = shape.left.unwrap_or(0);
-    let top = shape.top.unwrap_or(0);
-    let width = shape.width.unwrap_or(6096000);
-    let height = shape.height.unwrap_or(3048000);
-    let name = format!("Chart {}", new_id);
-    let r_id = shape
-        .chart_r_id
-        .as_deref()
-        .or(shape.r_id.as_deref())
-        .unwrap_or("rId1");
-
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-    write_open_tag(&mut writer, "p:graphicFrame", &[]);
-    write_open_tag(&mut writer, "p:nvGraphicFramePr", &[]);
-    write_empty_tag(
-        &mut writer,
-        "p:cNvPr",
-        &[("id", &new_id.to_string()), ("name", &name)],
-    );
-    write_empty_tag(&mut writer, "p:cNvGraphicFramePr", &[]);
-    write_empty_tag(&mut writer, "p:nvPr", &[]);
-    write_close_tag(&mut writer, "p:nvGraphicFramePr");
-    write_open_tag(&mut writer, "p:xfrm", &[]);
-    write_empty_tag(
-        &mut writer,
-        "a:off",
-        &[("x", &left.to_string()), ("y", &top.to_string())],
-    );
-    write_empty_tag(
-        &mut writer,
-        "a:ext",
-        &[("cx", &width.to_string()), ("cy", &height.to_string())],
-    );
-    write_close_tag(&mut writer, "p:xfrm");
-    write_open_tag(&mut writer, "a:graphic", &[]);
-    write_open_tag(
-        &mut writer,
-        "a:graphicData",
-        &[(
-            "uri",
-            "http://schemas.openxmlformats.org/drawingml/2006/chart",
-        )],
-    );
-    write_empty_tag(&mut writer, "c:chart", &[("r:id", r_id)]);
-    write_close_tag(&mut writer, "a:graphicData");
-    write_close_tag(&mut writer, "a:graphic");
-    write_close_tag(&mut writer, "p:graphicFrame");
-
-    let inner = writer.into_inner().into_inner();
-    Ok(inner)
-}
-
 fn generate_textbox_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     let left = shape.left.unwrap_or(0);
     let top = shape.top.unwrap_or(0);
     let width = shape.width.unwrap_or(914400);
     let height = shape.height.unwrap_or(274320);
     let text = shape.text.as_deref().unwrap_or("");
-    let name = format!("TextBox {}", new_id);
+    let name = shape
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("TextBox {}", new_id));
 
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     write_open_tag(&mut writer, "p:sp", &[]);
@@ -240,7 +191,10 @@ fn generate_autoshape_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
     let width = shape.width.unwrap_or(914400);
     let height = shape.height.unwrap_or(274320);
     let text = shape.text.as_deref().unwrap_or("");
-    let name = format!("AutoShape {}", new_id);
+    let name = shape
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("AutoShape {}", new_id));
     let prst = shape.auto_shape_type.as_deref().unwrap_or("rect");
 
     let mut writer = Writer::new(Cursor::new(Vec::new()));
@@ -406,56 +360,6 @@ fn write_outline_xml(shape: &AddShape, writer: &mut Writer<Cursor<Vec<u8>>>) -> 
     Ok(())
 }
 
-fn generate_picture_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
-    let left = shape.left.unwrap_or(0);
-    let top = shape.top.unwrap_or(0);
-    let width = shape.width.unwrap_or(1000000);
-    let height = shape.height.unwrap_or(800000);
-    let name = format!("Picture {}", new_id);
-    let r_id = shape.image_r_id.as_deref().unwrap_or("rId1");
-
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-    write_open_tag(&mut writer, "p:pic", &[]);
-
-    write_open_tag(&mut writer, "p:nvPicPr", &[]);
-    write_empty_tag(
-        &mut writer,
-        "p:cNvPr",
-        &[("id", &new_id.to_string()), ("name", &name)],
-    );
-    write_empty_tag(&mut writer, "p:cNvPicPr", &[]);
-    write_empty_tag(&mut writer, "p:nvPr", &[]);
-    write_close_tag(&mut writer, "p:nvPicPr");
-
-    write_open_tag(&mut writer, "p:blipFill", &[]);
-    write_empty_tag(&mut writer, "a:blip", &[("r:embed", r_id)]);
-    write_open_tag(&mut writer, "a:stretch", &[]);
-    write_empty_tag(&mut writer, "a:fillRect", &[]);
-    write_close_tag(&mut writer, "a:stretch");
-    write_close_tag(&mut writer, "p:blipFill");
-
-    write_open_tag(&mut writer, "p:spPr", &[]);
-    write_open_tag(&mut writer, "a:xfrm", &[]);
-    write_empty_tag(
-        &mut writer,
-        "a:off",
-        &[("x", &left.to_string()), ("y", &top.to_string())],
-    );
-    write_empty_tag(
-        &mut writer,
-        "a:ext",
-        &[("cx", &width.to_string()), ("cy", &height.to_string())],
-    );
-    write_close_tag(&mut writer, "a:xfrm");
-    write_empty_tag(&mut writer, "a:prstGeom", &[("prst", "rect")]);
-    write_close_tag(&mut writer, "p:spPr");
-
-    write_close_tag(&mut writer, "p:pic");
-
-    let inner = writer.into_inner().into_inner();
-    Ok(inner)
-}
-
 pub fn find_max_shape_id(xml_bytes: &[u8]) -> u32 {
     use quick_xml::Reader;
     use quick_xml::events::Event;
@@ -519,73 +423,6 @@ fn write_text_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, text: &str) 
         .write_event(Event::Text(BytesText::new(text)))
         .unwrap();
     writer.write_event(Event::End(BytesEnd::new(name))).unwrap();
-}
-
-pub fn generate_slide_xml(
-    slide: &SlideDto,
-    layout_r_id: &str,
-    _slide_num: u32,
-) -> AppResult<Vec<u8>> {
-    use quick_xml::events::BytesStart;
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-
-    let mut sld = BytesStart::new("p:sld");
-    sld.push_attribute((
-        "xmlns:a",
-        "http://schemas.openxmlformats.org/drawingml/2006/main",
-    ));
-    sld.push_attribute((
-        "xmlns:r",
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-    ));
-    sld.push_attribute((
-        "xmlns:p",
-        "http://schemas.openxmlformats.org/presentationml/2006/main",
-    ));
-    write_open_tag_full(&mut writer, &sld);
-
-    write_open_tag(&mut writer, "p:cSld", &[]);
-    write_open_tag(&mut writer, "p:spTree", &[]);
-
-    write_open_tag(&mut writer, "p:nvGrpSpPr", &[]);
-    write_empty_tag(&mut writer, "p:cNvPr", &[("id", "1"), ("name", "")]);
-    write_empty_tag(&mut writer, "p:cNvGrpSpPr", &[]);
-    write_empty_tag(&mut writer, "p:nvPr", &[]);
-    write_close_tag(&mut writer, "p:nvGrpSpPr");
-
-    write_open_tag(&mut writer, "p:grpSpPr", &[]);
-    write_open_tag(&mut writer, "a:xfrm", &[]);
-    write_empty_tag(&mut writer, "a:off", &[("x", "0"), ("y", "0")]);
-    write_empty_tag(&mut writer, "a:ext", &[("cx", "0"), ("cy", "0")]);
-    write_empty_tag(&mut writer, "a:chOff", &[("x", "0"), ("y", "0")]);
-    write_empty_tag(&mut writer, "a:chExt", &[("cx", "0"), ("cy", "0")]);
-    write_close_tag(&mut writer, "a:xfrm");
-    write_close_tag(&mut writer, "p:grpSpPr");
-
-    for shape in &slide.shapes {
-        let xml = crate::dto::xml::shape_to_xml(shape);
-        writer
-            .get_mut()
-            .write_all(xml.as_bytes())
-            .map_err(crate::error::AppError::Io)?;
-    }
-
-    write_close_tag(&mut writer, "p:spTree");
-    write_close_tag(&mut writer, "p:cSld");
-
-    let layout_id = 2147483648u32;
-    write_open_tag(&mut writer, "p:sldLayoutIdLst", &[]);
-    write_empty_tag(
-        &mut writer,
-        "p:sldLayoutId",
-        &[("id", &layout_id.to_string()), ("r:id", layout_r_id)],
-    );
-    write_close_tag(&mut writer, "p:sldLayoutIdLst");
-
-    write_close_tag(&mut writer, "p:sld");
-
-    let inner = writer.into_inner().into_inner();
-    Ok(inner)
 }
 
 /// Generate a notes slide (`p:notes`) part with the given shapes. When no

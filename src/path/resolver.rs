@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PathSegment {
     Field(String),
     Index(usize),
@@ -263,32 +263,6 @@ impl ResolvedPath {
             ResolvedPath::NotesShape { remaining, .. } => remaining,
             ResolvedPath::Theme { remaining } => remaining,
             ResolvedPath::Master { remaining, .. } => remaining,
-        }
-    }
-
-    pub fn slide_index(&self) -> AppResult<usize> {
-        match self {
-            ResolvedPath::Shape { slide_idx, .. } => Ok(*slide_idx),
-            ResolvedPath::NotesShape { slide_idx, .. } => Ok(*slide_idx),
-            ResolvedPath::Slide {
-                slide_idx: Some(i), ..
-            } => Ok(*i),
-            ResolvedPath::Notes {
-                slide_idx: Some(i), ..
-            } => Ok(*i),
-            _ => Err(AppError::PathParse("No slide index in path".to_string())),
-        }
-    }
-
-    pub fn shape_index(&self) -> AppResult<usize> {
-        match self {
-            ResolvedPath::Shape {
-                shape_idx: Some(i), ..
-            } => Ok(*i),
-            ResolvedPath::NotesShape {
-                shape_idx: Some(i), ..
-            } => Ok(*i),
-            _ => Err(AppError::PathParse("No shape index in path".to_string())),
         }
     }
 }

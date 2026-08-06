@@ -83,20 +83,20 @@ fn example_lines(help: &str) -> Vec<&str> {
 
 #[test]
 fn every_help_example_runs() {
-    let subs: [Option<&str>; 8] = [
-        None,
-        Some("query"),
-        Some("add"),
-        Some("remove"),
-        Some("replace"),
-        Some("move"),
-        Some("copy"),
-        Some("new"),
-    ];
+    let subs: [Option<&str>; 3] = [None, Some("jsonfy"), Some("update")];
 
     let dir = tmp();
     let input = dir.join("deck.pptx");
     std::fs::copy(fixture("table_chart.pptx"), &input).unwrap();
+
+    // Pre-create deck.json (the jsonfy snapshot used by update examples) so the
+    // examples run regardless of their order in the help text.
+    let snapshot = Command::new(bin())
+        .args(["jsonfy", "--input", input.to_str().unwrap()])
+        .output()
+        .expect("seed deck.json");
+    assert!(snapshot.status.success(), "seed jsonfy failed");
+    std::fs::write(dir.join("deck.json"), snapshot.stdout).unwrap();
 
     let mut run = 0;
     for sub in subs {
@@ -125,24 +125,34 @@ fn every_help_example_runs() {
                 "example must not use line continuations: {line}"
             );
 
+            // Split off an optional `> file` shell redirect so the example can
+            // be executed without a shell.
+            let (redirect, rest) = match tokens.iter().position(|t| t == ">") {
+                Some(pos) => (Some(tokens[pos + 1].clone()), &tokens[..pos]),
+                None => (None, &tokens[..]),
+            };
+
             let output = dir.join(format!("out-{run}.pptx"));
             run += 1;
-            let args = tokens[1..]
+            let args = rest[1..]
                 .iter()
                 .map(|t| match t.as_str() {
                     "deck.pptx" => input.to_str().unwrap().to_string(),
+                    "deck.json" => dir.join("deck.json").to_str().unwrap().to_string(),
                     "out.pptx" => output.to_str().unwrap().to_string(),
                     other => other.to_string(),
                 })
                 .collect::<Vec<_>>();
 
-            let result = Command::new(bin())
-                .args(&args)
-                .output()
-                .expect("run example");
+            let mut cmd = Command::new(bin());
+            cmd.args(&args);
+            let result = cmd.output().expect("run example");
+            if let Some(file) = redirect {
+                std::fs::write(dir.join(file), &result.stdout).unwrap();
+            }
             assert!(
                 result.status.success(),
-                "example failed: {line}\nstderr: {}",
+                "example failed: {line}\nargs: {args:?}\nstderr: {}",
                 String::from_utf8_lossy(&result.stderr)
             );
         }

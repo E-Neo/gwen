@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
-use std::path::PathBuf;
 
 use quick_xml::Reader;
 use quick_xml::Writer;
@@ -26,6 +25,7 @@ impl Package {
     }
 
     /// Build a package directly from in-memory parts and relationships.
+    #[cfg(test)]
     pub fn from_parts(
         parts: HashMap<String, Vec<u8>>,
         relationships: HashMap<String, HashMap<String, Relationship>>,
@@ -72,14 +72,6 @@ impl Package {
         self.parts.contains_key(&target).then_some(target)
     }
 
-    /// Iterate over all relationship collections keyed by source part URI.
-    #[cfg(test)]
-    pub fn relationship_sources(
-        &self,
-    ) -> impl Iterator<Item = (&str, &HashMap<String, Relationship>)> {
-        self.relationships.iter().map(|(k, v)| (k.as_str(), v))
-    }
-
     fn from_archive<R: Read + Seek>(archive: &mut ZipArchive<R>) -> AppResult<Self> {
         let mut parts = HashMap::new();
         let mut relationships = HashMap::new();
@@ -115,10 +107,6 @@ impl Package {
 
     pub fn get_rels(&self, uri: &str) -> Option<&HashMap<String, Relationship>> {
         self.relationships.get(uri)
-    }
-
-    pub fn set_rels(&mut self, uri: &str, rels: HashMap<String, Relationship>) {
-        self.relationships.insert(uri.to_string(), rels);
     }
 
     pub fn add_relationship(&mut self, source_uri: &str, rel: Relationship) -> String {
@@ -237,34 +225,6 @@ impl Package {
         Ok(())
     }
 
-    pub fn get_next_slide_num(&self) -> u32 {
-        let mut max_num = 0u32;
-        for key in self.parts.keys() {
-            if let Some(rest) = key.strip_prefix("ppt/slides/slide")
-                && let Some(num_str) = rest.strip_suffix(".xml")
-                && let Ok(n) = num_str.parse::<u32>()
-                && n > max_num
-            {
-                max_num = n;
-            }
-        }
-        max_num + 1
-    }
-
-    pub fn get_next_chart_num(&self) -> u32 {
-        let mut max_num = 0u32;
-        for key in self.parts.keys() {
-            if let Some(rest) = key.strip_prefix("ppt/charts/chart")
-                && let Some(num_str) = rest.strip_suffix(".xml")
-                && let Ok(n) = num_str.parse::<u32>()
-                && n > max_num
-            {
-                max_num = n;
-            }
-        }
-        max_num + 1
-    }
-
     pub fn get_next_notes_num(&self) -> u32 {
         let mut max_num = 0u32;
         for key in self.parts.keys() {
@@ -277,54 +237,6 @@ impl Package {
             }
         }
         max_num + 1
-    }
-
-    pub fn get_next_media_num(&self) -> u32 {
-        let mut max_num = 0u32;
-        for key in self.parts.keys() {
-            if let Some(rest) = key.strip_prefix("ppt/media/image") {
-                let num_str = rest.trim_end_matches(|c: char| !c.is_ascii_digit());
-                if let Ok(n) = num_str.parse::<u32>()
-                    && n > max_num
-                {
-                    max_num = n;
-                }
-            }
-        }
-        max_num + 1
-    }
-
-    pub fn add_image_file(&mut self, file_path: &str) -> AppResult<String> {
-        let path = PathBuf::from(file_path);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-        let content_type = match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "bmp" => "image/bmp",
-            "svg" => "image/svg+xml",
-            "tif" | "tiff" => "image/tiff",
-            "webp" => "image/webp",
-            _ => {
-                return Err(AppError::InvalidValue(format!(
-                    "unsupported image extension: .{ext}"
-                )));
-            }
-        };
-
-        let data = std::fs::read(file_path).map_err(|e| {
-            AppError::InvalidValue(format!("cannot read image file '{file_path}': {e}"))
-        })?;
-
-        let num = self.get_next_media_num();
-        let media_uri = format!("ppt/media/image{}.{}", num, ext);
-        self.set_part(&media_uri, data);
-        self.add_content_type_override(&format!("/{}", media_uri), content_type)?;
-        Ok(media_uri)
     }
 
     pub fn add_content_type_override(

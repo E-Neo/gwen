@@ -252,7 +252,7 @@ fn write_default_paragraph_style(dps: &ParagraphDto, writer: &mut Writer<Vec<u8>
         .ok();
 }
 
-fn write_run(r: &RunDto, writer: &mut Writer<Vec<u8>>) {
+pub(crate) fn write_run(r: &RunDto, writer: &mut Writer<Vec<u8>>) {
     writer
         .write_event(Event::Start(BytesStart::new("a:r")))
         .ok();
@@ -286,7 +286,7 @@ fn write_run(r: &RunDto, writer: &mut Writer<Vec<u8>>) {
     writer.write_event(Event::End(BytesEnd::new("a:r"))).ok();
 }
 
-fn write_rpr(font: &FontDto, writer: &mut Writer<Vec<u8>>) {
+pub(crate) fn write_rpr(font: &FontDto, writer: &mut Writer<Vec<u8>>) {
     let has_rpr = font.name.is_some()
         || font.size.is_some()
         || font.bold.is_some()
@@ -441,72 +441,6 @@ pub fn table_to_xml(table: &TableDto) -> String {
     }
     writer.write_event(Event::End(BytesEnd::new("a:tbl"))).ok();
     String::from_utf8(writer.into_inner()).expect("valid UTF-8")
-}
-
-pub fn chart_part_to_xml(chart: &ChartDto) -> String {
-    let mut xml = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
-              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <c:chart>
-    <c:plotArea>
-      <c:layout/>
-"#,
-    );
-    let ct = chart.chart_type.as_deref().unwrap_or("barChart");
-    xml.push_str(&format!("      <c:{ct}>\n"));
-    if ct == "barChart" {
-        xml.push_str("        <c:barDir val=\"col\"/>\n");
-        xml.push_str("        <c:grouping val=\"clustered\"/>\n");
-    }
-    for (i, ser) in chart.series.iter().enumerate() {
-        xml.push_str("        <c:ser>\n");
-        xml.push_str(&format!("          <c:idx val=\"{i}\"/>\n"));
-        xml.push_str(&format!("          <c:order val=\"{i}\"/>\n"));
-        if ser.name.is_some() {
-            xml.push_str("          <c:tx>\n");
-            xml.push_str("            <c:strRef>\n");
-            xml.push_str(&format!("              <c:f>Sheet1!$A${}</c:f>\n", i + 1));
-            xml.push_str("            </c:strRef>\n");
-            xml.push_str("          </c:tx>\n");
-        }
-        xml.push_str("          <c:cat>\n");
-        xml.push_str("            <c:strLit>\n");
-        xml.push_str(&format!(
-            "              <c:ptCount val=\"{}\"/>\n",
-            ser.categories.len()
-        ));
-        for (j, cat) in ser.categories.iter().enumerate() {
-            xml.push_str(&format!(
-                "              <c:pt index=\"{j}\"><c:v>{cat}</c:v></c:pt>\n"
-            ));
-        }
-        xml.push_str("            </c:strLit>\n");
-        xml.push_str("          </c:cat>\n");
-        xml.push_str("          <c:val>\n");
-        xml.push_str("            <c:numLit>\n");
-        xml.push_str(&format!(
-            "              <c:ptCount val=\"{}\"/>\n",
-            ser.values.len()
-        ));
-        for (j, val) in ser.values.iter().enumerate() {
-            xml.push_str(&format!(
-                "              <c:pt index=\"{j}\"><c:v>{val}</c:v></c:pt>\n"
-            ));
-        }
-        xml.push_str("            </c:numLit>\n");
-        xml.push_str("          </c:val>\n");
-        xml.push_str("        </c:ser>\n");
-    }
-    xml.push_str(&format!("      </c:{ct}>\n"));
-    xml.push_str(
-        "    </c:plotArea>
-    <c:plotVisOnly val=\"1\"/>
-  </c:chart>
-</c:chartSpace>",
-    );
-    xml
 }
 
 pub fn shape_to_xml(shape: &ShapeDto) -> String {
@@ -938,4 +872,202 @@ fn write_grp_sp_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
     writer
         .write_event(Event::End(BytesEnd::new("p:grpSp")))
         .ok();
+}
+
+/// Serialize a single run (`a:r`).
+pub(crate) fn run_to_xml(r: &RunDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    write_run(r, &mut writer);
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize a run property set (`a:rPr`), or the empty string when the font
+/// has no modeled properties.
+pub(crate) fn rpr_to_xml(font: &FontDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    write_rpr(font, &mut writer);
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize an end-of-paragraph property set (`a:endParaRPr`).
+pub(crate) fn end_para_rpr_to_xml(font: &FontDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(BytesStart::new("a:endParaRPr")))
+        .ok();
+    write_font_children(font, &mut writer);
+    writer
+        .write_event(Event::End(BytesEnd::new("a:endParaRPr")))
+        .ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize an `a:lstStyle` carrying a level-1 paragraph style.
+pub(crate) fn lst_style_to_xml(dps: &ParagraphDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    write_default_paragraph_style(dps, &mut writer);
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize a single table cell (`a:tc`) including its text frame.
+pub(crate) fn table_cell_to_xml(cell: &TableCellDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut tc = BytesStart::new("a:tc");
+    if let Some(rs) = cell.row_span {
+        tc.push_attribute(("rowSpan", rs.to_string().as_str()));
+    }
+    if let Some(gs) = cell.grid_span {
+        tc.push_attribute(("gridSpan", gs.to_string().as_str()));
+    }
+    if let Some(hm) = cell.h_merge {
+        tc.push_attribute(("hMerge", if hm { "1" } else { "0" }));
+    }
+    if let Some(vm) = cell.v_merge {
+        tc.push_attribute(("vMerge", if vm { "1" } else { "0" }));
+    }
+    writer.write_event(Event::Start(tc)).ok();
+    let body = if let Some(ref tf) = cell.text_frame {
+        let mut w2 = Writer::new(Vec::new());
+        w2.write_event(Event::Start(BytesStart::new("a:txBody")))
+            .ok();
+        write_txbody(tf, &mut w2);
+        w2.write_event(Event::End(BytesEnd::new("a:txBody"))).ok();
+        w2.into_inner()
+    } else {
+        b"<a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/></a:p></a:txBody>"
+            .to_vec()
+    };
+    writer.get_mut().write_all(&body).ok();
+    writer.write_event(Event::End(BytesEnd::new("a:tc"))).ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize a single table grid column (`a:gridCol`).
+pub(crate) fn grid_col_to_xml(col: &GridColDto) -> String {
+    let mut writer = Writer::new(Vec::new());
+    let mut gc = BytesStart::new("a:gridCol");
+    gc.push_attribute(("w", col.width.to_string().as_str()));
+    writer.write_event(Event::Empty(gc)).ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
+}
+
+/// Serialize a single chart series (`c:ser`).
+pub(crate) fn chart_series_to_xml(series: &ChartSeriesDto, idx: usize) -> String {
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(BytesStart::new("c:ser")))
+        .ok();
+    let mut idx_el = BytesStart::new("c:idx");
+    idx_el.push_attribute(("val", idx.to_string().as_str()));
+    writer.write_event(Event::Empty(idx_el)).ok();
+    let mut order_el = BytesStart::new("c:order");
+    order_el.push_attribute(("val", idx.to_string().as_str()));
+    writer.write_event(Event::Empty(order_el)).ok();
+
+    if let Some(name) = &series.name {
+        writer
+            .write_event(Event::Start(BytesStart::new("c:tx")))
+            .ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:strRef")))
+            .ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:strCache")))
+            .ok();
+        let mut pt_count = BytesStart::new("c:ptCount");
+        pt_count.push_attribute(("val", "1"));
+        writer.write_event(Event::Empty(pt_count)).ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:pt")))
+            .ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:v")))
+            .ok();
+        writer.write_event(Event::Text(BytesText::new(name))).ok();
+        writer.write_event(Event::End(BytesEnd::new("c:v"))).ok();
+        writer.write_event(Event::End(BytesEnd::new("c:pt"))).ok();
+        writer
+            .write_event(Event::End(BytesEnd::new("c:strCache")))
+            .ok();
+        writer
+            .write_event(Event::End(BytesEnd::new("c:strRef")))
+            .ok();
+        writer.write_event(Event::End(BytesEnd::new("c:tx"))).ok();
+    }
+
+    writer
+        .write_event(Event::Start(BytesStart::new("c:cat")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("c:strRef")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("c:strCache")))
+        .ok();
+    let mut pt_count = BytesStart::new("c:ptCount");
+    pt_count.push_attribute(("val", series.categories.len().to_string().as_str()));
+    writer.write_event(Event::Empty(pt_count)).ok();
+    for (j, cat) in series.categories.iter().enumerate() {
+        let mut pt = BytesStart::new("c:pt");
+        pt.push_attribute(("idx", j.to_string().as_str()));
+        writer.write_event(Event::Start(pt)).ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:v")))
+            .ok();
+        writer.write_event(Event::Text(BytesText::new(cat))).ok();
+        writer.write_event(Event::End(BytesEnd::new("c:v"))).ok();
+        writer.write_event(Event::End(BytesEnd::new("c:pt"))).ok();
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new("c:strCache")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("c:strRef")))
+        .ok();
+    writer.write_event(Event::End(BytesEnd::new("c:cat"))).ok();
+
+    writer
+        .write_event(Event::Start(BytesStart::new("c:val")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("c:numRef")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("c:numCache")))
+        .ok();
+    writer
+        .write_event(Event::Start(BytesStart::new("c:formatCode")))
+        .ok();
+    writer
+        .write_event(Event::Text(BytesText::new("General")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("c:formatCode")))
+        .ok();
+    let mut pt_count = BytesStart::new("c:ptCount");
+    pt_count.push_attribute(("val", series.values.len().to_string().as_str()));
+    writer.write_event(Event::Empty(pt_count)).ok();
+    for (j, val) in series.values.iter().enumerate() {
+        let mut pt = BytesStart::new("c:pt");
+        pt.push_attribute(("idx", j.to_string().as_str()));
+        writer.write_event(Event::Start(pt)).ok();
+        writer
+            .write_event(Event::Start(BytesStart::new("c:v")))
+            .ok();
+        writer
+            .write_event(Event::Text(BytesText::new(&val.to_string())))
+            .ok();
+        writer.write_event(Event::End(BytesEnd::new("c:v"))).ok();
+        writer.write_event(Event::End(BytesEnd::new("c:pt"))).ok();
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new("c:numCache")))
+        .ok();
+    writer
+        .write_event(Event::End(BytesEnd::new("c:numRef")))
+        .ok();
+    writer.write_event(Event::End(BytesEnd::new("c:val"))).ok();
+
+    writer.write_event(Event::End(BytesEnd::new("c:ser"))).ok();
+    String::from_utf8(writer.into_inner()).expect("valid UTF-8")
 }
