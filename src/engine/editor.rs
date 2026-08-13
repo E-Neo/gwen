@@ -79,7 +79,11 @@ pub fn remove_shape(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
     Ok(writer.into_inner())
 }
 
-pub fn insert_shape_after(
+/// Insert `new_shape_xml` so it becomes the shape at index `insert_idx`,
+/// shifting the former occupant (and everything after it) down by one. When
+/// `insert_idx` is at or past the current shape count the new shape is
+/// appended at the end of the shape tree.
+pub fn insert_shape_at(
     xml_bytes: &[u8],
     insert_idx: usize,
     new_shape_xml: &[u8],
@@ -89,29 +93,28 @@ pub fn insert_shape_after(
     let mut writer = Writer::new(Vec::new());
     let mut shape_counter = 0;
     let mut inserted = false;
-    let mut insert_after_depth: Option<usize> = None;
     let mut buffer = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(ref e)) => {
+                let is_shape = is_shape_tag(e.name().as_ref());
+                if is_shape && shape_counter == insert_idx && !inserted {
+                    writer
+                        .get_mut()
+                        .write_all(new_shape_xml)
+                        .map_err(AppError::Io)?;
+                    inserted = true;
+                }
+                if is_shape {
+                    shape_counter += 1;
+                }
                 writer
                     .write_event(Event::Start(e.clone()))
                     .map_err(AppError::Io)?;
-                let is_shape = is_shape_tag(e.name().as_ref());
-                if is_shape {
-                    if shape_counter == insert_idx {
-                        insert_after_depth = Some(0);
-                    }
-                    shape_counter += 1;
-                }
-                if let Some(ref mut d) = insert_after_depth {
-                    *d += 1;
-                }
             }
             Ok(Event::End(ref e)) => {
-                let is_sp_tree = e.name().as_ref() == b"p:spTree";
-                if is_sp_tree && !inserted {
+                if e.name().as_ref() == b"p:spTree" && !inserted {
                     writer
                         .get_mut()
                         .write_all(new_shape_xml)
@@ -121,17 +124,6 @@ pub fn insert_shape_after(
                 writer
                     .write_event(Event::End(e.clone()))
                     .map_err(AppError::Io)?;
-                if let Some(ref mut d) = insert_after_depth {
-                    *d -= 1;
-                    if *d == 0 {
-                        writer
-                            .get_mut()
-                            .write_all(new_shape_xml)
-                            .map_err(AppError::Io)?;
-                        inserted = true;
-                        insert_after_depth = None;
-                    }
-                }
             }
             Ok(Event::Empty(ref e)) => {
                 writer
@@ -632,12 +624,17 @@ pub fn add_to_table(
         shape_idx,
         |json, _remaining| {
             let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+            // An emptied array (e.g. `cells` after its last element was
+            // deleted) serializes away; materialize it for the insert.
+            if parent.is_null() {
+                *parent = serde_json::Value::Array(Vec::new());
+            }
             match remaining.last() {
                 Some(path::PathSegment::Index(idx)) => {
                     let arr = parent
                         .as_array_mut()
                         .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
-                    let insert_at = (*idx + 1).min(arr.len());
+                    let insert_at = (*idx).min(arr.len());
                     arr.insert(insert_at, new_val.clone());
                 }
                 Some(path::PathSegment::Field(name)) => {
@@ -699,18 +696,23 @@ pub fn add_to_text_frame(
         shape_idx,
         |json, _remaining| {
             // remaining examples:
-            //   ["text_frame", "paragraphs", Index(K)] -> insert para at K+1
+            //   ["text_frame", "paragraphs", Index(K)] -> insert para at K
             //   ["text_frame", "paragraphs"] -> append para
-            //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> insert run at J+1
+            //   ["text_frame", "paragraphs", Index(K), "runs", Index(J)] -> insert run at J
             //   ["text_frame", "paragraphs", Index(K), "runs"] -> append run
             let parent = navigate_json_mut(json, &remaining[..remaining.len() - 1])?;
+            // An emptied array (e.g. `runs` after its last element was deleted)
+            // serializes away; materialize it so the insert has a target.
+            if parent.is_null() {
+                *parent = serde_json::Value::Array(Vec::new());
+            }
 
             match remaining.last() {
                 Some(path::PathSegment::Index(idx)) => {
                     let arr = parent
                         .as_array_mut()
                         .ok_or_else(|| AppError::PathParse("Expected array".to_string()))?;
-                    let insert_at = (*idx + 1).min(arr.len());
+                    let insert_at = (*idx).min(arr.len());
                     arr.insert(insert_at, new_val.clone());
                 }
                 Some(path::PathSegment::Field(name)) => {

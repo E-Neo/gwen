@@ -1,11 +1,17 @@
 use serde_json::Value;
 
+use crate::engine::readonly;
 use crate::path::PathSegment;
 
 /// Fields that are replaced as a whole rather than diffed field-by-field. The
 /// DTO models them as a single document so it makes no sense to patch their
 /// inner leaves.
 const ATOMIC_FIELDS: [&str; 1] = ["default_paragraph_style"];
+
+/// Array kinds whose elements are matched across the two documents by content
+/// fingerprint rather than by position. Ordered matching keeps untouched
+/// elements byte-for-byte (their unmodeled XML survives) when siblings are
+/// inserted or removed around them.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EditOp {
@@ -26,15 +32,20 @@ pub struct Edit {
 }
 
 /// Deeply compare the current JSON projection of the deck against the edited
-/// overlay and emit the minimal set of edits needed to make the deck match.
+/// document and emit the minimal set of edits needed to make the deck match.
 ///
 /// Semantics:
 /// - Objects are full-state snapshots: a key present in `current` but absent
 ///   from `new` is deleted, a key absent from `current` but present in `new`
-///   is added, and `null` also deletes.
-/// - Arrays are positional full assertions: only the elements actually present
-///   in `new` are considered, an element absent from `new` (beyond its length)
-///   is deleted, and elements only in `new` are inserted (appended).
+///   is added, and `null` also deletes. Read-only fields (see
+///   `engine::readonly`) are never edited: when absent from `new` they are
+///   left untouched.
+/// - Arrays of shapes, paragraphs, runs, table rows, cells and grid columns
+///   are matched element-by-element by content fingerprint in document order,
+///   so an insertion or removal does not rewrite untouched siblings. Other
+///   arrays are positional full assertions.
+/// - An inserted element targets its index in the new document; the apply
+///   engine inserts at that position.
 /// - Identical leaf values produce no edit.
 pub fn diff(current: &Value, new: &Value) -> Vec<Edit> {
     let mut out = Vec::new();
@@ -60,11 +71,16 @@ fn diff_rec(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Value)
                 let mut p = path.to_vec();
                 p.push(PathSegment::Field(key.clone()));
                 match new_map.get(key) {
-                    None => out.push(Edit {
-                        path: p,
-                        op: EditOp::Delete,
-                        value: None,
-                    }),
+                    None => {
+                        if readonly::skip_key(path, key) {
+                            continue;
+                        }
+                        out.push(Edit {
+                            path: p,
+                            op: EditOp::Delete,
+                            value: None,
+                        })
+                    }
                     Some(new_val) => {
                         if new_val.is_null() {
                             if !cur_val.is_null() {
@@ -113,6 +129,68 @@ fn diff_rec(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Value)
 fn diff_array(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Value) {
     let cur_arr = cur.as_array().expect("guarded by caller");
     let new_arr = new.as_array().expect("guarded by caller");
+    let Some(kind) = array_kind(path) else {
+        diff_array_positional(out, path, cur_arr, new_arr);
+        return;
+    };
+
+    // Longest-common-subsequence alignment on content fingerprints: pairs
+    // keep untouched siblings matched across insertions and removals, and
+    // produce edits that target only the elements that actually changed.
+    let cur_fp: Vec<String> = cur_arr.iter().map(|v| fingerprint(kind, v)).collect();
+    let new_fp: Vec<String> = new_arr.iter().map(|v| fingerprint(kind, v)).collect();
+    let (pairs, unmatched_cur, unmatched_new) = match_sequences(&cur_fp, &new_fp);
+
+    for (ci, ni) in pairs {
+        let mut p = path.to_vec();
+        p.push(PathSegment::Index(ci));
+        let cur_val = &cur_arr[ci];
+        let new_val = &new_arr[ni];
+        if cur_val.is_object() && new_val.is_object() {
+            diff_rec(out, &p, cur_val, new_val);
+        } else if new_val.is_array() {
+            diff_array(out, &p, cur_val, new_val);
+        } else if cur_val != new_val {
+            out.push(Edit {
+                path: p,
+                op: EditOp::Set,
+                value: Some(new_val.clone()),
+            });
+        }
+    }
+    for ci in unmatched_cur {
+        let mut p = path.to_vec();
+        p.push(PathSegment::Index(ci));
+        out.push(Edit {
+            path: p,
+            op: EditOp::Delete,
+            value: None,
+        });
+    }
+    for ni in unmatched_new {
+        let mut p = path.to_vec();
+        p.push(PathSegment::Index(ni));
+        let value = if kind == "shapes" {
+            insert_shape_defaults(&new_arr[ni])
+        } else {
+            new_arr[ni].clone()
+        };
+        out.push(Edit {
+            path: p,
+            op: EditOp::Insert,
+            value: Some(value),
+        });
+    }
+}
+
+/// Arrays whose elements are not fingerprinted (slides, masters, chart data)
+/// are matched positionally and asserted element-for-element.
+fn diff_array_positional(
+    out: &mut Vec<Edit>,
+    path: &[PathSegment],
+    cur_arr: &[Value],
+    new_arr: &[Value],
+) {
     for i in 0..new_arr.len() {
         let mut p = path.to_vec();
         p.push(PathSegment::Index(i));
@@ -127,12 +205,6 @@ fn diff_array(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Valu
                         value: None,
                     });
                 }
-            } else if cur_val.is_null() {
-                out.push(Edit {
-                    path: p,
-                    op: EditOp::Set,
-                    value: Some(new_val.clone()),
-                });
             } else if cur_val.is_object() && new_val.is_object() {
                 diff_rec(out, &p, cur_val, new_val);
             } else if cur_val.is_array() && new_val.is_array() {
@@ -161,6 +233,166 @@ fn diff_array(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Valu
             value: None,
         });
     }
+}
+
+/// The kind of array at `path`, from the last field segment.
+fn array_kind(path: &[PathSegment]) -> Option<&'static str> {
+    path.iter().rev().find_map(|seg| match seg {
+        PathSegment::Field(f) => match f.as_str() {
+            "shapes" => Some("shapes"),
+            "paragraphs" => Some("paragraphs"),
+            "runs" => Some("runs"),
+            "grid" => Some("grid"),
+            _ => None,
+        },
+        PathSegment::Index(_) => None,
+    })
+}
+
+/// A stable identity fingerprint used to match array elements across
+/// documents. The fingerprint must not change when the element is edited in
+/// place, so that untouched siblings stay matched when an insertion or removal
+/// shifts them:
+/// - shapes identify by type and name (geometry and text edits stay matched);
+/// - paragraphs identify by style (text edits stay matched);
+/// - runs identify by formatting (text edits stay matched);
+/// - grid columns identify by their width;
+/// - table rows and cells are positional: they have no stable identity, and a
+///   positional match keeps in-place text edits on the nested run (lossless)
+///   instead of rebuilding the row or cell from defaults.
+fn fingerprint(kind: &str, v: &Value) -> String {
+    match kind {
+        "shapes" => {
+            let Some(obj) = v.as_object() else {
+                return String::new();
+            };
+            let ty = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
+            let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
+            format!("{ty}|{name}")
+        }
+        "grid" => v
+            .get("width")
+            .and_then(Value::as_i64)
+            .map(|w| w.to_string())
+            .unwrap_or_default(),
+        "runs" => {
+            let Some(font) = v.get("font").and_then(Value::as_object) else {
+                return String::new();
+            };
+            let mut parts: Vec<String> = font
+                .iter()
+                .filter(|(k, _)| k.as_str() != "text")
+                .map(|(k, val)| {
+                    let s = match val {
+                        Value::Bool(b) => b.to_string(),
+                        Value::Number(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    format!("{k}={s}")
+                })
+                .collect();
+            parts.sort();
+            parts.join("|")
+        }
+        "paragraphs" => {
+            let Some(obj) = v.as_object() else {
+                return String::new();
+            };
+            let mut parts = Vec::new();
+            for (key, val) in obj {
+                if key == "runs" {
+                    continue;
+                }
+                let s = match val {
+                    Value::Bool(b) => b.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    Value::String(s) => s.clone(),
+                    Value::Object(map) => {
+                        let mut inner: Vec<String> = map
+                            .iter()
+                            .map(|(k, vv)| format!("{k}={}", scalar_str(vv)))
+                            .collect();
+                        inner.sort();
+                        inner.join(",")
+                    }
+                    other => other.to_string(),
+                };
+                parts.push(format!("{key}={s}"));
+            }
+            parts.sort();
+            parts.join("|")
+        }
+        _ => unreachable!("array_kind only yields shapes, paragraphs, runs, grid"),
+    }
+}
+
+fn scalar_str(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Longest-common-subsequence alignment of two fingerprint sequences. Returns
+/// the matched index pairs (in document order) plus the unmatched indices on
+/// each side, which become the recursive diffs, deletes and inserts.
+fn match_sequences(
+    cur: &[String],
+    new: &[String],
+) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>) {
+    let n = cur.len();
+    let m = new.len();
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if cur[i] == new[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut pairs = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if cur[i] == new[j] {
+            pairs.push((i, j));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    let mut matched_cur = vec![false; n];
+    let mut matched_new = vec![false; m];
+    for &(ci, ni) in &pairs {
+        matched_cur[ci] = true;
+        matched_new[ni] = true;
+    }
+    let unmatched_cur: Vec<usize> = (0..n).filter(|&k| !matched_cur[k]).collect();
+    let unmatched_new: Vec<usize> = (0..m).filter(|&k| !matched_new[k]).collect();
+    (pairs, unmatched_cur, unmatched_new)
+}
+
+/// A new shape must deserialize as a `ShapeDto`: default the fields the
+/// markdown mirror deliberately omits. `shape_id` 0 means "auto-assign".
+pub fn insert_shape_defaults(v: &Value) -> Value {
+    let Value::Object(map) = v else {
+        return v.clone();
+    };
+    let mut m = map.clone();
+    let has_tf = m.contains_key("text_frame");
+    m.entry("shape_id".to_string()).or_insert(Value::from(0));
+    m.entry("is_placeholder".to_string())
+        .or_insert(Value::from(false));
+    m.entry("has_text_frame".to_string())
+        .or_insert(Value::from(has_tf));
+    Value::Object(m)
 }
 
 /// Order edits so array indices stay valid during application.

@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use serde_json::{Value, json};
-
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_pptx-engineer")
 }
@@ -38,96 +36,26 @@ fn run_ok(args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// Navigate a dotted/bracketed path (as `p`-prefixed, e.g. `slides[0].shapes`)
-/// through a parsed jsonfy snapshot.
-fn navigate<'a>(value: &'a Value, path: &str) -> &'a Value {
-    let mut cur = value;
-    let mut rest = path.strip_prefix('p').unwrap_or(path);
-    rest = rest.strip_prefix('.').unwrap_or(rest);
-    while !rest.is_empty() {
-        if let Some(rest_after_idx) = rest.strip_prefix('[') {
-            let close = rest_after_idx.find(']').expect("unclosed index in path");
-            let idx: usize = rest_after_idx[..close]
-                .parse()
-                .unwrap_or_else(|_| panic!("invalid index in path: {path}"));
-            cur = &cur[idx];
-            rest = rest_after_idx[close + 1..]
-                .strip_prefix('.')
-                .unwrap_or(&rest_after_idx[close + 1..]);
-        } else {
-            let end = rest.find(['.', '[']).unwrap_or(rest.len());
-            cur = &cur[&rest[..end]];
-            rest = &rest[end..];
-            rest = rest.strip_prefix('.').unwrap_or(rest);
-        }
-    }
-    cur
+fn markdown(input: &Path) -> String {
+    run_ok(&["markdown", "--input", input.to_str().unwrap()])
 }
 
-fn query(input: &Path, path: &str) -> Value {
-    let out = run_ok(&["jsonfy", "--input", input.to_str().unwrap()]);
-    let root: Value = serde_json::from_str(&out).unwrap();
-    navigate(&root, path).clone()
-}
-
-/// Write `edits` to `dir/edits.json` and apply it to `input`.
-fn update(input: &Path, edits: &Value) -> PathBuf {
-    let out = run_ok(&["jsonfy", "--input", input.to_str().unwrap()]);
-    let snapshot: Value = serde_json::from_str(&out).unwrap();
-    update_snapshot(input, &overlay_merge(&snapshot, edits))
-}
-
-/// Apply a full snapshot document (in the shape of jsonfy output) to `input`.
-fn update_snapshot(input: &Path, snapshot: &Value) -> PathBuf {
+/// Apply a markdown mirror to `input`, producing a new deck in a temp dir.
+fn update(input: &Path, md: &str) -> PathBuf {
     let dir = tmp();
-    let json_file = dir.join("deck.json");
-    std::fs::write(&json_file, serde_json::to_string(snapshot).unwrap()).unwrap();
+    let md_file = dir.join("deck.md");
+    std::fs::write(&md_file, md).unwrap();
     let output = dir.join("out.pptx");
     run_ok(&[
         "update",
         "--input",
         input.to_str().unwrap(),
-        "--json",
-        json_file.to_str().unwrap(),
+        "--markdown",
+        md_file.to_str().unwrap(),
         "--output",
         output.to_str().unwrap(),
     ]);
     output
-}
-
-/// Fold a partial overlay into a snapshot document, replicating the old
-/// partial-update semantics: null deletes, objects merge by key, arrays are
-/// positional (null elements drop, elements beyond the overlay drop).
-fn overlay_merge(cur: &Value, overlay: &Value) -> Value {
-    match (cur, overlay) {
-        (Value::Object(c), Value::Object(o)) => {
-            let mut out = c.clone();
-            for (k, v) in o {
-                if v.is_null() {
-                    out.remove(k);
-                } else {
-                    out.insert(
-                        k.clone(),
-                        overlay_merge(c.get(k).unwrap_or(&Value::Null), v),
-                    );
-                }
-            }
-            Value::Object(out)
-        }
-        (Value::Array(c), Value::Array(o)) => {
-            let mut out = Vec::new();
-            for (i, v) in o.iter().enumerate() {
-                if v.is_null() {
-                    out.push(Value::Null);
-                    continue;
-                }
-                let base = c.get(i).cloned().unwrap_or(Value::Null);
-                out.push(overlay_merge(&base, v));
-            }
-            Value::Array(out)
-        }
-        _ => overlay.clone(),
-    }
 }
 
 fn read_zip_entry(path: &Path, name: &str) -> String {
@@ -139,21 +67,41 @@ fn read_zip_entry(path: &Path, name: &str) -> String {
     buf
 }
 
-#[test]
-fn jsonfy_template_snapshot_is_wide() {
-    let pres = query(&fixture("template.pptx"), "p");
-    assert_eq!(pres["slide_width"], 12192000);
-    assert_eq!(pres["slide_height"], 6858000);
-    assert_eq!(pres["slides"].as_array().unwrap().len(), 1);
-    assert_eq!(pres["slides"][0]["shapes"].as_array().unwrap().len(), 0);
-    assert!(pres["slides"][0]["background"]["fill"]["type"].is_null());
+/// Everything below the `<!-- slide ... -->` marker line for slide `n`
+/// (0-based), up to the next marker. Consumes the whole marker line so the
+/// closing `-->` never leaks into the block.
+fn slide_block(md: &str, n: usize) -> String {
+    let mut start = 0;
+    for _ in 0..=n {
+        let marker = md[start..].find("<!-- slide").expect("slide marker");
+        start += marker;
+        let line_end = md[start..].find('\n').expect("marker line end");
+        start += line_end + 1;
+    }
+    let next = md[start..]
+        .find("<!-- slide")
+        .map(|i| start + i)
+        .unwrap_or(md.len());
+    md[start..next].trim().to_string()
 }
 
 #[test]
-fn jsonfy_template_43_snapshot_is_standard() {
-    let pres = query(&fixture("template_43.pptx"), "p");
-    assert_eq!(pres["slide_width"], 9144000);
-    assert_eq!(pres["slide_height"], 6858000);
+fn markdown_template_mirror_is_wide() {
+    let md = markdown(&fixture("template.pptx"));
+    assert!(
+        md.contains("slide_width=12192000 slide_height=6858000"),
+        "wide deck geometry in the header"
+    );
+    assert!(
+        slide_block(&md, 0).is_empty(),
+        "template slide has no shapes"
+    );
+}
+
+#[test]
+fn markdown_template_43_mirror_is_standard() {
+    let md = markdown(&fixture("template_43.pptx"));
+    assert!(md.contains("slide_width=9144000 slide_height=6858000"));
 }
 
 const PNG_1PX: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDATx\xda\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\xff\xff\x14\xbb\x00\x00\x00\x00IEND\xaeB`\x82";
@@ -197,14 +145,14 @@ fn inject_image_into_template(deck: &Path) {
 }
 
 #[test]
-fn jsonfy_extracts_media_with_media_flag() {
+fn markdown_extracts_media_with_media_flag() {
     let dir = tmp();
     let deck = dir.join("deck.pptx");
     inject_image_into_template(&deck);
 
     let media_dir = dir.join("media");
-    run_ok(&[
-        "jsonfy",
+    let md = run_ok(&[
+        "markdown",
         "--input",
         deck.to_str().unwrap(),
         "--media",
@@ -218,222 +166,174 @@ fn jsonfy_extracts_media_with_media_flag() {
         PNG_1PX,
         "extracted bytes match the embedded image"
     );
-    let snapshot: Value =
-        serde_json::from_str(&run_ok(&["jsonfy", "--input", deck.to_str().unwrap()])).unwrap();
-    assert_eq!(snapshot["slides"][0]["shapes"][0]["image"], "image1.png");
+    assert!(
+        slide_block(&md, 0).contains("type=picture"),
+        "picture shape serialized into the mirror"
+    );
 }
 
 #[test]
 fn update_core_properties_roundtrip() {
-    let out = update(
-        &fixture("template.pptx"),
-        &json!({ "core_properties": { "title": "My Deck" } }),
+    let md = markdown(&fixture("template.pptx"));
+    let edited = md.replace(
+        "| comments | generated using python-pptx |",
+        "| comments | My Deck |",
     );
-    let pres = query(&out, "p");
-    assert_eq!(pres["core_properties"]["title"], "My Deck");
+    let out = update(&fixture("template.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        out_md.contains("| comments | My Deck |"),
+        "edited core property round-trips"
+    );
 }
 
 #[test]
 fn update_run_text_roundtrip() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [{"text_frame": {
-                    "paragraphs": [{"runs": [{"text": "Changed"}]}]
-                }}]},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace("\nAlpha\n", "\nChanged\n");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("Changed"),
+        "first slide text changed"
     );
-    let v = query(
-        &out,
-        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text",
+    assert!(
+        slide_block(&out_md, 1).contains("Beta"),
+        "second slide untouched"
     );
-    assert_eq!(v, "Changed");
-    // The second slide is untouched.
-    let v = query(
-        &out,
-        "slides[1].shapes[0].text_frame.paragraphs[0].runs[0].text",
-    );
-    assert_eq!(v, "Beta");
 }
 
 #[test]
 fn update_rich_text_formatting() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [{"text_frame": {
-                    "paragraphs": [{"runs": [{"text": "Alpha", "font": {"bold": true, "size": 2000}}]}]
-                }}]},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace("\nAlpha\n", "\n**Alpha**\n");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(
+        slide_xml.contains("<a:rPr b=\"1\">"),
+        "bold emphasis written to the run properties"
     );
-    let v = query(
-        &out,
-        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font",
+    assert!(
+        slide_xml.contains("Alpha"),
+        "text preserved through formatting edit"
     );
-    assert_eq!(v["bold"], true);
-    assert_eq!(v["size"], 2000);
-    let v = query(
-        &out,
-        "slides[0].shapes[0].text_frame.paragraphs[0].runs[0].text",
-    );
-    assert_eq!(v, "Alpha", "text preserved through formatting edits");
 }
 
 #[test]
 fn update_whole_paragraph_replace() {
-    // The original pain point: replace text_frame.paragraphs[k] wholesale.
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [{"text_frame": {
-                    "paragraphs": [
-                        {"runs": [{"text": "Hi", "font": {"bold": true, "size": 2000}}]},
-                        {"alignment": "CENTER", "runs": [{"text": "There"}]}
-                    ]
-                }}]},
-                {}
-            ]
-        }),
+    // The original pain point: replace a paragraph with two: a bold+size run
+    // and a centered one.
+    let md = markdown(&fixture("two_slides.pptx"));
+    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha";
+    let two = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\n<span data-size=2000 data-bold=\"true\">Hi</span>\n\n<!-- para: alignment=center -->\nThere";
+    let edited = md.replace(block, two);
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    let block = slide_block(&out_md, 0);
+    assert!(
+        block.contains("<span data-size=2000 data-bold=\"true\">Hi</span>"),
+        "first paragraph keeps bold+size"
     );
-    let tf = query(&out, "slides[0].shapes[0].text_frame");
-    let paras = tf["paragraphs"].as_array().unwrap();
-    assert_eq!(paras.len(), 2);
-    assert_eq!(paras[0]["runs"][0]["text"], "Hi");
-    assert_eq!(paras[0]["runs"][0]["font"]["bold"], true);
-    assert_eq!(paras[0]["runs"][0]["font"]["size"], 2000);
-    assert_eq!(paras[1]["alignment"], "CENTER");
-    assert_eq!(paras[1]["runs"][0]["text"], "There");
+    assert!(
+        block.contains("<!-- para: alignment=center -->\nThere"),
+        "second paragraph is centered"
+    );
 }
 
 #[test]
 fn update_delete_paragraph() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [{"text_frame": {
-                    "paragraphs": [{}, null]
-                }}]},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace("\nAlpha\n", "\n\n");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    let block = slide_block(&out_md, 0);
+    assert!(!block.contains("Alpha"), "paragraph removed from the shape");
+    assert!(
+        block.contains("type=text_box"),
+        "shape survives the paragraph removal"
     );
-    let paras = query(&out, "slides[0].shapes[0].text_frame.paragraphs");
-    assert_eq!(paras.as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn update_append_paragraph() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [{"text_frame": {
-                    "paragraphs": [
-                        {},
-                        {"runs": [{"text": "Appended"}]}
-                    ]
-                }}]},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace(
+        "Alpha\n\n\n<!-- slide -->",
+        "Alpha\n\n<!-- para: alignment=center -->\nAppended\n\n<!-- slide -->",
     );
-    let v = query(
-        &out,
-        "slides[0].shapes[0].text_frame.paragraphs[1].runs[0].text",
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("Appended"),
+        "appended paragraph present in the first slide"
     );
-    assert_eq!(v, "Appended");
 }
 
 #[test]
 fn update_background_roundtrip() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"background": {"fill": {"color": "FF00FF"}}},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replacen(
+        "<!-- slide -->",
+        "<!-- slide: background=SOLID:FF00FF -->",
+        1,
     );
-    let bg = query(&out, "slides[0].background");
-    assert_eq!(bg["fill"]["type"], "SOLID");
-    assert_eq!(bg["fill"]["color"], "FF00FF");
-    let second = query(&out, "slides[1].background");
-    assert!(second["fill"]["type"].is_null(), "other slide untouched");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let slide1_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(
+        slide1_xml.contains("<a:srgbClr val=\"FF00FF\"/>"),
+        "background color written to the slide"
+    );
+    let slide2_xml = read_zip_entry(&out, "ppt/slides/slide2.xml");
+    assert!(!slide2_xml.contains("FF00FF"), "other slide untouched");
 }
 
 #[test]
 fn update_table_cell_text() {
-    let out = update(
-        &fixture("table_chart.pptx"),
-        &json!({
-            "slides": [{"shapes": [{}, {"table": {"rows": [{}, {"cells": [{}, {
-                "text_frame": {"paragraphs": [{"runs": [{"text": "Zed"}]}]}
-            }]}]}}, {}]}]
-        }),
+    let md = markdown(&fixture("table_chart.pptx"));
+    let edited = md.replace("\n| A |  |\n", "\n| Zed |  |\n");
+    let out = update(&fixture("table_chart.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("| Zed |  |"),
+        "table cell text changed"
     );
-    let v = query(
-        &out,
-        "slides[0].shapes[1].table.rows[1].cells[1].text_frame.paragraphs[0].runs[0].text",
-    );
-    assert_eq!(v, "Zed");
-}
-
-#[test]
-fn update_chart_series_data() {
-    let out = update(
-        &fixture("table_chart.pptx"),
-        &json!({
-            "slides": [{"shapes": [{}, {}, {"chart": {"series": [
-                {"categories": ["Q3", "Q2"], "values": [30, 20.0]}
-            ]}}]}]
-        }),
-    );
-    assert_eq!(
-        query(&out, "slides[0].shapes[2].chart.series[0].categories[0]"),
-        "Q3"
-    );
-    assert_eq!(
-        query(&out, "slides[0].shapes[2].chart.series[0].values[0]"),
-        30.0
-    );
-    let chart_xml = read_zip_entry(&out, "ppt/charts/chart1.xml");
-    assert!(chart_xml.contains("Q3"), "category updated in chart part");
-    assert!(chart_xml.contains(">30<"), "value updated in chart part");
 }
 
 #[test]
 fn update_delete_shape() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({ "slides": [{ "shapes": [null] }, {}] }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha\n\n";
+    let edited = md.replace(block, "");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).is_empty(),
+        "shape removed from the first slide"
     );
-    let shapes = query(&out, "slides[0].shapes");
-    assert_eq!(shapes.as_array().unwrap().len(), 0);
+    let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(
+        !slide_xml.contains("Alpha"),
+        "shape gone from the slide XML"
+    );
 }
 
 #[test]
 fn update_theme_roundtrip() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "theme": {
-                "colors": {"accent1": "FF0000"},
-                "fonts": {"major": "Arial"}
-            }
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md
+        .replace("| accent1 | 4F81BD |", "| accent1 | FF0000 |")
+        .replace("| major | Calibri |", "| major | Arial |");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        out_md.contains("| accent1 | FF0000 |"),
+        "theme color edited"
     );
-    assert_eq!(query(&out, "p.theme.colors.accent1"), "FF0000");
-    assert_eq!(query(&out, "p.theme.fonts.major"), "Arial");
-    assert_eq!(query(&out, "p.theme.colors.accent2"), "C0504D");
+    assert!(out_md.contains("| major | Arial |"), "theme font edited");
+    assert!(
+        out_md.contains("| accent2 | C0504D |"),
+        "unedited theme color preserved"
+    );
     let theme_xml = read_zip_entry(&out, "ppt/theme/theme1.xml");
     assert!(theme_xml.contains("FF0000"), "color written to theme part");
     assert!(
@@ -443,372 +343,186 @@ fn update_theme_roundtrip() {
 }
 
 #[test]
-fn update_delete_theme_color_by_removing_key_errors() {
-    let mut snapshot: Value = serde_json::from_str(&run_ok(&[
-        "jsonfy",
-        "--input",
-        fixture("two_slides.pptx").to_str().unwrap(),
-    ]))
-    .unwrap();
-    snapshot["theme"]["colors"]
-        .as_object_mut()
-        .unwrap()
-        .remove("accent1");
-
+fn update_delete_theme_color_by_removing_row_errors() {
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace("| accent1 | 4F81BD |\n", "");
     let dir = tmp();
-    let json_file = dir.join("deck.json");
-    std::fs::write(&json_file, serde_json::to_string(&snapshot).unwrap()).unwrap();
+    let md_file = dir.join("deck.md");
+    std::fs::write(&md_file, &edited).unwrap();
     let status = Command::new(bin())
         .args([
             "update",
             "--input",
             fixture("two_slides.pptx").to_str().unwrap(),
-            "--json",
-            json_file.to_str().unwrap(),
+            "--markdown",
+            md_file.to_str().unwrap(),
             "--output",
             dir.join("out.pptx").to_str().unwrap(),
         ])
         .output()
         .unwrap();
-    assert!(!status.status.success());
+    assert!(!status.status.success(), "removal must error loudly");
     let stderr = String::from_utf8_lossy(&status.stderr);
     assert!(
         stderr.contains("can only be set"),
-        "unsupported removal must error loudly, got: {stderr}"
+        "unsupported removal must be called out, got: {stderr}"
     );
 }
 
 #[test]
-fn update_delete_text_frame_by_removing_key() {
-    let mut snapshot: Value = serde_json::from_str(&run_ok(&[
-        "jsonfy",
-        "--input",
-        fixture("two_slides.pptx").to_str().unwrap(),
-    ]))
-    .unwrap();
-    snapshot["slides"][0]["shapes"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("text_frame");
-
-    let out = update_snapshot(&fixture("two_slides.pptx"), &snapshot);
+fn update_delete_text_frame_by_removing_block() {
+    let md = markdown(&fixture("two_slides.pptx"));
+    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha\n\n";
+    let shape_only = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n\n";
+    let edited = md.replace(block, shape_only);
+    let out = update(&fixture("two_slides.pptx"), &edited);
     let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
         !slide_xml.contains("<p:txBody"),
-        "removed text_frame must delete the shape's txBody"
+        "removed text frame deletes the shape's txBody"
     );
-    let has_tf = query(&out, "slides[0].shapes[0].has_text_frame");
-    assert_eq!(has_tf, false);
+    let out_md = markdown(&out);
+    let block = slide_block(&out_md, 0);
+    assert!(
+        block.contains("type=auto_shape") && !block.contains("<!-- tf"),
+        "shape survives without its text frame (as an auto shape)"
+    );
+    assert!(
+        block.contains("name=\"TextBox 1\""),
+        "shape still identified by name"
+    );
 }
 
 #[test]
 fn theme_query_reads_whole_scheme() {
-    let v = query(&fixture("two_slides.pptx"), "p.theme.colors");
-    let obj = v.as_object().unwrap();
-    assert!(obj.contains_key("accent1"));
-    assert!(obj.contains_key("dk1"));
+    let md = markdown(&fixture("two_slides.pptx"));
+    assert!(md.contains("| accent1 | 4F81BD |"));
+    assert!(md.contains("| dk1 |  |"));
 }
 
 #[test]
-fn master_and_layout_query_expose_shapes() {
-    let masters = query(&fixture("two_slides.pptx"), "p.slide_masters");
-    let arr = masters.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert!(arr[0]["shapes"].is_array());
-    assert!(arr[0]["slide_layouts"].is_array());
-
-    let first_layout_name = query(
-        &fixture("two_slides.pptx"),
-        "p.slide_masters[0].slide_layouts[0].name",
+fn master_query_exposes_shapes() {
+    let md = markdown(&fixture("two_slides.pptx"));
+    assert!(
+        md.contains("<!-- shape: type=placeholder name=\"Title Placeholder 1\""),
+        "master shapes serialized"
     );
-    assert!(first_layout_name.is_string());
-
-    let first_layout_shape = query(
-        &fixture("two_slides.pptx"),
-        "p.slide_masters[0].slide_layouts[0].shapes[0].name",
-    );
-    assert!(first_layout_shape.is_string());
-}
-
-#[test]
-fn slide_layout_reference_points_to_master_layout() {
-    let reference = query(&fixture("two_slides.pptx"), "slides[0].slide_layout");
-    let m = reference["master"].as_u64().unwrap() as usize;
-    let l = reference["layout"].as_u64().unwrap() as usize;
-    let expected = query(
-        &fixture("two_slides.pptx"),
-        &format!("p.slide_masters[{m}].slide_layouts[{l}].name"),
-    );
-    assert_eq!(reference["name"], expected);
 }
 
 #[test]
 fn update_master_shape_persists() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({ "slide_masters": [{ "shapes": [{ "left": 100000 }] }] }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace(
+        "<!-- shape: type=placeholder name=\"Title Placeholder 1\" x=457200",
+        "<!-- shape: type=placeholder name=\"Title Placeholder 1\" x=100000",
     );
-    assert_eq!(query(&out, "p.slide_masters[0].shapes[0].left"), 100000);
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(out_md.contains("x=100000"), "master shape geometry edited");
 }
 
 #[test]
-fn chart_query_reads_series_data() {
-    let v = query(&fixture("table_chart.pptx"), "slides[0].shapes[2].chart");
-    let obj = v.as_object().unwrap();
-    assert_eq!(obj["chart_type"], "c:barChart");
-    assert_eq!(obj["series"][0]["name"], "S1");
-    assert_eq!(
-        obj["series"][0]["categories"],
-        serde_json::json!(["Q1", "Q2"])
+fn update_table_row_add_and_remove_roundtrip() {
+    let md = markdown(&fixture("table_chart.pptx"));
+    let with_row = md.replace("\n| A |  |\n", "\n| A |  |\n| New |  |\n");
+    let out = update(&fixture("table_chart.pptx"), &with_row);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("| New |  |"),
+        "appended table row present"
     );
-    assert_eq!(obj["series"][0]["values"], serde_json::json!([10.0, 20.0]));
-}
 
-#[test]
-fn update_chart_series_append_and_delete() {
-    let appended = update(
-        &fixture("table_chart.pptx"),
-        &json!({
-            "slides": [{"shapes": [{}, {}, {"chart": {"series": [
-                {},
-                {"name": "S2", "categories": ["Q1", "Q2"], "values": [30.0, 40.0]}
-            ]}}]}]
-        }),
+    let removed = update(&out, &md);
+    let out_md = markdown(&removed);
+    assert!(
+        !slide_block(&out_md, 0).contains("| New |  |"),
+        "row removed when the mirror is reverted"
     );
-    let series = query(&appended, "slides[0].shapes[2].chart.series");
-    assert_eq!(series.as_array().unwrap().len(), 2);
-    assert_eq!(series[1]["name"], "S2");
-
-    let deleted = update(
-        &appended,
-        &json!({
-            "slides": [{"shapes": [{}, {}, {"chart": {"series": [
-                null, {"name": "S2", "categories": ["Q1", "Q2"], "values": [30.0, 40.0]}
-            ]}}]}]
-        }),
-    );
-    let series = query(&deleted, "slides[0].shapes[2].chart.series");
-    let arr = series.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["name"], "S2");
-}
-
-#[test]
-fn update_table_row_and_column_add_remove_roundtrip() {
-    let appended = update(
-        &fixture("table_chart.pptx"),
-        &json!({
-            "slides": [{"shapes": [{}, {"table": {"rows": [
-                {},
-                {},
-                {"height": 370840, "cells": [
-                    {"text_frame": {"paragraphs": [{"runs": [{"text": "New"}]}]}},
-                    {}
-                ]}
-            ]}}, {}]}]
-        }),
-    );
-    let rows = query(&appended, "slides[0].shapes[1].table.rows");
-    assert_eq!(rows.as_array().unwrap().len(), 3);
-
-    let removed = update(
-        &appended,
-        &json!({
-            "slides": [{"shapes": [{}, {"table": {"rows": [
-                {}, null, {"height": 370840, "cells": [
-                    {"text_frame": {"paragraphs": [{"runs": [{"text": "New"}]}]}},
-                    {}
-                ]}
-            ]}}, {}]}]
-        }),
-    );
-    let rows = query(&removed, "slides[0].shapes[1].table.rows");
-    assert_eq!(rows.as_array().unwrap().len(), 2);
 }
 
 #[test]
 fn update_append_shape() {
-    let out = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"shapes": [
-                    {},
-                    {
-                        "shape_id": 99,
-                        "name": "New",
-                        "shape_type": "TEXT_BOX",
-                        "left": 100000,
-                        "top": 100000,
-                        "width": 5000000,
-                        "height": 500000,
-                        "is_placeholder": false,
-                        "has_text_frame": true,
-                        "text_frame": {"paragraphs": [{"runs": [{"text": "Hi"}]}]}
-                    }
-                ]},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let new_shape = "<!-- shape: type=text_box name=\"New\" x=100000 y=100000 w=5000000 h=500000 autoshape=\"rect\" -->\n<!-- tf -->\nHi\n";
+    let edited = md.replace(
+        "Alpha\n\n\n<!-- slide -->",
+        &format!("Alpha\n\n{new_shape}\n\n<!-- slide -->"),
     );
-    let shapes = query(&out, "slides[0].shapes");
-    assert_eq!(shapes.as_array().unwrap().len(), 2);
-    assert_eq!(shapes[1]["name"], "New");
-    assert_eq!(
-        shapes[1]["text_frame"]["paragraphs"][0]["runs"][0]["text"],
-        "Hi"
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    let block = slide_block(&out_md, 0);
+    assert!(
+        block.contains("name=\"New\"") && block.contains("Hi"),
+        "appended shape present with its text"
     );
 }
 
 #[test]
 fn update_notes_slide_create_and_delete() {
-    let created = update(
-        &fixture("two_slides.pptx"),
-        &json!({
-            "slides": [
-                {"notes": {"shapes": [{
-                    "shape_id": 1,
-                    "name": "Notes",
-                    "shape_type": "TEXT_BOX",
-                    "left": 100,
-                    "top": 100,
-                    "width": 500,
-                    "height": 300,
-                    "is_placeholder": false,
-                    "has_text_frame": true,
-                    "text_frame": {"paragraphs": [{"runs": [{"text": "Notes!"}]}]}
-                }]}},
-                {}
-            ]
-        }),
+    let md = markdown(&fixture("two_slides.pptx"));
+    let notes = "<!-- notes -->\n<!-- shape: type=text_box name=\"Notes\" x=100 y=100 w=500 h=300 -->\nNotes!\n";
+    let with_notes = md.replace(
+        "Alpha\n\n\n<!-- slide -->",
+        &format!("Alpha\n\n{notes}\n\n<!-- slide -->"),
     );
-    let v = query(
-        &created,
-        "slides[0].notes.shapes[0].text_frame.paragraphs[0].runs[0].text",
-    );
-    assert_eq!(v, "Notes!");
-
-    let deleted = update(&created, &json!({ "slides": [{ "notes": null }, {}] }));
-    assert!(query(&deleted, "slides[0].notes").is_null());
-}
-
-#[test]
-fn update_readonly_field_errors() {
-    let dir = tmp();
-    let edits = dir.join("edits.json");
-    std::fs::write(
-        &edits,
-        r#"{"slides": [{"shapes": [{"shape_id": 999999}]}]}"#,
-    )
-    .unwrap();
-    let out = Command::new(bin())
-        .args([
-            "update",
-            "--input",
-            fixture("two_slides.pptx").to_str().unwrap(),
-            "--json",
-            edits.to_str().unwrap(),
-            "--output",
-            dir.join("o.pptx").to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "read-only change must error loudly");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let out = update(&fixture("two_slides.pptx"), &with_notes);
+    let out_md = markdown(&out);
     assert!(
-        stderr.contains("shape_id") && stderr.contains("read-only"),
-        "error should call out the read-only field: {stderr}"
+        slide_block(&out_md, 0).contains("Notes!"),
+        "notes slide created"
     );
-}
 
-#[test]
-fn update_unknown_field_errors() {
-    let dir = tmp();
-    let edits = dir.join("edits.json");
-    std::fs::write(&edits, r#"{"slides": [{"shapes": [{"bogus_field": 1}]}]}"#).unwrap();
-    let out = Command::new(bin())
-        .args([
-            "update",
-            "--input",
-            fixture("two_slides.pptx").to_str().unwrap(),
-            "--json",
-            edits.to_str().unwrap(),
-            "--output",
-            dir.join("o.pptx").to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "unknown field must error loudly");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let deleted = update(&out, &md);
+    let out_md = markdown(&deleted);
     assert!(
-        stderr.contains("bogus_field"),
-        "error should mention the offending field: {stderr}"
+        !slide_block(&out_md, 0).contains("<!-- notes -->"),
+        "notes slide removed when the mirror is reverted"
     );
 }
 
 #[test]
 fn placeholder_inherits_geometry_and_style() {
-    let shape = query(&fixture("placeholder.pptx"), "slides[0].shapes[0]");
-    // Geometry inherited from the slide layout.
-    assert_eq!(shape["left"], 685800);
-    assert_eq!(shape["top"], 2130425);
-    assert_eq!(shape["width"], 7772400);
-    assert_eq!(shape["height"], 1470025);
-    // Fill inherited from the layout spPr.
-    assert_eq!(shape["fill"]["type"], "solid");
-    assert_eq!(shape["fill"]["color"]["rgb"], "C7000B");
-    // Text defaults inherited from the layout lstStyle.
-    let dps = &shape["text_frame"]["default_paragraph_style"];
-    assert_eq!(dps["alignment"], "CENTER");
-    assert_eq!(dps["font"]["name"], "Calibri");
-    assert_eq!(dps["font"]["size"], 3200);
-    assert_eq!(dps["font"]["bold"], true);
-    assert_eq!(dps["font"]["color"]["theme_color"], "tx1");
+    let md = markdown(&fixture("placeholder.pptx"));
+    let block = slide_block(&md, 0);
+    assert!(
+        block.contains("type=placeholder name=\"Title 1\" x=685800 y=2130425 w=7772400 h=1470025"),
+        "geometry inherited from the slide layout"
+    );
+    assert!(
+        block.contains("font_color=\"SCHEME:tx1\""),
+        "text defaults inherited from the layout"
+    );
 }
 
 #[test]
 fn update_default_paragraph_style_roundtrips() {
-    let dps = query(
-        &fixture("placeholder.pptx"),
-        "slides[0].shapes[0].text_frame.default_paragraph_style",
+    let md = markdown(&fixture("placeholder.pptx"));
+    let old = "<!-- para: alignment=center font_size=3200 font_name=\"Calibri\" font_bold=true font_color=\"SCHEME:tx1\" -->";
+    let new = "<!-- para: alignment=left font_size=2800 font_name=\"Arial\" font_bold=false -->";
+    let edited = md.replace(old, new);
+    let out = update(&fixture("placeholder.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        out_md.contains(
+            "<!-- para: alignment=left font_size=2800 font_name=\"Arial\" font_bold=false -->"
+        ),
+        "default paragraph style edited"
     );
-    let out = update(
-        &fixture("placeholder.pptx"),
-        &json!({
-            "slides": [{"shapes": [{
-                "text_frame": {"default_paragraph_style": {
-                    "alignment": "LEFT",
-                    "font": {"name": "Arial", "size": 2800, "bold": false}
-                }}
-            }]}]
-        }),
-    );
-    let updated = query(
-        &out,
-        "slides[0].shapes[0].text_frame.default_paragraph_style",
-    );
-    assert_eq!(updated["alignment"], "LEFT");
-    assert_eq!(updated["font"]["name"], "Arial");
-    assert_eq!(updated["font"]["size"], 2800);
-    assert_eq!(updated["font"]["bold"], false);
-    let _ = dps;
 }
 
 #[test]
 fn update_does_not_touch_unmentioned_fields() {
-    // Hand back the full deck snapshot with one field changed; everything else
-    // must be byte-identical.
-    let dir = tmp();
-    let deck = dir.join("deck.pptx");
-    std::fs::copy(fixture("two_slides.pptx"), &deck).unwrap();
-    let snapshot: Value =
-        serde_json::from_str(&run_ok(&["jsonfy", "--input", deck.to_str().unwrap()])).unwrap();
-    let mut edits = snapshot.clone();
-    edits["slides"][0]["shapes"][0]["text_frame"]["paragraphs"][0]["runs"][0]["text"] =
-        json!("Edited");
-
-    let out = update_snapshot(&deck, &edits);
-    let before = snapshot["slides"][1].clone();
-    let after = query(&out, "slides[1]");
-    assert_eq!(before, after, "untouched slide preserved exactly");
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace("\nAlpha\n", "\nEdited\n");
+    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    let before = slide_block(&md, 1);
+    let after = slide_block(&out_md, 1);
+    assert_eq!(
+        before, after,
+        "untouched slide preserved exactly in the mirror"
+    );
+    let theme_before = md.split("<!-- master -->").next().unwrap();
+    let theme_after = out_md.split("<!-- master -->").next().unwrap();
+    assert_eq!(theme_before, theme_after, "theme untouched");
 }

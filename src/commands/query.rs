@@ -125,39 +125,6 @@ fn master_json(pkg: &Package, master_uri: &str, media_dir: Option<&str>) -> serd
     json!({ "name": name, "slide_layouts": slide_layouts, "shapes": shapes })
 }
 
-fn navigate_json(
-    value: &serde_json::Value,
-    segments: &[path::PathSegment],
-) -> AppResult<serde_json::Value> {
-    let mut current = value.clone();
-    for seg in segments {
-        current = match seg {
-            path::PathSegment::Field(name) => match current.get(name) {
-                Some(v) => v.clone(),
-                None => return Err(AppError::PathParse(format!("Field '{name}' not found"))),
-            },
-            path::PathSegment::Index(idx) => match current.get(*idx) {
-                Some(v) => v.clone(),
-                None => return Err(AppError::PathParse(format!("Index {idx} out of bounds"))),
-            },
-        };
-    }
-    Ok(current)
-}
-
-/// Query a single dotted path and return the JSON at it, sharing the exact
-/// logic of the `update` command when diffing against a snapshot.
-pub fn query_path(
-    pkg: &Package,
-    pres: &Presentation,
-    path_str: &str,
-) -> AppResult<serde_json::Value> {
-    let segments = path::parse_path(path_str)?;
-    let resolved = path::resolve_path(&segments)?;
-    let value = query_value(pkg, pres, &resolved, None)?;
-    navigate_json(&value, resolved.remaining_segments())
-}
-
 /// Open a presentation and resolve its slide URIs, sharing the boilerplate
 /// between `query` and `update`.
 pub fn load_presentation(pkg: &Package) -> AppResult<Presentation> {
@@ -172,8 +139,8 @@ pub fn load_presentation(pkg: &Package) -> AppResult<Presentation> {
     Ok(pres)
 }
 
-/// Build the JSON projection for a resolved path (the body of the `jsonfy`
-/// command). `media_dir` extracts referenced media when given.
+/// Build the JSON projection for a resolved path (the JSON document the
+/// Markdown mirror mirrors). `media_dir` extracts referenced media when given.
 pub fn query_value(
     pkg: &Package,
     pres: &Presentation,

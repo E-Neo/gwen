@@ -41,35 +41,34 @@ const READ_ONLY_SHAPE: [&str; 11] = [
     "shapes",
 ];
 
-pub fn execute(input: &str, json_path: &str, output: &str) -> AppResult<()> {
-    let edits_text = std::fs::read_to_string(json_path)?;
-    let edits: Value = serde_json::from_str(&edits_text)?;
-    let edits_obj = edits
-        .as_object()
-        .ok_or_else(|| AppError::InvalidValue("Update file must be a JSON object".to_string()))?;
-
+pub fn execute(input: &str, md_path: &str, output: &str) -> AppResult<()> {
     let mut pkg = Package::open(Path::new(input))?;
     let pres = crate::commands::query::load_presentation(&pkg)?;
 
-    let mut all_edits = Vec::new();
-    for (key, overlay) in edits_obj {
-        let segments = path::parse_path(key)?;
-        let current = crate::commands::query::query_path(&pkg, &pres, key)?;
-        let mut rel = crate::engine::update_diff::diff(&current, overlay);
-        for e in &mut rel {
-            let mut full = segments.clone();
-            full.extend(e.path.clone());
-            e.path = full;
-        }
-        all_edits.extend(rel);
-    }
+    let edits = edits_from_markdown(&pkg, &pres, md_path)?;
 
-    for edit in crate::engine::update_diff::order_edits(all_edits) {
+    for edit in crate::engine::update_diff::order_edits(edits) {
         apply_edit(&mut pkg, &pres, &edit)?;
     }
 
     pkg.save(Path::new(output))?;
     Ok(())
+}
+
+/// The edited markdown mirror is parsed into a full document and diffed as a
+/// whole against the (read-only-stripped) deck, so only the touched leaves
+/// are edited.
+fn edits_from_markdown(pkg: &Package, pres: &Presentation, md_path: &str) -> AppResult<Vec<Edit>> {
+    let md = std::fs::read_to_string(md_path)?;
+    let new = crate::md::parse::parse(&md);
+    let resolved = crate::path::ResolvedPath::Presentation {
+        remaining: Vec::new(),
+    };
+    let current = crate::commands::query::query_value(pkg, pres, &resolved, None)?;
+    Ok(crate::engine::update_diff::diff(
+        &crate::engine::readonly::project(&current),
+        &new,
+    ))
 }
 
 fn scalar(v: &Value) -> String {
@@ -310,6 +309,16 @@ fn apply_slide_edit(
                 let data = read_part(pkg, uri)?;
                 let new = xml_edit::set_slide_background(&data, &scalar(value))?;
                 pkg.set_part(uri, new);
+                Ok(())
+            } else if edit.op == EditOp::Set
+                && tail
+                    == [
+                        PathSegment::Field("fill".to_string()),
+                        PathSegment::Field("type".to_string()),
+                    ]
+            {
+                // The fill kind is marker metadata from the `background=SOLID:…`
+                // comment; the color edit performs the XML write.
                 Ok(())
             } else {
                 Err(AppError::PathParse(
@@ -984,17 +993,19 @@ fn table_insert(
     value: &Value,
 ) -> AppResult<Vec<u8>> {
     match rest {
-        [PathSegment::Field(n), PathSegment::Index(_)] if n == "rows" => {
+        [PathSegment::Field(n), PathSegment::Index(i)] if n == "rows" => {
             let path = [
                 PathSegment::Field("table".to_string()),
                 PathSegment::Field("rows".to_string()),
+                PathSegment::Index(*i),
             ];
             xml_edit::add_table_row_lossless(xml, shape_idx, &path, &json_str(value))
         }
-        [PathSegment::Field(n), PathSegment::Index(_)] if n == "grid" => {
+        [PathSegment::Field(n), PathSegment::Index(i)] if n == "grid" => {
             let path = [
                 PathSegment::Field("table".to_string()),
                 PathSegment::Field("grid".to_string()),
+                PathSegment::Index(*i),
             ];
             xml_edit::add_table_column_lossless(xml, shape_idx, &path, &json_str(value))
         }
@@ -1002,13 +1013,14 @@ fn table_insert(
             PathSegment::Field(n),
             PathSegment::Index(r),
             PathSegment::Field(c),
-            PathSegment::Index(_),
+            PathSegment::Index(ci),
         ] if n == "rows" && c == "cells" => {
             let path = [
                 PathSegment::Field("table".to_string()),
                 PathSegment::Field("rows".to_string()),
                 PathSegment::Index(*r),
                 PathSegment::Field("cells".to_string()),
+                PathSegment::Index(*ci),
             ];
             editor::add_to_table(xml, shape_idx, &path, &json_str(value))
         }
@@ -1189,7 +1201,9 @@ fn shape_dto_to_add(dto: &ShapeDto) -> AppResult<AddShape> {
         width: dto.width,
         height: dto.height,
         text,
-        shape_id: Some(dto.shape_id),
+        // 0 is the sentinel the markdown parser emits for the omitted shape_id;
+        // it means "assign the next free id".
+        shape_id: (dto.shape_id != 0).then_some(dto.shape_id),
         name: dto.name.clone(),
         auto_shape_type: dto.auto_shape_type.clone(),
         table: dto.table.clone(),
@@ -1205,7 +1219,7 @@ fn add_shape_to_part(xml: &[u8], shape_idx: usize, value: &Value) -> AppResult<V
     let max_id = factory::find_max_shape_id(xml);
     let new_id = add.shape_id.unwrap_or(max_id + 1);
     let new_shape_xml = factory::generate_shape_xml(&add, new_id)?;
-    editor::insert_shape_after(xml, shape_idx, &new_shape_xml)
+    editor::insert_shape_at(xml, shape_idx, &new_shape_xml)
 }
 
 // -- notes slide ------------------------------------------------------------
@@ -1234,8 +1248,16 @@ fn create_notes_slide(pkg: &mut Package, slide_uri: &str, value: &Value) -> AppR
             "Slide already has a notes slide".to_string(),
         ));
     }
-    let slide_dto: crate::dto::SlideDto = serde_json::from_value(value.clone())
-        .map_err(|e| AppError::InvalidValue(format!("Invalid notes JSON: {e}")))?;
+    let slide_dto: crate::dto::SlideDto = serde_json::from_value({
+        let mut value = value.clone();
+        if let Some(shapes) = value.get_mut("shapes").and_then(|s| s.as_array_mut()) {
+            for shape in shapes.iter_mut() {
+                *shape = crate::engine::update_diff::insert_shape_defaults(shape);
+            }
+        }
+        value
+    })
+    .map_err(|e| AppError::InvalidValue(format!("Invalid notes JSON: {e}")))?;
 
     let notes_num = pkg.get_next_notes_num();
     let notes_uri = format!("ppt/notesSlides/notesSlide{}.xml", notes_num);

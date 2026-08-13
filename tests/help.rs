@@ -83,20 +83,20 @@ fn example_lines(help: &str) -> Vec<&str> {
 
 #[test]
 fn every_help_example_runs() {
-    let subs: [Option<&str>; 3] = [None, Some("jsonfy"), Some("update")];
+    let subs: [Option<&str>; 3] = [None, Some("markdown"), Some("update")];
 
     let dir = tmp();
     let input = dir.join("deck.pptx");
     std::fs::copy(fixture("table_chart.pptx"), &input).unwrap();
 
-    // Pre-create deck.json (the jsonfy snapshot used by update examples) so the
+    // Pre-create deck.md (the markdown mirror used by update examples) so the
     // examples run regardless of their order in the help text.
-    let snapshot = Command::new(bin())
-        .args(["jsonfy", "--input", input.to_str().unwrap()])
+    let mirror = Command::new(bin())
+        .args(["markdown", "--input", input.to_str().unwrap()])
         .output()
-        .expect("seed deck.json");
-    assert!(snapshot.status.success(), "seed jsonfy failed");
-    std::fs::write(dir.join("deck.json"), snapshot.stdout).unwrap();
+        .expect("seed deck.md");
+    assert!(mirror.status.success(), "seed markdown failed");
+    std::fs::write(dir.join("deck.md"), mirror.stdout).unwrap();
 
     let mut run = 0;
     for sub in subs {
@@ -138,7 +138,7 @@ fn every_help_example_runs() {
                 .iter()
                 .map(|t| match t.as_str() {
                     "deck.pptx" => input.to_str().unwrap().to_string(),
-                    "deck.json" => dir.join("deck.json").to_str().unwrap().to_string(),
+                    "deck.md" => dir.join("deck.md").to_str().unwrap().to_string(),
                     "out.pptx" => output.to_str().unwrap().to_string(),
                     other => other.to_string(),
                 })

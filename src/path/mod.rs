@@ -1,3 +1,6 @@
 pub mod resolver;
 
-pub use resolver::{PathSegment, ResolvedPath, parse_path, resolve_path};
+pub use resolver::{PathSegment, ResolvedPath, resolve_path};
+
+#[cfg(test)]
+pub use resolver::parse_path;

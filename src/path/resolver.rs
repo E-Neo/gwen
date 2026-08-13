@@ -38,6 +38,7 @@ pub enum ResolvedPath {
     },
 }
 
+#[cfg(test)]
 pub fn parse_path(path_str: &str) -> AppResult<Vec<PathSegment>> {
     let raw = path_str.strip_prefix('p').unwrap_or(path_str);
     let raw = raw.strip_prefix('.').unwrap_or(raw);
@@ -250,20 +251,6 @@ pub fn resolve_path(segments: &[PathSegment]) -> AppResult<ResolvedPath> {
             "Unexpected path segment {:?}",
             first
         ))),
-    }
-}
-
-impl ResolvedPath {
-    pub fn remaining_segments(&self) -> &[PathSegment] {
-        match self {
-            ResolvedPath::Presentation { remaining } => remaining,
-            ResolvedPath::Slide { remaining, .. } => remaining,
-            ResolvedPath::Shape { remaining, .. } => remaining,
-            ResolvedPath::Notes { remaining, .. } => remaining,
-            ResolvedPath::NotesShape { remaining, .. } => remaining,
-            ResolvedPath::Theme { remaining } => remaining,
-            ResolvedPath::Master { remaining, .. } => remaining,
-        }
     }
 }
 

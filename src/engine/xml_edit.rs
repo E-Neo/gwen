@@ -1421,25 +1421,26 @@ pub fn add_table_row_lossless(
     let new_row = table_row_to_xml(&row, col_count);
     let new_events = read_events(new_row.as_bytes())?;
 
-    // Insert position: after the (insert_after)th a:tr end, else before tbl end.
-    let insert_pos = if let Some(after) = insert_after {
+    // Insert at the given index: the new row becomes the (insert_after)th row,
+    // with everything from that position down shifting by one. An index past
+    // the current row count appends before the end of the table.
+    let insert_pos = if let Some(at) = insert_after {
         let mut count = 0usize;
-        let mut pos = None;
+        let mut pos = tbl_end;
         let mut i = tbl_start + 1;
         while i < tbl_end {
             if let Event::Start(e) = &events[i]
                 && e.name().as_ref() == b"a:tr"
             {
-                if count == after {
-                    let (_, e) = find_elem_range(&events, b"a:tr", i).unwrap();
-                    pos = Some(e + 1);
+                if count == at {
+                    pos = i;
                     break;
                 }
                 count += 1;
             }
             i += 1;
         }
-        pos.unwrap_or(tbl_end)
+        pos
     } else {
         tbl_end
     };
@@ -1517,32 +1518,28 @@ pub fn add_table_column_lossless(
         .filter(|r| r.0 <= tbl_end)
         .ok_or_else(|| AppError::PathParse("Table has no grid".to_string()))?;
 
-    // Insert position for the new gridCol.
-    let grid_insert_pos = if let Some(after) = insert_after {
+    // Insert at the given index: the new column becomes the (insert_after)th
+    // grid column. An index past the current column count appends at the end
+    // of the grid.
+    let grid_insert_pos = if let Some(at) = insert_after {
         let mut count = 0usize;
-        let mut pos = None;
+        let mut pos = grid_end;
         let mut i = grid_start + 1;
         while i < grid_end {
-            if let Event::Start(e) = &events[i]
-                && e.name().as_ref() == b"a:gridCol"
-            {
-                if count == after {
-                    pos = Some(i + 1);
-                    break;
-                }
-                count += 1;
-            } else if let Event::Empty(e) = &events[i]
-                && e.name().as_ref() == b"a:gridCol"
-            {
-                if count == after {
-                    pos = Some(i + 1);
+            let is_grid_col = matches!(
+                &events[i],
+                Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"a:gridCol"
+            );
+            if is_grid_col {
+                if count == at {
+                    pos = i;
                     break;
                 }
                 count += 1;
             }
             i += 1;
         }
-        pos.unwrap_or(grid_end)
+        pos
     } else {
         grid_end
     };

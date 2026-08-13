@@ -3,6 +3,7 @@ mod commands;
 mod dto;
 mod engine;
 mod error;
+mod md;
 mod model;
 mod opc;
 mod path;
@@ -15,15 +16,15 @@ fn main() -> AppResult<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        Commands::Jsonfy { input, media } => {
-            commands::jsonfy::execute(&input, media.as_deref())?;
+        Commands::Markdown { input, media } => {
+            commands::markdown::execute(&input, media.as_deref())?;
         }
         Commands::Update {
             input,
-            json,
+            markdown,
             output,
         } => {
-            commands::update::execute(&input, &json, &output)?;
+            commands::update::execute(&input, &markdown, &output)?;
         }
     }
 
