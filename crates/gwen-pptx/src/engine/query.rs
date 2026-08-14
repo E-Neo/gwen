@@ -296,3 +296,13 @@ pub fn query_value(
 
     Ok(value)
 }
+
+/// Project the whole presentation to the JSON document the Markdown mirror
+/// mirrors.
+pub fn query_document(pkg: &Package, media_dir: Option<&str>) -> AppResult<serde_json::Value> {
+    let pres = load_presentation(pkg)?;
+    let resolved = path::ResolvedPath::Presentation {
+        remaining: Vec::new(),
+    };
+    query_value(pkg, &pres, &resolved, media_dir)
+}

@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_pptx-engineer")
+    env!("CARGO_BIN_EXE_gwen")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -17,7 +17,7 @@ fn fixture(name: &str) -> PathBuf {
 fn tmp() -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "pptx-engineer-it-{}-{}",
+        "gwen-it-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ));

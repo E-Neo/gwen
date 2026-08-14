@@ -1,8 +1,9 @@
 use std::path::Path;
 
+use gwen_md::{parse, serialize};
+use gwen_pptx::engine::{query, readonly};
+use gwen_pptx::opc::Package;
 use serde_json::Value;
-
-use super::{parse, serialize};
 
 fn fixture(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -12,19 +13,15 @@ fn fixture(name: &str) -> std::path::PathBuf {
 }
 
 fn snapshot(path: &Path) -> Value {
-    let pkg = crate::opc::Package::open(path).expect("open package");
-    let pres = crate::commands::query::load_presentation(&pkg).expect("load presentation");
-    let resolved = crate::path::ResolvedPath::Presentation {
-        remaining: Vec::new(),
-    };
-    crate::commands::query::query_value(&pkg, &pres, &resolved, None).expect("query snapshot")
+    let pkg = Package::open(path).expect("open package");
+    query::query_document(&pkg, None).expect("query snapshot")
 }
 
 fn assert_roundtrip(fx: &str) {
     let s = snapshot(&fixture(fx));
     let md = serialize::serialize(&s);
     let reparsed = parse::parse(&md);
-    let expected = crate::engine::readonly::project(&s);
+    let expected = readonly::project(&s);
     assert_eq!(
         canonical(&reparsed),
         canonical(&expected),

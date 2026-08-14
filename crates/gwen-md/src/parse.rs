@@ -306,6 +306,12 @@ pub struct Parser {
     list_depth: usize,
 }
 
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
         Parser {

@@ -328,6 +328,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwen"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "gwen-md",
+ "gwen-pptx",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
+name = "gwen-md"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "serde_json",
+]
+
+[[package]]
+name = "gwen-pptx"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "zip",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -503,19 +533,6 @@ name = "ppmd-rust"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "efca4c95a19a79d1c98f791f10aebd5c1363b473244630bb7dbde1dc98455a24"
-
-[[package]]
-name = "pptx-engineer"
-version = "0.1.0"
-dependencies = [
- "clap",
- "pulldown-cmark",
- "quick-xml",
- "serde",
- "serde_json",
- "thiserror",
- "zip",
-]
 
 [[package]]
 name = "proc-macro2"

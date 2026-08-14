@@ -2,17 +2,17 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "pptx-engineer",
+    name = "gwen",
     about = "Lossless Markdown editing of PowerPoint (.pptx) files",
     after_help = concat!(
         "\u{1b}[1;4mWorkflow:\u{1b}[0m\n",
         r#"  Everything is driven by the Markdown mirror that `markdown` emits. You
   edit the Markdown and apply it back with `update`.
 
-    1. pptx-engineer markdown --input deck.pptx > deck.md
+    1. gwen markdown --input deck.pptx > deck.md
     2. Edit deck.md (change text, recolor a run, move or add a shape,
        edit a theme color, ...).
-    3. pptx-engineer update --input deck.pptx --markdown deck.md --output out.pptx
+    3. gwen update --input deck.pptx --markdown deck.md --output out.pptx
 
   `update` diffs your Markdown against the original file and applies only the
   changes: things you did not touch are left exactly as they are, and
@@ -36,8 +36,8 @@ use clap::{Parser, Subcommand};
 
 "#,
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  pptx-engineer markdown --input deck.pptx > deck.md
-  pptx-engineer update --input deck.pptx --markdown deck.md --output out.pptx"#
+        r#"  gwen markdown --input deck.pptx > deck.md
+  gwen update --input deck.pptx --markdown deck.md --output out.pptx"#
     ),
     subcommand_required = true,
     arg_required_else_help = true
@@ -52,8 +52,8 @@ pub enum Commands {
     /// Dump a presentation to an editable Markdown mirror
     #[command(after_help = concat!(
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  pptx-engineer markdown --input deck.pptx > deck.md
-  pptx-engineer markdown --input deck.pptx --media media/ > deck.md
+        r#"  gwen markdown --input deck.pptx > deck.md
+  gwen markdown --input deck.pptx --media media/ > deck.md
 
 The mirror covers slides and their shapes (text frames, tables), masters,
 theme and core properties. Pass --media <DIR> to also write every image
@@ -71,7 +71,7 @@ referenced by the deck into DIR."#
     /// Apply an edited Markdown mirror to the presentation
     #[command(after_help = concat!(
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  pptx-engineer update --input deck.pptx --markdown deck.md --output out.pptx
+        r#"  gwen update --input deck.pptx --markdown deck.md --output out.pptx
 
 Only the parts you changed are applied; the rest of the deck is left
 byte-for-byte intact. The original deck is never modified."#

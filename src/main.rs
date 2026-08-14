@@ -1,16 +1,9 @@
 mod cli;
 mod commands;
-mod dto;
-mod engine;
-mod error;
-mod md;
-mod model;
-mod opc;
-mod path;
 
 use clap::Parser;
 use cli::Commands;
-use error::AppResult;
+use gwen_pptx::error::AppResult;
 
 fn main() -> AppResult<()> {
     let cli = cli::Cli::parse();

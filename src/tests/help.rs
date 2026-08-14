@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_pptx-engineer")
+    env!("CARGO_BIN_EXE_gwen")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -16,7 +16,7 @@ fn fixture(name: &str) -> PathBuf {
 fn tmp() -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "pptx-engineer-help-{}-{}",
+        "gwen-help-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ));
@@ -77,7 +77,7 @@ fn tokenize(line: &str) -> Option<Vec<String>> {
 fn example_lines(help: &str) -> Vec<&str> {
     help.lines()
         .map(str::trim_start)
-        .filter(|l| l.starts_with("pptx-engineer "))
+        .filter(|l| l.starts_with("gwen "))
         .collect()
 }
 
@@ -113,7 +113,7 @@ fn every_help_example_runs() {
                 tokenize(line).unwrap_or_else(|| panic!("unbalanced quotes in example: {line}"));
             assert!(tokens.len() >= 2, "example too short: {line}");
             assert_eq!(
-                tokens[0], "pptx-engineer",
+                tokens[0], "gwen",
                 "example must start with binary name: {line}"
             );
             assert!(

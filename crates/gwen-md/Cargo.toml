@@ -1,0 +1,8 @@
+[package]
+name = "gwen-md"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pulldown-cmark = "0.13.4"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
