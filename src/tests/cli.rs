@@ -67,30 +67,35 @@ fn read_zip_entry(path: &Path, name: &str) -> String {
     buf
 }
 
-/// Everything below the `<!-- slide ... -->` marker line for slide `n`
-/// (0-based), up to the next marker. Consumes the whole marker line so the
-/// closing `-->` never leaks into the block.
+/// The block for slide `n` (0-based): everything after its `## ` heading up to
+/// the next `## `/`# ` heading (or end of mirror).
 fn slide_block(md: &str, n: usize) -> String {
-    let mut start = 0;
-    for _ in 0..=n {
-        let marker = md[start..].find("<!-- slide").expect("slide marker");
-        start += marker;
-        let line_end = md[start..].find('\n').expect("marker line end");
-        start += line_end + 1;
-    }
-    let next = md[start..]
-        .find("<!-- slide")
-        .map(|i| start + i)
+    let idxs: Vec<usize> = md.match_indices("\n## ").map(|(i, _)| i + 1).collect();
+    assert!(idxs.len() > n, "slide {n} not found");
+    let start = idxs[n];
+    let line_end = md[start..]
+        .find('\n')
+        .map(|i| start + i + 1)
         .unwrap_or(md.len());
-    md[start..next].trim().to_string()
+    let end = match idxs.get(n + 1) {
+        Some(&next) => {
+            let master = md[next..]
+                .find("\n# ")
+                .map(|j| next + j)
+                .unwrap_or(md.len());
+            next.min(master)
+        }
+        None => md.len(),
+    };
+    md[line_end..end].trim().to_string()
 }
 
 #[test]
 fn markdown_template_mirror_is_wide() {
     let md = markdown(&fixture("template.pptx"));
     assert!(
-        md.contains("slide_width=12192000 slide_height=6858000"),
-        "wide deck geometry in the header"
+        md.contains("slide_width: 12192000"),
+        "wide deck geometry in the front matter"
     );
     assert!(
         slide_block(&md, 0).is_empty(),
@@ -101,7 +106,7 @@ fn markdown_template_mirror_is_wide() {
 #[test]
 fn markdown_template_43_mirror_is_standard() {
     let md = markdown(&fixture("template_43.pptx"));
-    assert!(md.contains("slide_width=9144000 slide_height=6858000"));
+    assert!(md.contains("slide_width: 9144000"));
 }
 
 const PNG_1PX: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDATx\xda\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\xff\xff\x14\xbb\x00\x00\x00\x00IEND\xaeB`\x82";
@@ -167,7 +172,7 @@ fn markdown_extracts_media_with_media_flag() {
         "extracted bytes match the embedded image"
     );
     assert!(
-        slide_block(&md, 0).contains("type=picture"),
+        md.contains("--pptx-type: picture"),
         "picture shape serialized into the mirror"
     );
 }
@@ -176,13 +181,13 @@ fn markdown_extracts_media_with_media_flag() {
 fn update_core_properties_roundtrip() {
     let md = markdown(&fixture("template.pptx"));
     let edited = md.replace(
-        "| comments | generated using python-pptx |",
-        "| comments | My Deck |",
+        "comments: \"generated using python-pptx\"",
+        "comments: \"My Deck\"",
     );
     let out = update(&fixture("template.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
-        out_md.contains("| comments | My Deck |"),
+        out_md.contains("comments: \"My Deck\""),
         "edited core property round-trips"
     );
 }
@@ -220,22 +225,49 @@ fn update_rich_text_formatting() {
 }
 
 #[test]
+fn update_title_edit() {
+    // A title placeholder's paragraph[0] is the `## ` heading; editing the
+    // heading must write through to the title shape's first run.
+    let md = markdown(&fixture("two_slides.pptx"));
+    let _ = md; // two_slides has no title placeholder; exercise via a real one below.
+    let md = markdown(&fixture("placeholder.pptx"));
+    let edited = md.replacen("\n## \n", "\n## Reworked title\n", 1);
+    let out = update(&fixture("placeholder.pptx"), &edited);
+    let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(
+        slide_xml.contains("Reworked title"),
+        "title text written to the slide"
+    );
+    let out_md = markdown(&out);
+    assert!(
+        out_md.contains("\n## Reworked title\n"),
+        "edited title round-trips through the heading"
+    );
+}
+
+#[test]
 fn update_whole_paragraph_replace() {
-    // The original pain point: replace a paragraph with two: a bold+size run
+    // Replace a paragraph with two: a bold+size run (via a style block class)
     // and a centered one.
     let md = markdown(&fixture("two_slides.pptx"));
-    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha";
-    let two = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\n<span data-size=2000 data-bold=\"true\">Hi</span>\n\n<!-- para: alignment=center -->\nThere";
-    let edited = md.replace(block, two);
+    let edited = md
+        .replace(
+            "<!-- t: tf-4 -->\nAlpha\n",
+            "<!-- t: tf-4 -->\n<span class=\"run-1\">Hi</span>\n\n<!-- p: center-para -->\nThere\n",
+        )
+        .replace(
+            "</style>",
+            ".run-1 {\n    font-size: 2000;\n    font-weight: bold;\n}\n.center-para {\n    text-align: center;\n}\n</style>",
+        );
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
-        block.contains("<span data-size=2000 data-bold=\"true\">Hi</span>"),
+        block.contains("<span class=\"run-1\">Hi</span>"),
         "first paragraph keeps bold+size"
     );
     assert!(
-        block.contains("<!-- para: alignment=center -->\nThere"),
+        out_md.contains("text-align: center;"),
         "second paragraph is centered"
     );
 }
@@ -249,7 +281,7 @@ fn update_delete_paragraph() {
     let block = slide_block(&out_md, 0);
     assert!(!block.contains("Alpha"), "paragraph removed from the shape");
     assert!(
-        block.contains("type=text_box"),
+        block.contains("<!-- s: textbox-1 -->"),
         "shape survives the paragraph removal"
     );
 }
@@ -257,10 +289,7 @@ fn update_delete_paragraph() {
 #[test]
 fn update_append_paragraph() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let edited = md.replace(
-        "Alpha\n\n\n<!-- slide -->",
-        "Alpha\n\n<!-- para: alignment=center -->\nAppended\n\n<!-- slide -->",
-    );
+    let edited = md.replace("Alpha\n\n\n## Slide 2", "Alpha\n\nAppended\n\n## Slide 2");
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
@@ -272,10 +301,9 @@ fn update_append_paragraph() {
 #[test]
 fn update_background_roundtrip() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let edited = md.replacen(
-        "<!-- slide -->",
-        "<!-- slide: background=SOLID:FF00FF -->",
-        1,
+    let edited = md.replace(
+        "## Slide 1\n\n<!-- s: textbox-1 -->",
+        "## Slide 1\n\n<!-- bg: SOLID:FF00FF -->\n\n<!-- s: textbox-1 -->",
     );
     let out = update(&fixture("two_slides.pptx"), &edited);
     let slide1_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
@@ -300,10 +328,24 @@ fn update_table_cell_text() {
 }
 
 #[test]
+fn update_table_cell_text_cleared() {
+    let md = markdown(&fixture("table_chart.pptx"));
+    let edited = md.replace("\n| A |  |\n", "\n|  |  |\n");
+    let out = update(&fixture("table_chart.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("|  |  |"),
+        "emptied table cell stays empty"
+    );
+    let slide1_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(!slide1_xml.contains(">A<"), "cell text actually removed");
+}
+
+#[test]
 fn update_delete_shape() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha\n\n";
-    let edited = md.replace(block, "");
+    let block = "<!-- s: textbox-1 -->\n<!-- t: tf-4 -->\nAlpha\n\n\n## Slide 2";
+    let edited = md.replace(block, "## Slide 2");
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
@@ -321,17 +363,14 @@ fn update_delete_shape() {
 fn update_theme_roundtrip() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md
-        .replace("| accent1 | 4F81BD |", "| accent1 | FF0000 |")
-        .replace("| major | Calibri |", "| major | Arial |");
+        .replace("accent1: \"4F81BD\"", "accent1: \"FF0000\"")
+        .replace("major: \"Calibri\"", "major: \"Arial\"");
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
+    assert!(out_md.contains("accent1: \"FF0000\""), "theme color edited");
+    assert!(out_md.contains("major: \"Arial\""), "theme font edited");
     assert!(
-        out_md.contains("| accent1 | FF0000 |"),
-        "theme color edited"
-    );
-    assert!(out_md.contains("| major | Arial |"), "theme font edited");
-    assert!(
-        out_md.contains("| accent2 | C0504D |"),
+        out_md.contains("accent2: \"C0504D\""),
         "unedited theme color preserved"
     );
     let theme_xml = read_zip_entry(&out, "ppt/theme/theme1.xml");
@@ -345,7 +384,7 @@ fn update_theme_roundtrip() {
 #[test]
 fn update_delete_theme_color_by_removing_row_errors() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let edited = md.replace("| accent1 | 4F81BD |\n", "");
+    let edited = md.replace("  accent1: \"4F81BD\"\n", "");
     let dir = tmp();
     let md_file = dir.join("deck.md");
     std::fs::write(&md_file, &edited).unwrap();
@@ -372,9 +411,10 @@ fn update_delete_theme_color_by_removing_row_errors() {
 #[test]
 fn update_delete_text_frame_by_removing_block() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let block = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n<!-- tf: auto_size=text_to_fit_shape word_wrap=0 -->\nAlpha\n\n";
-    let shape_only = "<!-- shape: type=text_box name=\"TextBox 1\" x=914400 y=914400 w=3657600 h=914400 autoshape=\"rect\" fill={\"type\":\"no_fill\"} -->\n\n";
-    let edited = md.replace(block, shape_only);
+    let edited = md.replace(
+        "<!-- s: textbox-1 -->\n<!-- t: tf-4 -->\nAlpha",
+        "<!-- s: textbox-1 -->",
+    );
     let out = update(&fixture("two_slides.pptx"), &edited);
     let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
@@ -384,27 +424,23 @@ fn update_delete_text_frame_by_removing_block() {
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
-        block.contains("type=auto_shape") && !block.contains("<!-- tf"),
-        "shape survives without its text frame (as an auto shape)"
-    );
-    assert!(
-        block.contains("name=\"TextBox 1\""),
-        "shape still identified by name"
+        block.contains("<!-- s: ") && !block.contains("<!-- t:"),
+        "shape survives without its text frame"
     );
 }
 
 #[test]
 fn theme_query_reads_whole_scheme() {
     let md = markdown(&fixture("two_slides.pptx"));
-    assert!(md.contains("| accent1 | 4F81BD |"));
-    assert!(md.contains("| dk1 |  |"));
+    assert!(md.contains("accent1: \"4F81BD\""));
+    assert!(md.contains("dk1: \"\""));
 }
 
 #[test]
 fn master_query_exposes_shapes() {
     let md = markdown(&fixture("two_slides.pptx"));
     assert!(
-        md.contains("<!-- shape: type=placeholder name=\"Title Placeholder 1\""),
+        md.contains("--pptx-name: \"Title Placeholder 1\""),
         "master shapes serialized"
     );
 }
@@ -413,12 +449,15 @@ fn master_query_exposes_shapes() {
 fn update_master_shape_persists() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace(
-        "<!-- shape: type=placeholder name=\"Title Placeholder 1\" x=457200",
-        "<!-- shape: type=placeholder name=\"Title Placeholder 1\" x=100000",
+        "--pptx-name: \"Title Placeholder 1\";\n    --pptx-auto-shape: rect;\n    left: 457200;",
+        "--pptx-name: \"Title Placeholder 1\";\n    --pptx-auto-shape: rect;\n    left: 100000;",
     );
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
-    assert!(out_md.contains("x=100000"), "master shape geometry edited");
+    assert!(
+        out_md.contains("left: 100000;"),
+        "master shape geometry edited"
+    );
 }
 
 #[test]
@@ -443,16 +482,18 @@ fn update_table_row_add_and_remove_roundtrip() {
 #[test]
 fn update_append_shape() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let new_shape = "<!-- shape: type=text_box name=\"New\" x=100000 y=100000 w=5000000 h=500000 autoshape=\"rect\" -->\n<!-- tf -->\nHi\n";
-    let edited = md.replace(
-        "Alpha\n\n\n<!-- slide -->",
-        &format!("Alpha\n\n{new_shape}\n\n<!-- slide -->"),
-    );
+    let new_shape = "<!-- s: new-textbox -->\nHi\n";
+    let edited = md
+        .replace("\n\n## Slide 2", &format!("\n\n{new_shape}\n\n## Slide 2"))
+        .replace(
+            "</style>",
+            ".new-textbox {\n    --pptx-type: text_box;\n    --pptx-name: \"New\";\n    left: 100000;\n    top: 100000;\n    width: 5000000;\n    height: 500000;\n}\n</style>",
+        );
     let out = update(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
-        block.contains("name=\"New\"") && block.contains("Hi"),
+        block.contains("Hi") && out_md.contains("--pptx-name: \"New\""),
         "appended shape present with its text"
     );
 }
@@ -460,11 +501,13 @@ fn update_append_shape() {
 #[test]
 fn update_notes_slide_create_and_delete() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let notes = "<!-- notes -->\n<!-- shape: type=text_box name=\"Notes\" x=100 y=100 w=500 h=300 -->\nNotes!\n";
-    let with_notes = md.replace(
-        "Alpha\n\n\n<!-- slide -->",
-        &format!("Alpha\n\n{notes}\n\n<!-- slide -->"),
-    );
+    let notes = "### Notes\n\n<!-- s: notes-textbox -->\nNotes!\n";
+    let with_notes = md
+        .replace("\n\n## Slide 2", &format!("\n\n{notes}\n\n## Slide 2"))
+        .replace(
+            "</style>",
+            ".notes-textbox {\n    --pptx-type: text_box;\n    --pptx-name: \"Notes\";\n    left: 100;\n    top: 100;\n    width: 500;\n    height: 300;\n}\n</style>",
+        );
     let out = update(&fixture("two_slides.pptx"), &with_notes);
     let out_md = markdown(&out);
     assert!(
@@ -475,7 +518,7 @@ fn update_notes_slide_create_and_delete() {
     let deleted = update(&out, &md);
     let out_md = markdown(&deleted);
     assert!(
-        !slide_block(&out_md, 0).contains("<!-- notes -->"),
+        !out_md.contains("### Notes"),
         "notes slide removed when the mirror is reverted"
     );
 }
@@ -485,11 +528,15 @@ fn placeholder_inherits_geometry_and_style() {
     let md = markdown(&fixture("placeholder.pptx"));
     let block = slide_block(&md, 0);
     assert!(
-        block.contains("type=placeholder name=\"Title 1\" x=685800 y=2130425 w=7772400 h=1470025"),
-        "geometry inherited from the slide layout"
+        block.contains("<!-- title -->") && block.contains("<!-- s: placeholder-6 -->"),
+        "title placeholder serialized with a title marker"
     );
     assert!(
-        block.contains("font_color=\"SCHEME:tx1\""),
+        md.contains("--pptx-name: \"Title 1\""),
+        "title shape named in the style block"
+    );
+    assert!(
+        md.contains("color: SCHEME(tx1)"),
         "text defaults inherited from the layout"
     );
 }
@@ -497,15 +544,14 @@ fn placeholder_inherits_geometry_and_style() {
 #[test]
 fn update_default_paragraph_style_roundtrips() {
     let md = markdown(&fixture("placeholder.pptx"));
-    let old = "<!-- para: alignment=center font_size=3200 font_name=\"Calibri\" font_bold=true font_color=\"SCHEME:tx1\" -->";
-    let new = "<!-- para: alignment=left font_size=2800 font_name=\"Arial\" font_bold=false -->";
+    let old = ".dp-4 {\n    text-align: center;\n    font-size: 3200;\n    font-family: \"Calibri\";\n    font-weight: bold;\n    color: SCHEME(tx1);\n}";
+    let new =
+        ".dp-4 {\n    text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";\n}";
     let edited = md.replace(old, new);
     let out = update(&fixture("placeholder.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
-        out_md.contains(
-            "<!-- para: alignment=left font_size=2800 font_name=\"Arial\" font_bold=false -->"
-        ),
+        out_md.contains("text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";"),
         "default paragraph style edited"
     );
 }
@@ -522,7 +568,7 @@ fn update_does_not_touch_unmentioned_fields() {
         before, after,
         "untouched slide preserved exactly in the mirror"
     );
-    let theme_before = md.split("<!-- master -->").next().unwrap();
-    let theme_after = out_md.split("<!-- master -->").next().unwrap();
+    let theme_before = md.split("# Master 1").next().unwrap();
+    let theme_after = out_md.split("# Master 1").next().unwrap();
     assert_eq!(theme_before, theme_after, "theme untouched");
 }

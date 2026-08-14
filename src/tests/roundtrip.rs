@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gwen_md::{parse, serialize};
+use gwen_md::{normalize, parse, serialize};
 use gwen_pptx::engine::{query, readonly};
 use gwen_pptx::opc::Package;
 use serde_json::Value;
@@ -20,11 +20,11 @@ fn snapshot(path: &Path) -> Value {
 fn assert_roundtrip(fx: &str) {
     let s = snapshot(&fixture(fx));
     let md = serialize::serialize(&s);
-    let reparsed = parse::parse(&md);
+    let reparsed = parse::parse(&md).expect("reparse serialized markdown").doc;
     let expected = readonly::project(&s);
     assert_eq!(
-        canonical(&reparsed),
-        canonical(&expected),
+        canonical(&normalize::normalize(&reparsed)),
+        canonical(&normalize::normalize(&expected)),
         "round-trip mismatch for {fx}\n--- markdown ---\n{md}"
     );
 }

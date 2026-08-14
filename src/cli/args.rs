@@ -20,16 +20,25 @@ use clap::{Parser, Subcommand};
 
 "#,
         "\u{1b}[1;4mMarkdown editing:\u{1b}[0m\n",
-        r#"  Every slide, master shape and table carries an HTML comment that pins
-  the metadata (`<!-- shape: ... -->`, `<!-- table: grid=... -->`). Inline
-  formatting is native Markdown emphasis plus `<span>` attributes:
+        r#"  Slides are `## ` headings, masters are `# Master N`, notes are
+  `### Notes`. A `<style>` block at the top (plus a YAML front matter with
+  slide geometry, theme and core properties) defines classes that pin the
+  unmodeled XML:
 
-    **bold text**, *italic*, `**<span data-size=2400>big</span>**`
-    change a run's color with <span data-color="RGB:FF0000">
+    .textbox-1 { --pptx-type: textbox; ... }
+    .tf-4 { --pptx-type: text_frame; ... }
+
+  Every shape, text frame, paragraph and run carries an HTML comment marker
+  (`<!-- s: -->`, `<!-- t: -->`, `<!-- p: -->`, `<!-- dp: -->`) followed by
+  the content for that element. Inline formatting is native Markdown
+  emphasis plus `<span>` classes from the style block:
+
+    **bold text**, *italic*, <span class="run-1">big</span>
 
   Editing rules:
     - remove a shape's block to delete it
     - append a new shape by copying an existing block and editing it
+    - edit `## Slide N` headings to retitle title placeholders
     - read-only fields (shape_id, slide layouts, table row heights, cell
       paragraph styles) are not emitted and are preserved on update
     - removing a required field (e.g. a theme color) is an error

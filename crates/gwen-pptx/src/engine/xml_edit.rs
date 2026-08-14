@@ -373,6 +373,90 @@ pub fn replace_shape_text_lossless(
     write_events(events)
 }
 
+/// Find the index of the slide's title placeholder: the first shape whose
+/// `p:ph` type is `title`/`ctrTitle` (an absent `type` also means title).
+pub fn find_title_shape_index(xml_bytes: &[u8]) -> Option<usize> {
+    let events = read_events(xml_bytes).ok()?;
+    let mut idx = 0usize;
+    let mut i = 0;
+    while i < events.len() {
+        if let Event::Start(e) = &events[i]
+            && is_shape_tag(e.name().as_ref())
+        {
+            let (start, end) = find_elem_range(&events, e.name().as_ref(), i)?;
+            if shape_is_title_placeholder(&events, start, end) {
+                return Some(idx);
+            }
+            idx += 1;
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn shape_is_title_placeholder(events: &[Event<'_>], start: usize, end: usize) -> bool {
+    let mut i = start;
+    while i < end {
+        let ph_type = match &events[i] {
+            Event::Empty(e) if e.name().as_ref() == b"p:ph" => Some(&e.attributes()),
+            Event::Start(e) if e.name().as_ref() == b"p:ph" => Some(&e.attributes()),
+            _ => None,
+        };
+        if let Some(attrs) = ph_type {
+            for attr in attrs.clone().flatten() {
+                if attr.key.as_ref() == b"type" {
+                    let v: &[u8] = attr.value.as_ref();
+                    return v.is_empty() || v == b"title" || v == b"ctrTitle";
+                }
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Replace the title placeholder's first paragraph with a single run of the
+/// given text, preserving the paragraph's `a:pPr` and `a:endParaRPr`.
+pub fn replace_slide_title(xml_bytes: &[u8], value: &str) -> AppResult<Vec<u8>> {
+    let shape_idx = find_title_shape_index(xml_bytes)
+        .ok_or_else(|| AppError::PathParse("Slide has no title placeholder".to_string()))?;
+    let run: crate::dto::RunDto = serde_json::from_value(json!({ "text": value }))
+        .map_err(|e| AppError::InvalidValue(format!("Invalid title text: {e}")))?;
+    let run_events = read_events(crate::dto::xml::run_to_xml(&run).as_bytes())?;
+
+    let events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Title shape has no text frame".to_string()))?;
+    let (para_start, para_end) = find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", 0)
+        .ok_or_else(|| AppError::PathParse("Title shape has no paragraph".to_string()))?;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&events[..para_start + 1]);
+    let mut i = para_start + 1;
+    while i < para_end {
+        if let Event::Start(e) = &events[i] {
+            let name = e.name().as_ref().to_vec();
+            if name.as_slice() == b"a:r" {
+                let r = find_elem_range(&events, &name, i);
+                if let Some((_, end)) = r {
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(events[i].clone());
+        i += 1;
+    }
+    out.extend(run_events);
+    out.extend_from_slice(&events[para_end..]);
+    write_events(out)
+}
+
 /// Set one crop side (left/top/right/bottom) of a picture shape's `a:srcRect`
 /// child of its `a:blip`. `value` is a fraction 0.0-1.0 of the amount cropped.
 /// The `a:srcRect` element is created if the picture has none.
@@ -2763,6 +2847,50 @@ pub fn replace_paragraph_lossless(
             .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
     events.splice(para_start..=para_end, inner_events);
     write_events(events)
+}
+
+/// Replace a paragraph's runs with a freshly serialized array of `RunDto`,
+/// preserving the paragraph's `a:pPr` and `a:endParaRPr`.
+pub fn replace_paragraph_runs_lossless(
+    xml_bytes: &[u8],
+    shape_idx: usize,
+    para_idx: usize,
+    value: &str,
+) -> AppResult<Vec<u8>> {
+    let runs: Vec<crate::dto::RunDto> = serde_json::from_str(value)
+        .map_err(|e| AppError::InvalidValue(format!("Invalid runs JSON: {e}")))?;
+    let inner: String = runs.iter().map(crate::dto::xml::run_to_xml).collect();
+    let run_events = read_events(inner.as_bytes())?;
+
+    let events = read_events(xml_bytes)?;
+    let (shape_start, shape_end) =
+        find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
+    let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
+        .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    let (para_start, para_end) =
+        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+            .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&events[..para_start + 1]);
+    let mut i = para_start + 1;
+    while i < para_end {
+        if let Event::Start(e) = &events[i] {
+            let name = e.name().as_ref().to_vec();
+            if name.as_slice() == b"a:r" {
+                let r = find_elem_range(&events, &name, i);
+                if let Some((_, end)) = r {
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(events[i].clone());
+        i += 1;
+    }
+    out.extend(run_events);
+    out.extend_from_slice(&events[para_end..]);
+    write_events(out)
 }
 
 /// Replace the whole run at `text_frame.paragraphs[k].runs[m]` with a freshly

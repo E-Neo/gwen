@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 pulldown-cmark = "0.13.4"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+yaml_serde = "0.10.6"

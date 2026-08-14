@@ -103,12 +103,53 @@ fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<se
         json!({ "master": m, "layout": l, "name": name })
     });
 
-    Ok(json!({
+    let title = slide_title(&shapes);
+
+    let mut obj = json!({
         "shapes": shapes,
         "background": background,
         "notes": notes,
         "slide_layout": slide_layout,
-    }))
+    });
+    if let Some(title) = title {
+        obj["title"] = json!(title);
+    }
+    Ok(obj)
+}
+
+/// The slide title: paragraph[0] of the first title placeholder. An absent
+/// title placeholder yields `None` (the mirror then emits a `## Slide N`
+/// placeholder heading rather than a real one).
+fn slide_title(shapes: &[serde_json::Value]) -> Option<String> {
+    let shape = shapes.iter().find(|s| {
+        let is_ph = s.get("is_placeholder").and_then(serde_json::Value::as_bool);
+        let ty = s
+            .get("placeholder_format")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|f| f.get("type"))
+            .and_then(serde_json::Value::as_str);
+        is_ph == Some(true) && matches!(ty, Some("TITLE" | "CENTER_TITLE"))
+    })?;
+    let Some(para0) = shape
+        .get("text_frame")
+        .and_then(serde_json::Value::as_object)?
+        .get("paragraphs")
+        .and_then(serde_json::Value::as_array)?
+        .first()
+    else {
+        return Some(String::new());
+    };
+    Some(
+        para0
+            .get("runs")
+            .and_then(serde_json::Value::as_array)
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|r| r.get("text").and_then(serde_json::Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 fn master_json(pkg: &Package, master_uri: &str, media_dir: Option<&str>) -> serde_json::Value {

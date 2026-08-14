@@ -1,29 +1,44 @@
 use serde_json::{Map, Value};
 
+use super::normalize;
+use super::style::{
+    StyleRegistry, para_decls, quote, run_decls, shape_decls, shape_kind, tf_decls,
+};
+
 /// Serialize a presentation snapshot (the JSON produced by `query_value`) into
 /// the markdown mirror. The output is a faithful, editable representation of
 /// every field the apply engine can change; read-only fields (shape ids,
 /// placeholder flags, slide layout references, chart data, hyperlinks, ...)
 /// are deliberately omitted and reconstructed from the original deck on apply.
+///
+/// Format:
+/// - YAML front matter (`pptx`, `core_properties`, `theme`) delimited by `---`;
+/// - a `<style>` block of deduplicated, content-addressed CSS classes
+///   referenced by `<!-- s: -->`, `<!-- t: -->`, `<!-- dp: -->`,
+///   `<!-- p: -->` and inline `<span class="...">` markers;
+/// - `# Master N` sections, `## Slide title` headings (paragraph[0] of the
+///   slide's title placeholder, bound back by a `<!-- title -->` marker),
+///   `### Notes` sections, and body
+///   paragraphs rendered from runs with native emphasis where possible.
 pub fn serialize(snapshot: &Value) -> String {
+    let doc = normalize::normalize(snapshot);
+    let obj = doc.as_object().expect("snapshot is an object");
+
+    let mut reg = StyleRegistry::new();
+    collect_classes(&mut reg, &doc);
+
     let mut out = String::new();
-    let obj = snapshot.as_object().expect("snapshot is an object");
-
-    let sw = obj.get("slide_width").map(scalar).unwrap_or_default();
-    let sh = obj.get("slide_height").map(scalar).unwrap_or_default();
-    out.push_str(&format!(
-        "<!-- pptx: slide_width={sw} slide_height={sh} -->\n\n"
-    ));
-
-    write_core_properties(&mut out, obj.get("core_properties"));
-    write_theme(&mut out, obj.get("theme"));
+    write_front_matter(&mut out, obj);
+    out.push('\n');
+    out.push_str(&reg.to_style_block());
+    out.push('\n');
 
     if let Some(masters) = obj.get("slide_masters").and_then(Value::as_array) {
-        for master in masters {
-            out.push_str("<!-- master -->\n");
+        for (i, master) in masters.iter().enumerate() {
+            out.push_str(&format!("# Master {}\n\n", i + 1));
             if let Some(shapes) = master.get("shapes").and_then(Value::as_array) {
                 for shape in shapes {
-                    write_shape(&mut out, shape);
+                    write_shape(&mut out, &mut reg, shape, false, false);
                 }
             }
             out.push('\n');
@@ -31,467 +46,499 @@ pub fn serialize(snapshot: &Value) -> String {
     }
 
     if let Some(slides) = obj.get("slides").and_then(Value::as_array) {
-        for slide in slides {
-            match slide_background(slide) {
-                Some(bg) => out.push_str(&format!("<!-- slide: background={bg} -->\n")),
-                None => out.push_str("<!-- slide -->\n"),
-            }
-            if let Some(shapes) = slide.get("shapes").and_then(Value::as_array) {
-                for shape in shapes {
-                    write_shape(&mut out, shape);
-                }
-            }
-            if let Some(notes) = slide.get("notes")
-                && !notes.is_null()
-            {
-                out.push_str("<!-- notes -->\n");
-                if let Some(shapes) = notes.get("shapes").and_then(Value::as_array) {
-                    for shape in shapes {
-                        write_shape(&mut out, shape);
-                    }
-                }
-                out.push('\n');
-            }
-            out.push('\n');
+        for (i, slide) in slides.iter().enumerate() {
+            write_slide(&mut out, &mut reg, slide, i);
         }
     }
 
     out
 }
 
-fn write_core_properties(out: &mut String, core: Option<&Value>) {
-    out.push_str("<!-- core_properties -->\n");
-    if let Some(core) = core.and_then(Value::as_object) {
-        out.push_str("| key | value |\n|---|---|\n");
-        for (k, v) in core {
-            out.push_str(&format!(
-                "| {} | {} |\n",
-                escape_text(k),
-                escape_text(&scalar(v))
-            ));
+// ---------------------------------------------------------------------------
+// Pass 1: register every class the emission pass will reference
+// ---------------------------------------------------------------------------
+
+fn collect_classes(reg: &mut StyleRegistry, doc: &Value) {
+    let obj = doc.as_object().expect("snapshot is an object");
+    for list in ["slide_masters", "slides"] {
+        let Some(elems) = obj.get(list).and_then(Value::as_array) else {
+            continue;
+        };
+        for el in elems {
+            if let Some(shapes) = el.get("shapes").and_then(Value::as_array) {
+                for shape in shapes {
+                    register_shape(reg, shape);
+                }
+            }
+            if list == "slides"
+                && let Some(notes) = el.get("notes").filter(|v| !v.is_null())
+                && let Some(shapes) = notes.get("shapes").and_then(Value::as_array)
+            {
+                for shape in shapes {
+                    register_shape(reg, shape);
+                }
+            }
         }
     }
-    out.push('\n');
 }
 
-fn write_theme(out: &mut String, theme: Option<&Value>) {
-    let Some(theme) = theme.and_then(Value::as_object) else {
+fn register_shape(reg: &mut StyleRegistry, shape: &Value) {
+    let Some(obj) = shape.as_object() else {
         return;
     };
-    if let Some(colors) = theme.get("colors").and_then(Value::as_object) {
-        out.push_str("<!-- theme_colors -->\n| color | value |\n|---|---|\n");
-        for (k, v) in colors {
-            out.push_str(&format!(
-                "| {} | {} |\n",
-                escape_text(k),
-                escape_text(&scalar(v))
-            ));
+    let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
+    let auto = obj.get("auto_shape_type").and_then(Value::as_str);
+    reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
+    if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
+        reg.class_for("tf", &tf_decls(tf));
+        if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
+            reg.class_for("dp", &para_decls(dps));
         }
-        out.push('\n');
-    }
-    if let Some(fonts) = theme.get("fonts").and_then(Value::as_object) {
-        out.push_str("<!-- theme_fonts -->\n| font | value |\n|---|---|\n");
-        for (k, v) in fonts {
-            out.push_str(&format!(
-                "| {} | {} |\n",
-                escape_text(k),
-                escape_text(&scalar(v))
-            ));
+        if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
+            for para in paras {
+                register_para(reg, para);
+            }
         }
-        out.push('\n');
-    }
-}
-
-fn write_shape(out: &mut String, shape: &Value) {
-    let obj = shape.as_object().expect("shape is an object");
-
-    let mut attrs = vec![format!(
-        "type={}",
-        obj.get("shape_type")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_ascii_lowercase()
-    )];
-
-    if let Some(name) = obj.get("name").and_then(Value::as_str) {
-        attrs.push(format!("name={}", quote(name)));
-    }
-    for (short, long) in [("x", "left"), ("y", "top"), ("w", "width"), ("h", "height")] {
-        if let Some(v) = obj.get(long)
-            && !v.is_null()
-        {
-            attrs.push(format!("{short}={}", scalar(v)));
-        }
-    }
-    if let Some(v) = obj.get("rotation")
-        && !v.is_null()
+    } else if let Some(table) = obj.get("table").and_then(Value::as_object)
+        && let Some(rows) = table.get("rows").and_then(Value::as_array)
     {
-        attrs.push(format!("rotation={}", scalar(v)));
-    }
-    if let Some(v) = obj.get("auto_shape_type").and_then(Value::as_str) {
-        attrs.push(format!("autoshape={}", quote(v)));
-    }
-    for field in ["fill", "outline", "crop"] {
-        if let Some(v) = obj.get(field)
-            && v.is_object()
-        {
-            attrs.push(format!("{field}={}", compact_json(v)));
+        for row in rows {
+            if let Some(cells) = row.get("cells").and_then(Value::as_array) {
+                for cell in cells {
+                    register_cell(reg, cell);
+                }
+            }
         }
-    }
-
-    out.push_str(&format!("<!-- shape: {} -->\n", attrs.join(" ")));
-
-    if let Some(tf) = obj.get("text_frame") {
-        write_text_frame(out, tf);
-    } else if let Some(table) = obj.get("table") {
-        write_table(out, table);
     }
 }
 
-fn write_text_frame(out: &mut String, tf: &Value) {
-    let obj = tf.as_object().expect("text_frame is an object");
-
-    let mut attrs = Vec::new();
-    for key in [
-        "auto_size",
-        "word_wrap",
-        "vertical_anchor",
-        "margin_left",
-        "margin_right",
-        "margin_top",
-        "margin_bottom",
-    ] {
-        if let Some(v) = obj.get(key)
-            && !v.is_null()
-        {
-            attrs.push(format!("{key}={}", attr_scalar(key, v)));
-        }
-    }
-
-    let paragraphs = obj.get("paragraphs").and_then(Value::as_array);
-    let has_paragraphs = paragraphs.is_some_and(|p| !p.is_empty());
-    let has_dps = obj
-        .get("default_paragraph_style")
-        .is_some_and(|v| v.is_object());
-
-    if !attrs.is_empty() {
-        out.push_str(&format!("<!-- tf: {} -->\n", attrs.join(" ")));
-    }
-
-    if has_dps {
-        out.push_str("<!-- dp_style -->\n");
-        write_para_comment(out, obj.get("default_paragraph_style").unwrap());
-    }
-
-    if let Some(paragraphs) = paragraphs {
-        for para in paragraphs {
-            write_paragraph(out, para);
-        }
-    }
-
-    if attrs.is_empty() && !has_paragraphs && !has_dps {
-        out.push_str("<!-- tf -->\n");
-    }
-}
-
-fn write_para_comment(out: &mut String, para: &Value) {
-    let obj = para.as_object().expect("paragraph is an object");
-    let attrs = para_attrs(obj);
-    if !attrs.is_empty() {
-        out.push_str(&format!("<!-- para: {} -->\n", attrs.join(" ")));
-    }
-}
-
-fn write_paragraph(out: &mut String, para: &Value) {
-    let obj = para.as_object().expect("paragraph is an object");
-    write_para_comment(out, para);
-
-    let content = write_runs(
+fn register_para(reg: &mut StyleRegistry, para: &Value) {
+    let Some(obj) = para.as_object() else {
+        return;
+    };
+    reg.class_for("para", &para_decls(obj));
+    register_runs(
+        reg,
         obj.get("runs")
             .and_then(Value::as_array)
-            .unwrap_or(&Vec::new()),
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
     );
-    if content.is_empty() {
-        out.push_str("<span></span>\n");
-    } else {
-        out.push_str(&content);
+}
+
+fn register_cell(reg: &mut StyleRegistry, cell: &Value) {
+    let Some(tf) = cell.get("text_frame").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) else {
+        return;
+    };
+    for para in paras {
+        register_runs(
+            reg,
+            para.get("runs")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
+    }
+}
+
+fn register_runs(reg: &mut StyleRegistry, runs: &[Value]) {
+    for run in runs {
+        let Some(font) = run
+            .get("font")
+            .and_then(Value::as_object)
+            .filter(|f| !f.is_empty())
+        else {
+            continue;
+        };
+        if native_emphasis(font).is_none() {
+            reg.class_for("run", &run_decls(font));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2: emission
+// ---------------------------------------------------------------------------
+
+fn write_slide(out: &mut String, reg: &mut StyleRegistry, slide: &Value, idx: usize) {
+    let Some(obj) = slide.as_object() else {
+        return;
+    };
+    let shapes = obj.get("shapes").and_then(Value::as_array);
+    let Some(shapes) = shapes else {
+        return;
+    };
+    let title_idx = title_shape_index(obj);
+
+    match title_idx {
+        Some(i) => {
+            let para0 = &shapes[i]["text_frame"]["paragraphs"][0];
+            let runs = para0
+                .get("runs")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            out.push_str(&format!("## {}\n", render_runs(reg, runs)));
+        }
+        None => out.push_str(&format!("## Slide {}\n", idx + 1)),
+    }
+    write_background(out, slide);
+    out.push('\n');
+
+    for (i, shape) in shapes.iter().enumerate() {
+        let is_title = title_idx == Some(i);
+        if is_title {
+            out.push_str("<!-- title -->\n");
+        }
+        write_shape(out, reg, shape, is_title, is_title);
+    }
+
+    if let Some(notes) = obj.get("notes").filter(|v| !v.is_null()) {
+        out.push_str("### Notes\n\n");
+        if let Some(notes_shapes) = notes.get("shapes").and_then(Value::as_array) {
+            for shape in notes_shapes {
+                write_shape(out, reg, shape, false, false);
+            }
+        }
         out.push('\n');
     }
     out.push('\n');
 }
 
-/// All paragraph style attributes emitted into a `<!-- para: -->` comment.
-fn para_attrs(obj: &Map<String, Value>) -> Vec<String> {
-    let mut attrs = Vec::new();
-    if let Some(v) = obj.get("alignment").and_then(Value::as_str) {
-        attrs.push(format!("alignment={}", v.to_ascii_lowercase()));
-    }
-    if let Some(level) = obj.get("level").and_then(Value::as_i64)
-        && level != 0
-    {
-        attrs.push(format!("level={level}"));
-    }
-    if let Some(v) = obj.get("line_spacing")
-        && !v.is_null()
-    {
-        attrs.push(format!("line_spacing={}", scalar(v)));
-    }
-    for key in ["space_before", "space_after"] {
-        if let Some(v) = obj.get(key)
-            && !v.is_null()
-        {
-            attrs.push(format!("{key}={}", scalar(v)));
-        }
-    }
-    if let Some(font) = obj.get("font").and_then(Value::as_object) {
-        attrs.extend(font_para_attrs(font));
-    }
-    attrs
+/// The first title placeholder in the slide's `shapes` array. Its
+/// paragraph[0] is the source of the slide title (serialized as a `##`
+/// heading and bound back on parse by a `<!-- title -->` marker). Only
+/// genuine title placeholders bind; a plain text box keeps its paragraph[0]
+/// in the body.
+fn title_shape_index(slide: &Map<String, Value>) -> Option<usize> {
+    slide
+        .get("shapes")
+        .and_then(Value::as_array)?
+        .iter()
+        .position(is_title_placeholder)
 }
 
-/// Font attributes for a `<!-- para: -->` comment (plain `key=value` pairs,
-/// distinct from the span `data-*` attributes runs use).
-fn font_para_attrs(font: &Map<String, Value>) -> Vec<String> {
-    let mut attrs = Vec::new();
-    if let Some(v) = font.get("size")
-        && !v.is_null()
+fn is_title_placeholder(shape: &Value) -> bool {
+    let Some(obj) = shape.as_object() else {
+        return false;
+    };
+    if !obj
+        .get("is_placeholder")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
     {
-        attrs.push(format!("font_size={}", scalar(v)));
+        return false;
     }
-    if let Some(v) = font.get("name").and_then(Value::as_str) {
-        attrs.push(format!("font_name={}", quote(v)));
-    }
-    for (key, field) in [
-        ("bold", "font_bold"),
-        ("italic", "font_italic"),
-        ("underline", "font_underline"),
-    ] {
-        if let Some(v) = font.get(key).and_then(Value::as_bool) {
-            attrs.push(format!("{field}={}", if v { "true" } else { "false" }));
-        }
-    }
-    if let Some(color) = font.get("color").and_then(Value::as_object) {
-        attrs.push(format!("font_color=\"{}\"", color_value(color)));
-    }
-    attrs
+    matches!(
+        obj.get("placeholder_format")
+            .and_then(Value::as_object)
+            .and_then(|f| f.get("type"))
+            .and_then(Value::as_str),
+        Some("TITLE") | Some("CENTER_TITLE")
+    )
 }
 
-fn write_runs(runs: &[Value]) -> String {
+fn write_background(out: &mut String, slide: &Value) {
+    let Some(fill) = slide
+        .get("background")
+        .and_then(Value::as_object)
+        .and_then(|b| b.get("fill"))
+    else {
+        return;
+    };
+    let ty = fill.get("type").and_then(Value::as_str).unwrap_or("");
+    if ty.is_empty() {
+        return;
+    }
+    let color = fill.get("color").and_then(Value::as_str).unwrap_or("");
+    out.push_str(&format!(
+        "<!-- bg: {}:{} -->\n",
+        ty.to_ascii_uppercase(),
+        color
+    ));
+}
+
+fn write_shape(
+    out: &mut String,
+    reg: &mut StyleRegistry,
+    shape: &Value,
+    skip_para0: bool,
+    is_title: bool,
+) {
+    let Some(obj) = shape.as_object() else {
+        return;
+    };
+    let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
+    let auto = obj.get("auto_shape_type").and_then(Value::as_str);
+    let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
+
+    if is_title
+        && skip_para0
+        && let Some(tf) = obj.get("text_frame").and_then(Value::as_object)
+        && let Some(para0) = tf
+            .get("paragraphs")
+            .and_then(Value::as_array)
+            .and_then(|p| p.first())
+        && let Some(po) = para0.as_object()
+        && !para_decls(po).is_empty()
+    {
+        let pclass = reg.class_for("para", &para_decls(po));
+        out.push_str(&format!("<!-- p: {pclass} -->\n"));
+    }
+
+    out.push_str(&format!("<!-- s: {sclass} -->\n"));
+
+    if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
+        let tclass = reg.class_for("tf", &tf_decls(tf));
+        out.push_str(&format!("<!-- t: {tclass} -->\n"));
+        if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
+            let dclass = reg.class_for("dp", &para_decls(dps));
+            out.push_str(&format!("<!-- dp: {dclass} -->\n"));
+        }
+        if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
+            for (i, para) in paras.iter().enumerate() {
+                if skip_para0 && i == 0 {
+                    continue;
+                }
+                write_paragraph(out, reg, para);
+            }
+        }
+    } else if let Some(table) = obj.get("table") {
+        write_table(out, reg, table);
+    }
+}
+
+fn write_paragraph(out: &mut String, reg: &mut StyleRegistry, para: &Value) {
+    let Some(obj) = para.as_object() else {
+        return;
+    };
+    if !para_decls(obj).is_empty() {
+        let pclass = reg.class_for("para", &para_decls(obj));
+        out.push_str(&format!("<!-- p: {pclass} -->\n"));
+    }
+    let runs = obj
+        .get("runs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let content = render_runs(reg, runs);
+    if content.is_empty() {
+        out.push_str("<span></span>\n\n");
+    } else {
+        out.push_str(&guard_block_markers(&content));
+        out.push_str("\n\n");
+    }
+}
+
+/// Escape a rendered paragraph line so pulldown-cmark never parses it as a
+/// list, blockquote or fenced block.
+fn guard_block_markers(s: &str) -> String {
+    let risky = {
+        let b = s.as_bytes();
+        b.starts_with(b"- ")
+            || b.starts_with(b"+ ")
+            || b.starts_with(b"> ")
+            || starts_with_ordered_list(b)
+    };
+    if risky {
+        format!("\\{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+fn starts_with_ordered_list(b: &[u8]) -> bool {
+    if !b.first().is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    i < b.len() && b[i] == b'.' && (i + 1 >= b.len() || b[i + 1] == b' ' || b[i + 1] == b'\t')
+}
+
+fn render_runs(reg: &mut StyleRegistry, runs: &[Value]) -> String {
     let mut out = String::new();
-    let mut prev_plain = false;
     for run in runs {
-        let obj = run.as_object().expect("run is an object");
-        let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
-        let font = obj.get("font").filter(|f| f.is_object());
-
-        let plain = font.is_none();
-        if plain && prev_plain {
-            // Adjacent plain runs are indistinguishable in markdown; an empty
-            // span marks the run boundary.
-            out.push_str("<span></span>");
-        }
-        out.push_str(&write_run(text, font));
-        prev_plain = plain;
+        out.push_str(&render_run(reg, run));
     }
     out
 }
 
-/// Serialize a single run: bare text, native emphasis, or a `<span>` carrying
-/// the font attributes when the run cannot be expressed with emphasis alone.
-fn write_run(text: &str, font: Option<&Value>) -> String {
-    let attrs = font
-        .map(|f| font_attrs(f.as_object().unwrap()))
-        .unwrap_or_default();
-    if attrs.is_empty() {
-        let s = escape_text(text);
-        if let Some(font) = font {
-            let obj = font.as_object().unwrap();
-            let bold = obj.get("bold").and_then(Value::as_bool).unwrap_or(false);
-            let italic = obj.get("italic").and_then(Value::as_bool).unwrap_or(false);
-            match (bold, italic) {
-                (true, true) => return format!("***{s}***"),
-                (true, false) => return format!("**{s}**"),
-                (false, true) => return format!("*{s}*"),
-                (false, false) => return s,
-            }
-        }
-        return s;
+fn render_run(reg: &mut StyleRegistry, run: &Value) -> String {
+    let Some(obj) = run.as_object() else {
+        return String::new();
+    };
+    let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
+    let Some(font) = obj
+        .get("font")
+        .and_then(Value::as_object)
+        .filter(|f| !f.is_empty())
+    else {
+        return escape_text(text);
+    };
+    if let Some((open, close)) = native_emphasis(font) {
+        return format!("{open}{}{close}", escape_text(text));
     }
-    if let Some(font) = font {
-        let obj = font.as_object().unwrap();
-        let bold = obj.get("bold").and_then(Value::as_bool).unwrap_or(false);
-        let italic = obj.get("italic").and_then(Value::as_bool).unwrap_or(false);
-        let mut all = attrs.clone();
-        if bold {
-            all.push("data-bold=\"true\"".to_string());
-        }
-        if italic {
-            all.push("data-italic=\"true\"".to_string());
-        }
-        return format!("<span {}>{}</span>", all.join(" "), escape_text(text));
-    }
-    format!("<span {}>{}</span>", attrs.join(" "), escape_text(text))
+    let class = reg.class_for("run", &run_decls(font));
+    format!("<span class=\"{class}\">{}</span>", escape_text(text))
 }
 
-/// Font attributes as `<span data-*>` attributes. Emits only present fields.
-fn font_attrs(font: &Map<String, Value>) -> Vec<String> {
-    let mut attrs = Vec::new();
-    if let Some(v) = font.get("size")
-        && !v.is_null()
-    {
-        attrs.push(format!("data-size={}", scalar(v)));
+/// Emphasis markers for a font that is exactly `{bold:true}`, `{italic:true}`
+/// or `{bold:true, italic:true}`. Any other key (or a false value) disqualifies
+/// the run so explicit `font-weight: normal` etc. round-trips through a class.
+fn native_emphasis(font: &Map<String, Value>) -> Option<(&'static str, &'static str)> {
+    if font.len() > 2 {
+        return None;
     }
-    if let Some(v) = font.get("name").and_then(Value::as_str) {
-        attrs.push(format!("data-name={}", quote(v)));
+    for (k, v) in font {
+        if k != "bold" && k != "italic" {
+            return None;
+        }
+        if !matches!(v, Value::Bool(true)) {
+            return None;
+        }
     }
-    if let Some(v) = font.get("underline").and_then(Value::as_bool) {
-        attrs.push(format!("data-underline=\"{v}\""));
+    match (font.contains_key("bold"), font.contains_key("italic")) {
+        (true, true) => Some(("***", "***")),
+        (true, false) => Some(("**", "**")),
+        (false, true) => Some(("*", "*")),
+        (false, false) => None,
     }
-    if let Some(color) = font.get("color").and_then(Value::as_object) {
-        attrs.push(format!("data-color=\"{}\"", color_value(color)));
-    }
-    attrs
 }
 
-/// Encode a `ColorFormatDto`-shaped object as `TYPE:VALUE`.
-fn color_value(color: &Map<String, Value>) -> String {
-    let ty = color.get("type").and_then(Value::as_str).unwrap_or("");
-    let value = color
-        .get("rgb")
-        .or_else(|| color.get("theme_color"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    format!("{ty}:{value}")
-}
-
-fn write_table(out: &mut String, table: &Value) {
-    let obj = table.as_object().expect("table is an object");
-    let widths = obj
-        .get("grid")
-        .and_then(Value::as_array)
-        .map(|g| {
-            g.iter()
-                .filter_map(|c| c.get("width").and_then(Value::as_i64))
-                .map(|w| w.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-    out.push_str(&format!("<!-- table: grid={widths} -->\n"));
-
-    let rows = obj.get("rows").and_then(Value::as_array);
-    let Some(rows) = rows else { return };
+fn write_table(out: &mut String, reg: &mut StyleRegistry, table: &Value) {
+    let Some(obj) = table.as_object() else {
+        out.push('\n');
+        return;
+    };
+    let Some(rows) = obj.get("rows").and_then(Value::as_array) else {
+        out.push('\n');
+        return;
+    };
     let cols = rows
         .first()
         .and_then(|r| r.get("cells").and_then(Value::as_array))
-        .map(|c| c.len())
+        .map(Vec::len)
         .unwrap_or(0);
-
-    let mut header = vec!["".to_string(); cols];
-    if let Some(first) = rows.first()
-        && let Some(cells) = first.get("cells").and_then(Value::as_array)
-    {
-        header = cells.iter().map(write_cell).collect();
-    }
+    let header: Vec<String> = rows
+        .first()
+        .and_then(|r| r.get("cells").and_then(Value::as_array))
+        .map(|cells| cells.iter().map(|c| write_cell(reg, c)).collect())
+        .unwrap_or_default();
     out.push_str(&format!("| {} |\n", header.join(" | ")));
     out.push_str(&format!("| {} |\n", vec!["---"; cols].join(" | ")));
-
     for row in rows.iter().skip(1) {
-        let cells = row
+        let cells: Vec<String> = row
             .get("cells")
             .and_then(Value::as_array)
-            .map(|c| c.iter().map(write_cell).collect::<Vec<_>>())
+            .map(|c| c.iter().map(|c| write_cell(reg, c)).collect())
             .unwrap_or_default();
         out.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
     out.push('\n');
 }
 
-fn write_cell(cell: &Value) -> String {
+fn write_cell(reg: &mut StyleRegistry, cell: &Value) -> String {
     let Some(tf) = cell.get("text_frame").and_then(Value::as_object) else {
         return String::new();
     };
-    let paragraphs = tf.get("paragraphs").and_then(Value::as_array);
-    let Some(paragraphs) = paragraphs else {
+    let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) else {
         return String::new();
     };
-    paragraphs
+    paras
         .iter()
         .map(|p| {
-            write_runs(
+            render_runs(
+                reg,
                 p.get("runs")
                     .and_then(Value::as_array)
-                    .unwrap_or(&Vec::new()),
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
             )
         })
         .collect::<Vec<_>>()
         .join("<br>")
 }
 
-fn attr_scalar(key: &str, v: &Value) -> String {
-    match key {
-        "auto_size" | "vertical_anchor" => v
-            .as_str()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default(),
-        "word_wrap" => match v.as_bool() {
-            Some(true) => "1".into(),
-            Some(false) => "0".into(),
-            None => scalar(v),
-        },
-        _ => scalar(v),
+// ---------------------------------------------------------------------------
+// Front matter
+// ---------------------------------------------------------------------------
+
+fn write_front_matter(out: &mut String, obj: &Map<String, Value>) {
+    let mut root = Map::new();
+    let mut pptx = Map::new();
+    pptx.insert(
+        "slide_width".into(),
+        obj.get("slide_width").cloned().unwrap_or(Value::from(0)),
+    );
+    pptx.insert(
+        "slide_height".into(),
+        obj.get("slide_height").cloned().unwrap_or(Value::from(0)),
+    );
+    root.insert("pptx".into(), Value::Object(pptx));
+
+    if let Some(cp) = obj.get("core_properties").filter(|v| !v.is_null()) {
+        root.insert("core_properties".into(), cp.clone());
+    }
+
+    let mut theme = Map::new();
+    let t = obj
+        .get("theme")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut colors = Map::new();
+    let mut fonts = Map::new();
+    if let Some(c) = t.get("colors").and_then(Value::as_object) {
+        colors = c.clone();
+    }
+    if let Some(f) = t.get("fonts").and_then(Value::as_object) {
+        fonts = f.clone();
+    }
+    theme.insert("colors".into(), Value::Object(colors));
+    theme.insert("fonts".into(), Value::Object(fonts));
+    root.insert("theme".into(), Value::Object(theme));
+
+    out.push_str("---\n");
+    write_yaml_map(out, 0, &Value::Object(root));
+    out.push_str("---\n");
+}
+
+fn write_yaml_map(out: &mut String, indent: usize, v: &Value) {
+    let Some(map) = v.as_object() else {
+        return;
+    };
+    for (k, val) in map {
+        write_yaml_entry(out, indent, k, val);
     }
 }
 
-fn scalar(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-fn compact_json(v: &Value) -> String {
-    serde_json::to_string(v).expect("serializable JSON value")
-}
-
-/// The slide background as a `TYPE:COLOR` attribute, or `None` when the slide
-/// has no background element (`fill.type` is null).
-fn slide_background(slide: &Value) -> Option<String> {
-    let fill = slide.get("background")?.get("fill")?;
-    let ty = fill.get("type").and_then(Value::as_str)?;
-    if ty.is_empty() {
-        return None;
-    }
-    let color = fill.get("color").and_then(Value::as_str).unwrap_or("");
-    Some(format!("{ty}:{color}"))
-}
-
-/// Quote a value for use inside an HTML comment attribute. Backslashes and
-/// quote characters are backslash-escaped; `--` is escaped so it can never
-/// terminate the comment early.
-fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '-' => {
-                if out.ends_with('-') {
-                    out.push_str("\\-");
-                } else {
-                    out.push('-');
-                }
-            }
-            _ => out.push(c),
+/// Write `key: value` with every string double-quoted so YAML 1.1 never
+/// coerces values like `yes`, `off` or dates.
+fn write_yaml_entry(out: &mut String, indent: usize, key: &str, val: &Value) {
+    let pad = "  ".repeat(indent);
+    match val {
+        Value::Object(m) if m.is_empty() => out.push_str(&format!("{pad}{key}: {{}}\n")),
+        Value::Object(_) => {
+            out.push_str(&format!("{pad}{key}:\n"));
+            write_yaml_map(out, indent + 1, val);
         }
+        Value::String(s) => out.push_str(&format!("{pad}{key}: {}\n", quote(s))),
+        Value::Number(n) => out.push_str(&format!("{pad}{key}: {n}\n")),
+        Value::Bool(b) => out.push_str(&format!("{pad}{key}: {b}\n")),
+        Value::Null => out.push_str(&format!("{pad}{key}: null\n")),
+        other => out.push_str(&format!("{pad}{key}: {}\n", quote(&other.to_string()))),
     }
-    out.push('"');
-    out
 }
+
+// ---------------------------------------------------------------------------
+// Text escaping
+// ---------------------------------------------------------------------------
 
 /// Escape run text so pulldown-cmark parses it back verbatim. Characters that
 /// markdown would interpret are backslash-escaped; `<`, `>`, `&` use character

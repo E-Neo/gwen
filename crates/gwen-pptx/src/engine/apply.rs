@@ -125,7 +125,9 @@ fn read_part(pkg: &Package, uri: &str) -> AppResult<Vec<u8>> {
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))
 }
 
-fn apply_edit(pkg: &mut Package, pres: &Presentation, edit: &Edit) -> AppResult<()> {
+/// Apply a single edit to a package. Exposed so the update command can apply
+/// edits one at a time and attach markdown source spans to failures.
+pub fn apply_edit(pkg: &mut Package, pres: &Presentation, edit: &Edit) -> AppResult<()> {
     let resolved = path::resolve_path(&edit.path)?;
     match &resolved {
         path::ResolvedPath::Presentation { remaining } => {
@@ -306,6 +308,21 @@ fn apply_slide_edit(
         [PathSegment::Field(n), tail @ ..] if n == "notes" => {
             apply_notes_edit(pkg, uri, tail, edit)
         }
+        [PathSegment::Field(n)] if n == "title" => match edit.op {
+            EditOp::Set => {
+                let value = edit
+                    .value
+                    .as_ref()
+                    .ok_or(AppError::InvalidValue("title value required".to_string()))?;
+                let data = read_part(pkg, uri)?;
+                let new = xml_edit::replace_slide_title(&data, &scalar(value))?;
+                pkg.set_part(uri, new);
+                Ok(())
+            }
+            _ => Err(AppError::PathParse(
+                "slides[N].title can only be set".to_string(),
+            )),
+        },
         [PathSegment::Field(n), ..] if n == "slide_layout" => Err(AppError::PathParse(
             "slide_layout is a read-only reference; edit the layout via slide_masters".to_string(),
         )),
@@ -759,7 +776,15 @@ fn run_set(
     value: &Value,
 ) -> AppResult<Vec<u8>> {
     let [PathSegment::Index(m), tail @ ..] = rest else {
-        return Err(AppError::PathParse("Run index required".to_string()));
+        // Whole-array replacement: a paragraph that gained runs (e.g. an empty
+        // title paragraph that now carries heading text) arrives as a Set on
+        // the `runs` field with no index.
+        return xml_edit::replace_paragraph_runs_lossless(
+            xml,
+            shape_idx,
+            para_idx,
+            &json_str(value),
+        );
     };
     match tail {
         [] => xml_edit::replace_run_lossless(xml, shape_idx, para_idx, *m, &json_str(value)),
@@ -955,6 +980,28 @@ fn table_delete(xml: &[u8], shape_idx: usize, rest: &[PathSegment]) -> AppResult
                 PathSegment::Index(*ci),
             ];
             editor::remove_from_table(xml, shape_idx, &path)
+        }
+        [
+            PathSegment::Field(n),
+            PathSegment::Index(r),
+            PathSegment::Field(c),
+            PathSegment::Index(ci),
+            PathSegment::Field(t),
+        ] if n == "rows" && c == "cells" && t == "text_frame" => {
+            let path = [
+                PathSegment::Field("table".to_string()),
+                PathSegment::Field("rows".to_string()),
+                PathSegment::Index(*r),
+                PathSegment::Field("cells".to_string()),
+                PathSegment::Index(*ci),
+                PathSegment::Field("text_frame".to_string()),
+            ];
+            xml_edit::replace_table_cell_property_lossless(
+                xml,
+                shape_idx,
+                &path,
+                "{\"paragraphs\":[{\"level\":0}]}",
+            )
         }
         _ => Err(AppError::PathParse(format!(
             "Cannot delete table.{}",
