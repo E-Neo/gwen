@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 
 use super::error::{MdError, MdResult, MdSpan};
 use super::style::{
-    Styles, decl_str, font_from_decls, para_from_decls, parse_style_block, shape_from_decls,
+    Styles, font_from_decls, para_from_decls, parse_style_block, shape_attrs, shape_from_decls,
     tf_from_decls, unquote,
 };
 
@@ -388,39 +388,47 @@ impl<'a> Parser<'a> {
     // -- comments ----------------------------------------------------------
 
     fn handle_comment(&mut self, text: &str, off: usize) -> MdResult<()> {
-        let Some((key, value)) = parse_comment(text) else {
+        let Some((key, attrs)) = parse_comment(text) else {
             return Ok(());
         };
         match key.as_str() {
-            "s" => self.begin_shape(&value, off)?,
-            "t" => {
-                let decls = self.resolve_class(&value, off)?;
-                self.ensure_tf();
-                if let Some(shape) = &mut self.shape {
-                    let tf = shape.tf.get_or_insert_with(TfBuf::default);
-                    tf.props = tf_from_decls(&decls);
+            "shape" => self.begin_shape(&attrs, off)?,
+            "text-frame" => {
+                if let Some(class) = attr_value(&attrs, "class") {
+                    let decls = self.resolve_class(class, off)?;
+                    self.ensure_tf();
+                    if let Some(shape) = &mut self.shape {
+                        let tf = shape.tf.get_or_insert_with(TfBuf::default);
+                        tf.props = tf_from_decls(&decls);
+                    }
                 }
             }
-            "dp" => {
-                let decls = self.resolve_class(&value, off)?;
-                self.ensure_tf();
-                if let Some(shape) = &mut self.shape {
-                    let tf = shape.tf.get_or_insert_with(TfBuf::default);
-                    tf.dps = Some(Value::Object(para_from_decls(&decls)));
+            "default-paragraph" => {
+                if let Some(class) = attr_value(&attrs, "class") {
+                    let decls = self.resolve_class(class, off)?;
+                    self.ensure_tf();
+                    if let Some(shape) = &mut self.shape {
+                        let tf = shape.tf.get_or_insert_with(TfBuf::default);
+                        tf.dps = Some(Value::Object(para_from_decls(&decls)));
+                    }
                 }
             }
-            "p" => {
-                let decls = self.resolve_class(&value, off)?;
-                let style = para_from_decls(&decls);
-                if self.shape.is_some() {
-                    self.para_attrs = Some(style);
-                } else {
-                    self.title_attrs = Some(style);
+            "paragraph" => {
+                if let Some(class) = attr_value(&attrs, "class") {
+                    let decls = self.resolve_class(class, off)?;
+                    let style = para_from_decls(&decls);
+                    if self.shape.is_some() {
+                        self.para_attrs = Some(style);
+                    } else {
+                        self.title_attrs = Some(style);
+                    }
                 }
             }
-            "bg" => {
-                if let Some(slide) = &mut self.slide {
-                    slide.background = background_value(&value);
+            "background" => {
+                if let Some(fill) = attr_value(&attrs, "fill")
+                    && let Some(slide) = &mut self.slide
+                {
+                    slide.background = background_value(fill);
                 }
             }
             "title" => {
@@ -431,12 +439,17 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn begin_shape(&mut self, class: &str, off: usize) -> MdResult<()> {
+    fn begin_shape(&mut self, attrs: &[(String, String)], off: usize) -> MdResult<()> {
         self.finalize_shape();
-        let decls = self.resolve_class(class, off)?;
+        let mut map = match attr_value(attrs, "class") {
+            Some(class) => shape_from_decls(&self.resolve_class(class, off)?),
+            None => shape_from_decls(&[]),
+        };
+        shape_attrs(&mut map, attrs);
+        let grid = attr_value(attrs, "grid").map(str::to_string);
         self.shape = Some(ShapeBuf {
-            map: shape_from_decls(&decls),
-            grid: decl_str(&decls, "--pptx-grid").map(str::to_string),
+            map,
+            grid,
             tf: None,
             table: None,
             span: Some(self.span_at(off)),
@@ -726,7 +739,13 @@ impl<'a> Parser<'a> {
         let snippet = self.source[line_start..line_end]
             .trim_end_matches('\r')
             .to_string();
-        MdSpan { line, col, snippet }
+        MdSpan {
+            line,
+            col,
+            snippet,
+            offset,
+            len: line_end.saturating_sub(offset),
+        }
     }
 }
 
@@ -782,21 +801,31 @@ fn cell_value(tokens: &[Inl]) -> Value {
     for inl in tokens {
         match inl {
             Inl::Br => {
-                paragraphs.push(json!({ "runs": runs.finish() }));
+                paragraphs.push(paragraph_value(runs.finish()));
             }
             _ => apply_inl(&mut runs, inl.clone()),
         }
     }
-    paragraphs.push(json!({ "runs": runs.finish() }));
-    let has_text = paragraphs.iter().any(|p| {
-        p.get("runs")
-            .and_then(Value::as_array)
-            .is_some_and(|r| !r.is_empty())
-    });
-    if !has_text {
-        return json!({});
-    }
+    paragraphs.push(paragraph_value(runs.finish()));
     json!({ "text_frame": { "paragraphs": paragraphs } })
+}
+
+/// A table-cell paragraph: `{}` when empty, `{"runs": [...]}` otherwise. This
+/// matches the projected snapshot, where cell paragraph style is stripped and
+/// empty `runs` arrays are dropped by serde.
+fn paragraph_value(runs: Vec<Value>) -> Value {
+    if runs.is_empty() {
+        json!({})
+    } else {
+        json!({ "runs": runs })
+    }
+}
+
+fn attr_value<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 fn background_value(value: &str) -> Value {
@@ -866,7 +895,8 @@ fn span_tag_parts(tag: &str) -> (Map<String, Value>, Option<String>) {
         .unwrap_or("");
     let mut class = None;
     let mut attrs = Map::new();
-    for (k, v) in parse_attrs(inner) {
+    for (k, v) in tokenize_attrs(inner) {
+        let Some(v) = v else { continue };
         if k == "class" {
             class = Some(v);
             continue;
@@ -884,18 +914,24 @@ fn span_tag_parts(tag: &str) -> (Map<String, Value>, Option<String>) {
 
 // -- comment parsing ---------------------------------------------------------
 
-fn parse_comment(text: &str) -> Option<(String, String)> {
+/// Parse a marker comment like `<!-- shape class="textbox-1" name="X" -->`
+/// into its key (`shape`) and attribute pairs. Bare words (no `=`) are kept
+/// as the key position; `<!-- title -->` yields `("title", [])`.
+fn parse_comment(text: &str) -> Option<(String, Vec<(String, String)>)> {
     let t = text.trim();
     let t = t.strip_prefix("<!--")?.trim_start();
     let t = t.strip_suffix("-->")?.trim_end();
-    let (key, rest) = match t.find(':') {
-        Some(i) => (t[..i].trim().to_string(), t[i + 1..].trim().to_string()),
-        None => (t.to_string(), String::new()),
-    };
-    Some((key, rest))
+    let toks = tokenize_attrs(t);
+    let mut it = toks.into_iter();
+    let (key, _) = it.next()?;
+    let attrs: Vec<(String, String)> = it.filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+    Some((key, attrs))
 }
 
-fn parse_attrs(s: &str) -> Vec<(String, String)> {
+/// Split a tag/comment body into `key=value` pairs, keeping bare tokens (no
+/// `=`) as `(token, None)`. Quoted values may contain spaces and backslash
+/// escapes (`\"`).
+fn tokenize_attrs(s: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -910,6 +946,12 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
         let mut in_quote = false;
         while i < chars.len() {
             let c = chars[i];
+            if c == '\\' && i + 1 < chars.len() && chars[i + 1] == '"' && in_quote {
+                tok.push(c);
+                tok.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
             if c == '"' {
                 in_quote = !in_quote;
                 tok.push(c);
@@ -921,7 +963,9 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
             i += 1;
         }
         if let Some(eq) = tok.find('=') {
-            out.push((tok[..eq].to_string(), unquote(&tok[eq + 1..])));
+            out.push((tok[..eq].to_string(), Some(unquote(&tok[eq + 1..]))));
+        } else if !tok.is_empty() {
+            out.push((tok, None));
         }
     }
     out
@@ -989,4 +1033,129 @@ pub fn parse(md: &str) -> MdResult<ParsedDoc> {
     let spans = std::mem::take(&mut parser.spans);
     let doc = parser.finish();
     Ok(ParsedDoc { doc, spans })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{normalize, serialize};
+
+    fn canonical(v: &Value) -> Value {
+        match v {
+            Value::Object(map) => {
+                let mut sorted: Vec<(String, Value)> = map
+                    .iter()
+                    .map(|(k, val)| (k.clone(), canonical(val)))
+                    .collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                Value::Object(sorted.into_iter().collect())
+            }
+            Value::Array(arr) => Value::Array(arr.iter().map(canonical).collect()),
+            other => other.clone(),
+        }
+    }
+
+    fn assert_roundtrips(v: Value) -> String {
+        let md = serialize::serialize(&v);
+        let reparsed = parse(&md).expect("reparse serialized markdown").doc;
+        assert_eq!(
+            canonical(&normalize::normalize(&reparsed)),
+            canonical(&normalize::normalize(&v)),
+            "round-trip mismatch\n--- markdown ---\n{md}"
+        );
+        md
+    }
+
+    /// A projected snapshot: a styled body paragraph, a plain one, and a table
+    /// whose cells mix text and empty paragraphs (projected cell paragraphs are
+    /// `{}` — style stripped, empty runs dropped).
+    fn snapshot() -> Value {
+        json!({
+            "slide_width": 9144000,
+            "slide_height": 6858000,
+            "theme": { "colors": {}, "fonts": {} },
+            "slide_masters": [],
+            "slides": [
+                {
+                    "background": { "fill": { "type": null } },
+                    "notes": null,
+                    "shapes": [
+                        {
+                            "shape_type": "TEXT_BOX",
+                            "name": "Body 1",
+                            "left": 914400,
+                            "top": 914400,
+                            "width": 3657600,
+                            "height": 914400,
+                            "text_frame": {
+                                "paragraphs": [
+                                    {
+                                        "level": 0,
+                                        "alignment": "CENTER",
+                                        "line_spacing": 1.5,
+                                        "space_before": 1000,
+                                        "space_after": 2000,
+                                        "runs": [ { "text": "Spaced" } ]
+                                    },
+                                    { "level": 0, "runs": [ { "text": "Plain" } ] }
+                                ]
+                            }
+                        },
+                        {
+                            "shape_type": "TABLE",
+                            "name": "Table 2",
+                            "left": 914400,
+                            "top": 1828800,
+                            "width": 3657600,
+                            "height": 1371600,
+                            "table": {
+                                "grid": [ { "width": 1828800 }, { "width": 1828800 } ],
+                                "rows": [
+                                    {
+                                        "cells": [
+                                            { "text_frame": { "paragraphs": [
+                                                { "runs": [ { "text": "H1" } ] },
+                                                {},
+                                                {}
+                                            ] } },
+                                            { "text_frame": { "paragraphs": [ {} ] } }
+                                        ]
+                                    },
+                                    {
+                                        "cells": [
+                                            { "text_frame": { "paragraphs": [
+                                                { "runs": [ { "text": "A" } ] }
+                                            ] } },
+                                            { "text_frame": { "paragraphs": [ {} ] } }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn styled_paragraph_and_empty_cells_roundtrip() {
+        let md = assert_roundtrips(snapshot());
+        assert!(
+            md.contains("--pptx-space-before: 1000;"),
+            "space_before must use the `--pptx-space-before` declaration, got:\n{md}"
+        );
+        assert!(
+            md.contains("--pptx-space-after: 2000;"),
+            "space_after must use the `--pptx-space-after` declaration"
+        );
+        assert!(
+            !md.contains("space_before"),
+            "underscore field names must not leak into the mirror"
+        );
+        assert!(
+            md.contains("| H1<br><br> |"),
+            "cell paragraphs (text + two empties) serialize as runs joined by <br>"
+        );
+    }
 }

@@ -28,9 +28,6 @@ pub enum AppError {
 
     #[error("Invalid value: {0}")]
     InvalidValue(String),
-
-    #[error("{0}")]
-    Markdown(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

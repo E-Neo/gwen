@@ -29,9 +29,13 @@ use clap::{Parser, Subcommand};
     .tf-4 { --pptx-type: text_frame; ... }
 
   Every shape, text frame, paragraph and run carries an HTML comment marker
-  (`<!-- s: -->`, `<!-- t: -->`, `<!-- p: -->`, `<!-- dp: -->`) followed by
-  the content for that element. Inline formatting is native Markdown
-  emphasis plus `<span>` classes from the style block:
+  with attributes (`<!-- shape class="textbox-1" name="..." left="..." -->
+  `, `<!-- text-frame class="..." -->`, `<!-- paragraph class="..." -->`,
+  `<!-- default-paragraph class="..." -->`, `<!-- background
+  fill="SOLID:FF00FF" -->`) followed by the content for that element. Shape
+  geometry, name and table grid live in the shape marker's attributes; the
+  class only holds styling. Inline formatting is native Markdown emphasis
+  plus `<span>` classes from the style block:
 
     **bold text**, *italic*, <span class="run-1">big</span>
 

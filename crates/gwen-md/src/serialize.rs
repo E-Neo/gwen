@@ -2,7 +2,7 @@ use serde_json::{Map, Value};
 
 use super::normalize;
 use super::style::{
-    StyleRegistry, para_decls, quote, run_decls, shape_decls, shape_kind, tf_decls,
+    StyleRegistry, para_decls, quote, run_decls, scalar, shape_decls, shape_kind, tf_decls,
 };
 
 /// Serialize a presentation snapshot (the JSON produced by `query_value`) into
@@ -14,8 +14,11 @@ use super::style::{
 /// Format:
 /// - YAML front matter (`pptx`, `core_properties`, `theme`) delimited by `---`;
 /// - a `<style>` block of deduplicated, content-addressed CSS classes
-///   referenced by `<!-- s: -->`, `<!-- t: -->`, `<!-- dp: -->`,
-///   `<!-- p: -->` and inline `<span class="...">` markers;
+///   referenced by `<!-- shape class="..." -->`, `<!-- text-frame
+///   class="..." -->`, `<!-- default-paragraph class="..." -->`,
+///   `<!-- paragraph class="..." -->` and inline `<span class="...">` markers;
+/// - shape geometry and identity live in the shape marker's HTML attributes
+///   (`<!-- shape class="textbox-1" name="TextBox 4" left="914400" ... -->`);
 /// - `# Master N` sections, `## Slide title` headings (paragraph[0] of the
 ///   slide's title placeholder, bound back by a `<!-- title -->` marker),
 ///   `### Notes` sections, and body
@@ -254,11 +257,12 @@ fn write_background(out: &mut String, slide: &Value) {
         return;
     }
     let color = fill.get("color").and_then(Value::as_str).unwrap_or("");
-    out.push_str(&format!(
-        "<!-- bg: {}:{} -->\n",
-        ty.to_ascii_uppercase(),
-        color
-    ));
+    let val = if color.is_empty() {
+        ty.to_ascii_uppercase()
+    } else {
+        format!("{}:{}", ty.to_ascii_uppercase(), color)
+    };
+    out.push_str(&format!("<!-- background fill=\"{}\" -->\n", val));
 }
 
 fn write_shape(
@@ -271,9 +275,6 @@ fn write_shape(
     let Some(obj) = shape.as_object() else {
         return;
     };
-    let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
-    let auto = obj.get("auto_shape_type").and_then(Value::as_str);
-    let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
 
     if is_title
         && skip_para0
@@ -286,17 +287,17 @@ fn write_shape(
         && !para_decls(po).is_empty()
     {
         let pclass = reg.class_for("para", &para_decls(po));
-        out.push_str(&format!("<!-- p: {pclass} -->\n"));
+        out.push_str(&format!("<!-- paragraph class=\"{pclass}\" -->\n"));
     }
 
-    out.push_str(&format!("<!-- s: {sclass} -->\n"));
+    write_shape_marker(out, reg, obj);
 
     if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
         let tclass = reg.class_for("tf", &tf_decls(tf));
-        out.push_str(&format!("<!-- t: {tclass} -->\n"));
+        out.push_str(&format!("<!-- text-frame class=\"{tclass}\" -->\n"));
         if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
             let dclass = reg.class_for("dp", &para_decls(dps));
-            out.push_str(&format!("<!-- dp: {dclass} -->\n"));
+            out.push_str(&format!("<!-- default-paragraph class=\"{dclass}\" -->\n"));
         }
         if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
             for (i, para) in paras.iter().enumerate() {
@@ -311,13 +312,56 @@ fn write_shape(
     }
 }
 
+/// Emit the shape marker: `<!-- shape class="textbox-1" name="TextBox 4"
+/// left="914400" top="152400" width="6096000" height="914400" rotation="-20"
+/// grid="775018,936978" crop-left="0.1" -->`. Attributes are emitted only for
+/// non-null snapshot values.
+fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<String, Value>) {
+    let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
+    let auto = obj.get("auto_shape_type").and_then(Value::as_str);
+    let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
+
+    let mut parts = vec![format!("class=\"{sclass}\"")];
+    if let Some(v) = obj.get("name").and_then(Value::as_str) {
+        parts.push(format!("name=\"{}\"", escape_attr(v)));
+    }
+    for key in ["left", "top", "width", "height"] {
+        if let Some(v) = obj.get(key) {
+            parts.push(format!("{key}=\"{}\"", scalar(v)));
+        }
+    }
+    if let Some(v) = obj.get("rotation") {
+        parts.push(format!("rotation=\"{}\"", scalar(v)));
+    }
+    if let Some(grid) = obj
+        .get("table")
+        .and_then(Value::as_object)
+        .and_then(|t| t.get("grid"))
+        .and_then(Value::as_array)
+    {
+        let widths: Vec<String> = grid
+            .iter()
+            .filter_map(|g| g.as_object().and_then(|o| o.get("width")).map(scalar))
+            .collect();
+        parts.push(format!("grid=\"{}\"", widths.join(",")));
+    }
+    if let Some(crop) = obj.get("crop").and_then(Value::as_object) {
+        for side in ["left", "top", "right", "bottom"] {
+            if let Some(v) = crop.get(side) {
+                parts.push(format!("crop-{side}=\"{}\"", scalar(v)));
+            }
+        }
+    }
+    out.push_str(&format!("<!-- shape {} -->\n", parts.join(" ")));
+}
+
 fn write_paragraph(out: &mut String, reg: &mut StyleRegistry, para: &Value) {
     let Some(obj) = para.as_object() else {
         return;
     };
     if !para_decls(obj).is_empty() {
         let pclass = reg.class_for("para", &para_decls(obj));
-        out.push_str(&format!("<!-- p: {pclass} -->\n"));
+        out.push_str(&format!("<!-- paragraph class=\"{pclass}\" -->\n"));
     }
     let runs = obj
         .get("runs")
@@ -539,6 +583,20 @@ fn write_yaml_entry(out: &mut String, indent: usize, key: &str, val: &Value) {
 // ---------------------------------------------------------------------------
 // Text escaping
 // ---------------------------------------------------------------------------
+
+/// Escape a value for use inside a marker attribute. Backslashes and double
+/// quotes are backslash-escaped, matching `unquote`.
+fn escape_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// Escape run text so pulldown-cmark parses it back verbatim. Characters that
 /// markdown would interpret are backslash-escaped; `<`, `>`, `&` use character

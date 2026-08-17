@@ -935,34 +935,56 @@ fn edit_txbody_path(
             let rest = &inner[2..];
 
             match rest.split_first() {
-                Some((path::PathSegment::Field(n), tail)) if n == "runs" => {
-                    let run_idx = match tail.first() {
-                        Some(path::PathSegment::Index(i)) => *i,
-                        _ => return Err(AppError::PathParse("Expected run index".to_string())),
-                    };
-                    match tail.get(1) {
-                        Some(path::PathSegment::Field(n)) if n == "font" => edit_run_font_in_place(
+                Some((path::PathSegment::Field(n), tail)) if n == "runs" => match tail.first() {
+                    None => {
+                        // Whole-array replacement of a paragraph's runs (e.g. an
+                        // empty cell paragraph that gained text, or a runs
+                        // array cleared to empty).
+                        let runs: Vec<crate::dto::RunDto> =
+                            serde_json::from_str(value).map_err(|e| {
+                                AppError::InvalidValue(format!("Invalid runs JSON: {e}"))
+                            })?;
+                        let inner: String = runs.iter().map(crate::dto::xml::run_to_xml).collect();
+                        let run_events = read_events(inner.as_bytes())?;
+                        splice_paragraph_runs(
                             events,
                             txbody_start,
                             txbody_end,
                             para_idx,
-                            run_idx,
-                            &tail[2..],
-                            value,
-                        ),
-                        Some(path::PathSegment::Field(n)) if n == "text" => edit_run_text_in_place(
-                            events,
-                            txbody_start,
-                            txbody_end,
-                            para_idx,
-                            run_idx,
-                            value,
-                        ),
-                        _ => Err(AppError::PathParse(
-                            "Expected 'font' or 'text' after run index".to_string(),
-                        )),
+                            run_events,
+                        )
                     }
-                }
+                    Some(path::PathSegment::Index(run_idx)) => {
+                        let run_idx = *run_idx;
+                        match tail.get(1) {
+                            Some(path::PathSegment::Field(n)) if n == "font" => {
+                                edit_run_font_in_place(
+                                    events,
+                                    txbody_start,
+                                    txbody_end,
+                                    para_idx,
+                                    run_idx,
+                                    &tail[2..],
+                                    value,
+                                )
+                            }
+                            Some(path::PathSegment::Field(n)) if n == "text" => {
+                                edit_run_text_in_place(
+                                    events,
+                                    txbody_start,
+                                    txbody_end,
+                                    para_idx,
+                                    run_idx,
+                                    value,
+                                )
+                            }
+                            _ => Err(AppError::PathParse(
+                                "Expected 'font' or 'text' after run index".to_string(),
+                            )),
+                        }
+                    }
+                    _ => Err(AppError::PathParse("Expected run index".to_string())),
+                },
                 Some((path::PathSegment::Field(n), tail)) if n == "font" => {
                     edit_end_para_rpr_in_place(
                         events,
@@ -2862,13 +2884,27 @@ pub fn replace_paragraph_runs_lossless(
     let inner: String = runs.iter().map(crate::dto::xml::run_to_xml).collect();
     let run_events = read_events(inner.as_bytes())?;
 
-    let events = read_events(xml_bytes)?;
+    let mut events = read_events(xml_bytes)?;
     let (shape_start, shape_end) =
         find_shape_range(&events, shape_idx).ok_or(AppError::ShapeIndexOutOfBounds(shape_idx))?;
     let (txbody_start, txbody_end) = find_txbody_range(&events, shape_start, shape_end)
         .ok_or_else(|| AppError::PathParse("Shape has no text frame".to_string()))?;
+    splice_paragraph_runs(&mut events, txbody_start, txbody_end, para_idx, run_events)?;
+    write_events(events)
+}
+
+/// Replace the `a:r` children of the paragraph at `para_idx` inside the located
+/// text body range with `run_events`, preserving the paragraph's `a:pPr` and
+/// `a:endParaRPr`.
+fn splice_paragraph_runs(
+    events: &mut Vec<Event<'static>>,
+    txbody_start: usize,
+    txbody_end: usize,
+    para_idx: usize,
+    run_events: Vec<Event<'static>>,
+) -> AppResult<()> {
     let (para_start, para_end) =
-        find_nth_child_range(&events, txbody_start, txbody_end, b"a:p", para_idx)
+        find_nth_child_range(events, txbody_start, txbody_end, b"a:p", para_idx)
             .ok_or_else(|| AppError::PathParse(format!("Paragraph index {para_idx} not found")))?;
 
     let mut out = Vec::new();
@@ -2878,7 +2914,7 @@ pub fn replace_paragraph_runs_lossless(
         if let Event::Start(e) = &events[i] {
             let name = e.name().as_ref().to_vec();
             if name.as_slice() == b"a:r" {
-                let r = find_elem_range(&events, &name, i);
+                let r = find_elem_range(events, &name, i);
                 if let Some((_, end)) = r {
                     i = end + 1;
                     continue;
@@ -2890,7 +2926,8 @@ pub fn replace_paragraph_runs_lossless(
     }
     out.extend(run_events);
     out.extend_from_slice(&events[para_end..]);
-    write_events(out)
+    *events = out;
+    Ok(())
 }
 
 /// Replace the whole run at `text_frame.paragraphs[k].runs[m]` with a freshly
@@ -4468,5 +4505,34 @@ mod tests {
     fn replace_shape_text_rejects_shape_without_text_frame() {
         // shape_idx 2 is the picture (p:pic) with no txBody.
         assert!(replace_shape_text_lossless(SLIDE.as_bytes(), 2, "Hi").is_err());
+    }
+
+    #[test]
+    fn table_cell_paragraph_whole_runs_replace() {
+        // A paragraph that gained an entire run array (e.g. an empty cell
+        // paragraph that got text) must replace its `a:r` children in place.
+        let path =
+            path::parse_path("table.rows[0].cells[0].text_frame.paragraphs[0].runs").unwrap();
+        let value = r#"[{"text":"New","font":{"size":1800,"bold":true}},{"text":" Runs"}]"#;
+        let out = replace_table_cell_property_lossless(SLIDE.as_bytes(), 1, &path, value).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains(">New</a:t>"), "got: {out_str}");
+        assert!(out_str.contains("sz=\"1800\""), "got: {out_str}");
+        assert!(out_str.contains("b=\"1\""), "got: {out_str}");
+        assert!(out_str.contains("> Runs</a:t>"), "got: {out_str}");
+        assert!(!out_str.contains(">X</a:t>"), "old run replaced: {out_str}");
+        assert!(out_str.contains(">X2<"), "sibling cell preserved");
+    }
+
+    #[test]
+    fn table_cell_paragraph_whole_runs_clear() {
+        // Clearing a paragraph's runs keeps the paragraph (and its pPr) but
+        // removes the runs — the `[]` deletion path.
+        let path =
+            path::parse_path("table.rows[0].cells[0].text_frame.paragraphs[0].runs").unwrap();
+        let out = replace_table_cell_property_lossless(SLIDE.as_bytes(), 1, &path, "[]").unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(">X</a:t>"), "runs cleared: {out_str}");
+        assert!(out_str.contains("<a:p>"), "paragraph survives: {out_str}");
     }
 }

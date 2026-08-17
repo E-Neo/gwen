@@ -1,7 +1,8 @@
 use std::fmt;
 
-/// A source location in the markdown document, rendered rustc-style by the
-/// CLI.
+/// A source location in the markdown document. Byte `offset`/`len` anchor the
+/// location for miette-style diagnostics; `line`/`col`/`snippet` are the
+/// human-readable view.
 #[derive(Debug, Clone)]
 pub struct MdSpan {
     /// 1-based line in the original markdown.
@@ -10,6 +11,10 @@ pub struct MdSpan {
     pub col: usize,
     /// The source line, for the caret display.
     pub snippet: String,
+    /// Byte offset of the location in the original source.
+    pub offset: usize,
+    /// Length of the located region in bytes.
+    pub len: usize,
 }
 
 /// A diagnostic attached to a location in the markdown document.
@@ -32,6 +37,8 @@ impl MdError {
                 line,
                 col,
                 snippet: snippet.into(),
+                offset: 0,
+                len: 0,
             },
         }
     }

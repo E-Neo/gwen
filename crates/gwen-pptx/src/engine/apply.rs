@@ -1003,6 +1003,29 @@ fn table_delete(xml: &[u8], shape_idx: usize, rest: &[PathSegment]) -> AppResult
                 "{\"paragraphs\":[{\"level\":0}]}",
             )
         }
+        [
+            PathSegment::Field(n),
+            PathSegment::Index(r),
+            PathSegment::Field(c),
+            PathSegment::Index(ci),
+            PathSegment::Field(t),
+            PathSegment::Field(p),
+            PathSegment::Index(pi),
+            PathSegment::Field(runs),
+        ] if n == "rows" && c == "cells" && t == "text_frame" && p == "paragraphs" => {
+            let path = [
+                PathSegment::Field("table".to_string()),
+                PathSegment::Field("rows".to_string()),
+                PathSegment::Index(*r),
+                PathSegment::Field("cells".to_string()),
+                PathSegment::Index(*ci),
+                PathSegment::Field("text_frame".to_string()),
+                PathSegment::Field("paragraphs".to_string()),
+                PathSegment::Index(*pi),
+                PathSegment::Field("runs".to_string()),
+            ];
+            xml_edit::replace_table_cell_property_lossless(xml, shape_idx, &path, "[]")
+        }
         _ => Err(AppError::PathParse(format!(
             "Cannot delete table.{}",
             path_str(rest)

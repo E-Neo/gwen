@@ -110,7 +110,9 @@ fn val<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
     obj.get(key).filter(|v| !is_null(v))
 }
 
-/// CSS declarations for a shape.
+/// CSS declarations for a shape. Styling only: geometry, identity and grid
+/// live in the shape marker's HTML attributes (`<!-- shape class="..."
+/// name="..." left="..." ... -->`).
 pub fn shape_decls(shape: &Map<String, Value>) -> Vec<Decl> {
     let mut out = Vec::new();
     out.push(Decl::new(
@@ -121,42 +123,14 @@ pub fn shape_decls(shape: &Map<String, Value>) -> Vec<Decl> {
             .unwrap_or("")
             .to_ascii_lowercase(),
     ));
-    if let Some(v) = val(shape, "name").and_then(Value::as_str) {
-        out.push(Decl::new("--pptx-name", quote(v)));
-    }
     if let Some(v) = val(shape, "auto_shape_type").and_then(Value::as_str) {
         out.push(Decl::new("--pptx-auto-shape", v.to_ascii_lowercase()));
-    }
-    for key in ["left", "top", "width", "height"] {
-        if let Some(v) = val(shape, key) {
-            out.push(Decl::new(key, scalar(v)));
-        }
-    }
-    if let Some(v) = val(shape, "rotation") {
-        out.push(Decl::new("rotation", scalar(v)));
     }
     if let Some(fill) = val(shape, "fill").and_then(Value::as_object) {
         push_fill_decl(&mut out, "fill", fill);
     }
     if let Some(outline) = val(shape, "outline").and_then(Value::as_object) {
         push_outline_decls(&mut out, outline);
-    }
-    if let Some(crop) = val(shape, "crop").and_then(Value::as_object) {
-        for side in ["left", "top", "right", "bottom"] {
-            if let Some(v) = val(crop, side) {
-                out.push(Decl::new(&format!("--pptx-crop-{side}"), scalar(v)));
-            }
-        }
-    }
-    if let Some(table) = val(shape, "table").and_then(Value::as_object)
-        && let Some(grid) = val(table, "grid").and_then(Value::as_array)
-    {
-        let widths: Vec<String> = grid
-            .iter()
-            .filter_map(|g| g.as_object().and_then(|o| val(o, "width")))
-            .map(scalar)
-            .collect();
-        out.push(Decl::new("--pptx-grid", widths.join(",")));
     }
     out
 }
@@ -251,9 +225,12 @@ pub fn para_decls(para: &Map<String, Value>) -> Vec<Decl> {
     if let Some(v) = val(para, "line_spacing") {
         out.push(Decl::new("line-height", scalar(v)));
     }
-    for key in ["space_before", "space_after"] {
-        if let Some(v) = val(para, key) {
-            out.push(Decl::new(&format!("--pptx-space-{key}"), scalar(v)));
+    for (field, decl) in [
+        ("space_before", "--pptx-space-before"),
+        ("space_after", "--pptx-space-after"),
+    ] {
+        if let Some(v) = val(para, field) {
+            out.push(Decl::new(decl, scalar(v)));
         }
     }
     if let Some(font) = val(para, "font").and_then(Value::as_object) {
@@ -323,7 +300,8 @@ fn decl_f64(decls: &[Decl], prop: &str) -> Option<f64> {
     decl_str(decls, prop).and_then(|v| v.parse().ok())
 }
 
-/// Rebuild a shape object from its style declarations.
+/// Rebuild a shape object from its style declarations. Geometry, identity and
+/// grid are read from the shape marker's HTML attributes (see `shape_attrs`).
 pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
     let mut shape = Map::new();
     if let Some(ty) = decl_str(decls, "--pptx-type") {
@@ -331,22 +309,11 @@ pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
     } else {
         shape.insert("shape_type".into(), Value::String(String::new()));
     }
-    if let Some(v) = decl_str(decls, "--pptx-name").map(unquote) {
-        shape.insert("name".into(), Value::String(v));
-    }
     if let Some(v) = decl_str(decls, "--pptx-auto-shape") {
         shape.insert(
             "auto_shape_type".into(),
             Value::String(v.to_ascii_lowercase()),
         );
-    }
-    for key in ["left", "top", "width", "height"] {
-        if let Some(v) = decl_i64(decls, key) {
-            shape.insert(key.into(), Value::from(v));
-        }
-    }
-    if let Some(v) = decl_f64(decls, "rotation") {
-        shape.insert("rotation".into(), Value::from(v));
     }
     if let Some(fill) = fill_from_decl(decl_str(decls, "fill")) {
         shape.insert("fill".into(), fill);
@@ -354,17 +321,46 @@ pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
     if let Some(outline) = outline_from_decls(decls) {
         shape.insert("outline".into(), outline);
     }
-    let crop = ["left", "top", "right", "bottom"]
-        .iter()
-        .filter_map(|side| {
-            decl_f64(decls, &format!("--pptx-crop-{side}"))
-                .map(|v| (side.to_string(), Value::from(v)))
-        })
-        .collect::<Map<_, _>>();
-    if !crop.is_empty() {
-        shape.insert("crop".into(), Value::Object(crop));
-    }
     shape
+}
+
+/// Apply the `name`, `left/top/width/height`, `rotation`, `grid` and
+/// `crop-*` attributes from a shape marker onto a shape object. Attributes are
+/// only present when the value was non-null in the source snapshot.
+pub fn shape_attrs(shape: &mut Map<String, Value>, attrs: &[(String, String)]) {
+    for (key, value) in attrs {
+        match key.as_str() {
+            "name" => {
+                shape.insert("name".into(), Value::String(value.clone()));
+            }
+            "left" | "top" | "width" | "height" => {
+                if let Ok(v) = value.parse::<i64>() {
+                    shape.insert(key.clone(), Value::from(v));
+                }
+            }
+            "rotation" => {
+                if let Ok(v) = value.parse::<f64>() {
+                    shape.insert("rotation".into(), Value::from(v));
+                }
+            }
+            "grid" => {
+                // Consumed by the table builder, which needs the raw widths.
+            }
+            _ => {
+                if let Some(side) = key.strip_prefix("crop-")
+                    && let Ok(v) = value.parse::<f64>()
+                    && matches!(side, "left" | "top" | "right" | "bottom")
+                {
+                    let crop = shape
+                        .entry("crop")
+                        .or_insert_with(|| Value::Object(Map::new()))
+                        .as_object_mut()
+                        .expect("crop is an object");
+                    crop.insert(side.into(), Value::from(v));
+                }
+            }
+        }
+    }
 }
 
 fn fill_from_decl(value: Option<&str>) -> Option<Value> {
@@ -476,12 +472,12 @@ pub fn para_from_decls(decls: &[Decl]) -> Map<String, Value> {
     if let Some(v) = decl_f64(decls, "line-height") {
         para.insert("line_spacing".into(), Value::from(v));
     }
-    for key in ["--pptx-space-before", "--pptx-space-after"] {
-        if let Some(v) = decl_i64(decls, key) {
-            para.insert(
-                key.trim_start_matches("--pptx-space-").to_string(),
-                Value::from(v),
-            );
+    for (decl, field) in [
+        ("--pptx-space-before", "space_before"),
+        ("--pptx-space-after", "space_after"),
+    ] {
+        if let Some(v) = decl_i64(decls, decl) {
+            para.insert(field.into(), Value::from(v));
         }
     }
     if let Some(font) = font_from_decls(decls) {

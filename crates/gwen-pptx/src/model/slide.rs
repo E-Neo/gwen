@@ -1473,6 +1473,10 @@ pub fn parse_slide_shapes(
                     b"a:bodyPr" if in_cell_text => {
                         in_body_pr = true;
                     }
+                    b"a:p" if in_cell_text => {
+                        // Self-closing empty paragraph inside a table cell.
+                        cell_paragraphs.push(fresh_para());
+                    }
                     b"a:bodyPr" if in_text_frame => {
                         for a in e.attributes().flatten() {
                             match a.key.as_ref() {
@@ -2023,6 +2027,54 @@ mod tests {
                 .unwrap()
                 .default_paragraph_style
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_cell_paragraphs_are_preserved() {
+        // Cells mix `<a:p/>` (self-closing), `<a:p><a:endParaRPr/></a:p>` and
+        // text paragraphs; all must project to paragraphs so the mirror can
+        // tell an empty cell from a `{}` paragraph.
+        let xml = br#"
+        <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr/>
+            <p:graphicFrame>
+              <p:nvGraphicFramePr><p:cNvPr id="2" name="Table 1"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+              <p:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></p:xfrm>
+              <a:graphic><a:graphicData uri="table"><a:tbl>
+                <a:tblPr/>
+                <a:tblGrid><a:gridCol w="5"/><a:gridCol w="6"/></a:tblGrid>
+                <a:tr h="7">
+                  <a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:r><a:t>H</a:t></a:r></a:p><a:p/></a:txBody></a:tc>
+                  <a:tc><a:tcPr/><a:txBody><a:bodyPr/><a:p><a:endParaRPr/></a:p></a:txBody></a:tc>
+                </a:tr>
+              </a:tbl></a:graphicData></a:graphic>
+            </p:graphicFrame>
+          </p:spTree></p:cSld>
+        </p:sld>
+        "#;
+        let shapes = parse_slide_shapes(xml, &empty_map()).unwrap();
+        assert_eq!(shapes.len(), 1);
+        let table = shapes[0].table.as_ref().expect("table parsed");
+        let cells = &table.rows[0].cells;
+        assert_eq!(cells.len(), 2);
+
+        let tf0 = cells[0].text_frame.as_ref().unwrap();
+        assert_eq!(tf0.paragraphs.len(), 2, "text + self-closing <a:p/>");
+        assert_eq!(tf0.paragraphs[0].runs[0].text, "H");
+        assert!(
+            tf0.paragraphs[1].runs.is_empty(),
+            "self-closing <a:p/> is an empty paragraph"
+        );
+
+        let tf1 = cells[1].text_frame.as_ref().unwrap();
+        assert_eq!(tf1.paragraphs.len(), 1);
+        assert!(
+            tf1.paragraphs[0].runs.is_empty(),
+            "<a:p><a:endParaRPr/></a:p> is an empty paragraph"
         );
     }
 }
