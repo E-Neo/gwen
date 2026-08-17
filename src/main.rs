@@ -16,12 +16,12 @@ fn main() -> miette::Result<()> {
         Commands::Markdown { input, media } => {
             commands::markdown::execute(&input, media.as_deref())?;
         }
-        Commands::Update {
+        Commands::Build {
             input,
             markdown,
             output,
         } => {
-            commands::update::execute(&input, &markdown, &output)?;
+            commands::build::execute(&input, &markdown, &output)?;
         }
     }
 

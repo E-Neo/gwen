@@ -110,22 +110,11 @@ fn val<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
     obj.get(key).filter(|v| !is_null(v))
 }
 
-/// CSS declarations for a shape. Styling only: geometry, identity and grid
-/// live in the shape marker's HTML attributes (`<!-- shape class="..."
-/// name="..." left="..." ... -->`).
+/// CSS declarations for a shape. Styling only: identity lives in the shape
+/// marker's `type=`/`auto-shape=` attributes and geometry in its `name`,
+/// `left/top/width/height`, `rotation`, `grid` and `crop-*` attributes.
 pub fn shape_decls(shape: &Map<String, Value>) -> Vec<Decl> {
     let mut out = Vec::new();
-    out.push(Decl::new(
-        "--pptx-type",
-        shape
-            .get("shape_type")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_ascii_lowercase(),
-    ));
-    if let Some(v) = val(shape, "auto_shape_type").and_then(Value::as_str) {
-        out.push(Decl::new("--pptx-auto-shape", v.to_ascii_lowercase()));
-    }
     if let Some(fill) = val(shape, "fill").and_then(Value::as_object) {
         push_fill_decl(&mut out, "fill", fill);
     }
@@ -300,21 +289,34 @@ fn decl_f64(decls: &[Decl], prop: &str) -> Option<f64> {
     decl_str(decls, prop).and_then(|v| v.parse().ok())
 }
 
-/// Rebuild a shape object from its style declarations. Geometry, identity and
-/// grid are read from the shape marker's HTML attributes (see `shape_attrs`).
+/// Whether a class carries paragraph-level declarations (a default paragraph
+/// style folded into the shape class). Every text frame with a
+/// `default_paragraph_style` folds those declarations into its shape class, so
+/// their presence is exactly the presence of the default style.
+pub fn has_para_decls(decls: &[Decl]) -> bool {
+    decls.iter().any(|d| {
+        matches!(
+            d.prop.as_str(),
+            "text-align"
+                | "--pptx-level"
+                | "line-height"
+                | "--pptx-space-before"
+                | "--pptx-space-after"
+                | "font-size"
+                | "font-family"
+                | "font-weight"
+                | "font-style"
+                | "text-decoration"
+                | "color"
+        )
+    })
+}
+
+/// Rebuild a shape object from its style declarations. Fill and outline only:
+/// the shape's `shape_type`/`auto_shape_type` come from the marker's
+/// `type=`/`auto-shape=` attributes and its geometry from `shape_attrs`.
 pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
     let mut shape = Map::new();
-    if let Some(ty) = decl_str(decls, "--pptx-type") {
-        shape.insert("shape_type".into(), Value::String(ty.to_ascii_uppercase()));
-    } else {
-        shape.insert("shape_type".into(), Value::String(String::new()));
-    }
-    if let Some(v) = decl_str(decls, "--pptx-auto-shape") {
-        shape.insert(
-            "auto_shape_type".into(),
-            Value::String(v.to_ascii_lowercase()),
-        );
-    }
     if let Some(fill) = fill_from_decl(decl_str(decls, "fill")) {
         shape.insert("fill".into(), fill);
     }
@@ -326,7 +328,8 @@ pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
 
 /// Apply the `name`, `left/top/width/height`, `rotation`, `grid` and
 /// `crop-*` attributes from a shape marker onto a shape object. Attributes are
-/// only present when the value was non-null in the source snapshot.
+/// only present when the value was non-null in the source snapshot. Lengths
+/// accept raw EMU or a unit suffix (`1in`, `3cm`, `25mm`, `72pt`, `96px`).
 pub fn shape_attrs(shape: &mut Map<String, Value>, attrs: &[(String, String)]) {
     for (key, value) in attrs {
         match key.as_str() {
@@ -334,7 +337,7 @@ pub fn shape_attrs(shape: &mut Map<String, Value>, attrs: &[(String, String)]) {
                 shape.insert("name".into(), Value::String(value.clone()));
             }
             "left" | "top" | "width" | "height" => {
-                if let Ok(v) = value.parse::<i64>() {
+                if let Some(v) = super::markers::parse_length(value) {
                     shape.insert(key.clone(), Value::from(v));
                 }
             }

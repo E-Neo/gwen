@@ -101,6 +101,18 @@ impl Package {
         self.parts.get(uri).map(|v| v.as_slice())
     }
 
+    pub fn part_exists(&self, uri: &str) -> bool {
+        self.parts.contains_key(uri)
+    }
+
+    pub fn part_uris(&self) -> impl Iterator<Item = &String> {
+        self.parts.keys()
+    }
+
+    pub fn rels_uris(&self) -> impl Iterator<Item = (&String, &HashMap<String, Relationship>)> {
+        self.relationships.iter()
+    }
+
     pub fn set_part(&mut self, uri: &str, data: Vec<u8>) {
         self.parts.insert(uri.to_string(), data);
     }
@@ -229,6 +241,20 @@ impl Package {
         let mut max_num = 0u32;
         for key in self.parts.keys() {
             if let Some(rest) = key.strip_prefix("ppt/notesSlides/notesSlide")
+                && let Some(num_str) = rest.strip_suffix(".xml")
+                && let Ok(n) = num_str.parse::<u32>()
+                && n > max_num
+            {
+                max_num = n;
+            }
+        }
+        max_num + 1
+    }
+
+    pub fn get_next_slide_num(&self) -> u32 {
+        let mut max_num = 0u32;
+        for key in self.parts.keys() {
+            if let Some(rest) = key.strip_prefix("ppt/slides/slide")
                 && let Some(num_str) = rest.strip_suffix(".xml")
                 && let Ok(n) = num_str.parse::<u32>()
                 && n > max_num

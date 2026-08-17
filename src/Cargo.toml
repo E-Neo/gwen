@@ -18,3 +18,4 @@ serde_json = "1.0.151"
 [dev-dependencies]
 serde_json = "1.0.151"
 zip = { version = "8.6.0", features = ["deflate"] }
+quick-xml = "0.41.0"

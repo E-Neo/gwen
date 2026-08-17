@@ -137,8 +137,12 @@ pub fn apply_edit(pkg: &mut Package, pres: &Presentation, edit: &Edit) -> AppRes
             slide_idx: Some(i),
             remaining,
         } => {
-            let uri = slide_uri(pres, *i)?.to_string();
-            apply_slide_edit(pkg, &uri, remaining, edit)
+            if remaining.is_empty() {
+                apply_slide_list_edit(pkg, pres, *i, edit)
+            } else {
+                let uri = slide_uri(pres, *i)?.to_string();
+                apply_slide_edit(pkg, &uri, remaining, edit)
+            }
         }
         path::ResolvedPath::Slide { .. } => Err(AppError::PathParse(
             "Slide index required (e.g. slides[0])".to_string(),
@@ -231,6 +235,11 @@ fn apply_presentation_edit(
                         "core_properties takes a property name".to_string(),
                     ));
                 }
+                EditOp::Replace => {
+                    return Err(AppError::PathParse(
+                        "core_properties takes a property name".to_string(),
+                    ));
+                }
             }
             Ok(())
         }
@@ -261,6 +270,185 @@ fn apply_theme_edit(pkg: &mut Package, remaining: &[PathSegment], edit: &Edit) -
     let data = read_part(pkg, &theme_uri)?;
     let new = xml_edit::replace_theme_property(&data, remaining, &scalar(value))?;
     pkg.set_part(&theme_uri, new);
+    Ok(())
+}
+
+const PRESENTATION_SLIDE_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+
+/// Add or remove a whole slide (`slides[i]`). These are the only edits that
+/// reshape the slide list, so the build engine applies them last.
+fn apply_slide_list_edit(
+    pkg: &mut Package,
+    pres: &Presentation,
+    idx: usize,
+    edit: &Edit,
+) -> AppResult<()> {
+    match edit.op {
+        EditOp::Delete => {
+            let uri = slide_uri(pres, idx)?.to_string();
+            remove_slide(pkg, idx, &uri)
+        }
+        EditOp::Insert => {
+            let value = edit
+                .value
+                .as_ref()
+                .ok_or_else(|| AppError::InvalidValue("slide value required".to_string()))?;
+            insert_slide(pkg, idx, value)
+        }
+        EditOp::Replace => {
+            let uri = slide_uri(pres, idx)?.to_string();
+            let value = edit
+                .value
+                .as_ref()
+                .ok_or_else(|| AppError::InvalidValue("slide value required".to_string()))?;
+            replace_slide(pkg, &uri, value)
+        }
+        EditOp::Set => Err(AppError::PathParse(format!(
+            "slides[{idx}] is a slide; set a field inside it (slides[{idx}].shapes[...])"
+        ))),
+    }
+}
+
+fn remove_slide(pkg: &mut Package, idx: usize, uri: &str) -> AppResult<()> {
+    let pres_uri = "ppt/presentation.xml";
+    let data = read_part(pkg, pres_uri)?;
+    let new = editor::remove_slide_ref(&data, idx)?;
+    pkg.set_part(pres_uri, new);
+
+    let rels = pkg
+        .get_rels(pres_uri)
+        .ok_or_else(|| AppError::PartNotFound(format!("{pres_uri} rels")))?;
+    let r_id = rels
+        .values()
+        .find(|r| pkg.resolve_relationship_target(pres_uri, r) == Some(uri.to_string()))
+        .map(|r| r.id.clone());
+    if let Some(id) = r_id {
+        pkg.remove_relationship(pres_uri, &id);
+    }
+
+    delete_notes_slide(pkg, uri)?;
+    pkg.remove_all_relationships(uri);
+    pkg.remove_part(uri);
+    pkg.remove_content_type_override(&format!("/{uri}"))?;
+    Ok(())
+}
+
+fn insert_slide(pkg: &mut Package, idx: usize, value: &Value) -> AppResult<()> {
+    let slide_dto: crate::dto::SlideDto = serde_json::from_value({
+        let mut value = value.clone();
+        if let Some(shapes) = value.get_mut("shapes").and_then(|s| s.as_array_mut()) {
+            for shape in shapes.iter_mut() {
+                *shape = update_diff::insert_shape_defaults(shape);
+            }
+        }
+        value
+    })
+    .map_err(|e| AppError::InvalidValue(format!("Invalid slide JSON: {e}")))?;
+
+    let slide_xml = factory::generate_slide_xml(&slide_dto)?;
+    let slide_num = pkg.get_next_slide_num();
+    let uri = format!("ppt/slides/slide{}.xml", slide_num);
+    pkg.set_part(&uri, slide_xml);
+    pkg.add_content_type_override(
+        &format!("/{uri}"),
+        "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+    )?;
+
+    let current_pres = crate::engine::query::load_presentation(pkg)?;
+    let layout_src = current_pres
+        .slide_uris
+        .get(idx.min(current_pres.slide_uris.len().saturating_sub(1)))
+        .cloned();
+    if let Some(src_uri) = layout_src
+        && let Some(rel) = pkg
+            .get_rels(&src_uri)
+            .and_then(|rels| rels.values().find(|r| r.rel_type.contains("slideLayout")))
+    {
+        pkg.add_relationship(
+            &uri,
+            crate::opc::relationship::Relationship {
+                id: String::new(),
+                target: rel.target.clone(),
+                target_mode: rel.target_mode.clone(),
+                rel_type: rel.rel_type.clone(),
+            },
+        );
+    }
+
+    let pres_uri = "ppt/presentation.xml";
+    let r_id = pkg.add_relationship(
+        pres_uri,
+        crate::opc::relationship::Relationship {
+            id: String::new(),
+            target: format!("slides/slide{}.xml", slide_num),
+            target_mode: None,
+            rel_type: PRESENTATION_SLIDE_REL_TYPE.to_string(),
+        },
+    );
+    let pres_data = read_part(pkg, pres_uri)?;
+    let max_slide_id = factory::find_max_slide_id(&pres_data);
+    let new = editor::insert_slide_ref(&pres_data, idx, &r_id, max_slide_id + 1)?;
+    pkg.set_part(pres_uri, new);
+
+    set_slide_background_from_value(pkg, &uri, value)?;
+
+    if let Some(notes) = value.get("notes").and_then(|n| n.as_object()) {
+        let notes_value = serde_json::json!(notes);
+        create_notes_slide(pkg, &uri, &notes_value)?;
+    }
+
+    Ok(())
+}
+
+/// Apply the slide's `background` snapshot to a part (set only when the mirror
+/// carries a solid fill color; the fill kind is marker metadata).
+fn set_slide_background_from_value(pkg: &mut Package, uri: &str, value: &Value) -> AppResult<()> {
+    let Some(color) = value
+        .get("background")
+        .and_then(|b| b.as_object())
+        .and_then(|b| b.get("fill"))
+        .and_then(|f| f.get("color"))
+        .and_then(|c| {
+            c.get("rgb")
+                .or_else(|| c.get("theme_color"))
+                .and_then(Value::as_str)
+        })
+    else {
+        return Ok(());
+    };
+    let data = read_part(pkg, uri)?;
+    let new = xml_edit::set_slide_background(&data, color)?;
+    pkg.set_part(uri, new);
+    Ok(())
+}
+
+/// Regenerate an existing slide's content in place. The part URI, layout
+/// relationship, slide id and notes relationship all survive; only the shapes
+/// (and background) are rebuilt from the mirror snapshot.
+fn replace_slide(pkg: &mut Package, uri: &str, value: &Value) -> AppResult<()> {
+    let slide_dto: crate::dto::SlideDto = serde_json::from_value({
+        let mut value = value.clone();
+        if let Some(shapes) = value.get_mut("shapes").and_then(|s| s.as_array_mut()) {
+            for shape in shapes.iter_mut() {
+                *shape = update_diff::insert_shape_defaults(shape);
+            }
+        }
+        value
+    })
+    .map_err(|e| AppError::InvalidValue(format!("Invalid slide JSON: {e}")))?;
+
+    let slide_xml = factory::generate_slide_xml(&slide_dto)?;
+    pkg.set_part(uri, slide_xml);
+
+    set_slide_background_from_value(pkg, uri, value)?;
+
+    delete_notes_slide(pkg, uri)?;
+    if let Some(notes) = value.get("notes").and_then(|n| n.as_object()) {
+        let notes_value = serde_json::json!(notes);
+        create_notes_slide(pkg, uri, &notes_value)?;
+    }
+
     Ok(())
 }
 
@@ -308,21 +496,6 @@ fn apply_slide_edit(
         [PathSegment::Field(n), tail @ ..] if n == "notes" => {
             apply_notes_edit(pkg, uri, tail, edit)
         }
-        [PathSegment::Field(n)] if n == "title" => match edit.op {
-            EditOp::Set => {
-                let value = edit
-                    .value
-                    .as_ref()
-                    .ok_or(AppError::InvalidValue("title value required".to_string()))?;
-                let data = read_part(pkg, uri)?;
-                let new = xml_edit::replace_slide_title(&data, &scalar(value))?;
-                pkg.set_part(uri, new);
-                Ok(())
-            }
-            _ => Err(AppError::PathParse(
-                "slides[N].title can only be set".to_string(),
-            )),
-        },
         [PathSegment::Field(n), ..] if n == "slide_layout" => Err(AppError::PathParse(
             "slide_layout is a read-only reference; edit the layout via slide_masters".to_string(),
         )),
@@ -363,6 +536,9 @@ fn apply_notes_edit(
                 create_notes_slide(pkg, slide_uri, value)
             }
             EditOp::Insert => Err(AppError::PathParse("notes is not an array".to_string())),
+            EditOp::Replace => Err(AppError::PathParse(
+                "notes is regenerated when its slide is replaced".to_string(),
+            )),
         },
         _ => Err(AppError::PathParse(format!(
             "Unsupported notes path: {}",
@@ -777,8 +953,8 @@ fn run_set(
 ) -> AppResult<Vec<u8>> {
     let [PathSegment::Index(m), tail @ ..] = rest else {
         // Whole-array replacement: a paragraph that gained runs (e.g. an empty
-        // title paragraph that now carries heading text) arrives as a Set on
-        // the `runs` field with no index.
+        // body paragraph that now carries text) arrives as a Set on the `runs`
+        // field with no index.
         return xml_edit::replace_paragraph_runs_lossless(
             xml,
             shape_idx,

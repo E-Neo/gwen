@@ -384,6 +384,7 @@ dependencies = [
  "gwen-md",
  "gwen-pptx",
  "miette",
+ "quick-xml",
  "serde_json",
  "thiserror",
  "zip",

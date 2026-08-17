@@ -22,6 +22,10 @@ pub enum EditOp {
     /// Append `value` to the array at `path` (only ever produced for an index
     /// one past the current end, so it is always an append).
     Insert,
+    /// Regenerate a slide at `path` in place (`slides[i]`): the part keeps its
+    /// URI, layout relationship, notes and slide id; only its content is
+    /// rebuilt from `value`.
+    Replace,
 }
 
 #[derive(Debug, Clone)]
@@ -40,10 +44,10 @@ pub struct Edit {
 ///   is added, and `null` also deletes. Read-only fields (see
 ///   `engine::readonly`) are never edited: when absent from `new` they are
 ///   left untouched.
-/// - Arrays of shapes, paragraphs, runs, table rows, cells and grid columns
-///   are matched element-by-element by content fingerprint in document order,
-///   so an insertion or removal does not rewrite untouched siblings. Other
-///   arrays are positional full assertions.
+/// - Arrays of slides, shapes, paragraphs, runs and grid columns are matched
+///   element-by-element by content fingerprint in document order, so an
+///   insertion or removal does not rewrite untouched siblings. Other arrays
+///   are positional full assertions.
 /// - An inserted element targets its index in the new document; the apply
 ///   engine inserts at that position.
 /// - Identical leaf values produce no edit.
@@ -158,6 +162,41 @@ fn diff_array(out: &mut Vec<Edit>, path: &[PathSegment], cur: &Value, new: &Valu
             });
         }
     }
+    // A slide whose shape signature changed (a shape added or removed) is
+    // unmatched on both sides. When it was edited at the same index it was at,
+    // regenerate it in place: a `Replace` keeps the part URI, layout
+    // relationship, notes and slide id, so a shape edit never churns part
+    // names or reassigns layouts. Genuine insertions and removals stay
+    // Insert/Delete (reorders fall out as delete+insert, documented loss).
+    let (unmatched_cur, unmatched_new) = if kind == "slides" {
+        for ni in &unmatched_new {
+            if unmatched_cur.contains(ni) {
+                let mut p = path.to_vec();
+                p.push(PathSegment::Index(*ni));
+                out.push(Edit {
+                    path: p,
+                    op: EditOp::Replace,
+                    value: Some(new_arr[*ni].clone()),
+                });
+            }
+        }
+        let paired: Vec<usize> = unmatched_new
+            .iter()
+            .copied()
+            .filter(|ni| unmatched_cur.contains(ni))
+            .collect();
+        let unmatched_cur = unmatched_cur
+            .into_iter()
+            .filter(|ci| !paired.contains(ci))
+            .collect();
+        let unmatched_new = unmatched_new
+            .into_iter()
+            .filter(|ni| !paired.contains(ni))
+            .collect();
+        (unmatched_cur, unmatched_new)
+    } else {
+        (unmatched_cur, unmatched_new)
+    };
     for ci in unmatched_cur {
         let mut p = path.to_vec();
         p.push(PathSegment::Index(ci));
@@ -239,6 +278,7 @@ fn diff_array_positional(
 fn array_kind(path: &[PathSegment]) -> Option<&'static str> {
     path.iter().rev().find_map(|seg| match seg {
         PathSegment::Field(f) => match f.as_str() {
+            "slides" => Some("slides"),
             "shapes" => Some("shapes"),
             "paragraphs" => Some("paragraphs"),
             "runs" => Some("runs"),
@@ -253,6 +293,8 @@ fn array_kind(path: &[PathSegment]) -> Option<&'static str> {
 /// documents. The fingerprint must not change when the element is edited in
 /// place, so that untouched siblings stay matched when an insertion or removal
 /// shifts them:
+/// - slides identify by the ordered signature of their shapes (`type|name`),
+///   so text and style edits inside a slide stay matched;
 /// - shapes identify by type and name (geometry and text edits stay matched);
 /// - paragraphs identify by style (text edits stay matched);
 /// - runs identify by formatting (text edits stay matched);
@@ -262,6 +304,23 @@ fn array_kind(path: &[PathSegment]) -> Option<&'static str> {
 ///   instead of rebuilding the row or cell from defaults.
 fn fingerprint(kind: &str, v: &Value) -> String {
     match kind {
+        "slides" => {
+            let Some(obj) = v.as_object() else {
+                return String::new();
+            };
+            let Some(shapes) = obj.get("shapes").and_then(Value::as_array) else {
+                return String::new();
+            };
+            let sig: Vec<String> = shapes
+                .iter()
+                .map(|s| {
+                    let ty = s.get("shape_type").and_then(Value::as_str).unwrap_or("");
+                    let name = s.get("name").and_then(Value::as_str).unwrap_or("");
+                    format!("{ty}|{name}")
+                })
+                .collect();
+            sig.join(";")
+        }
         "shapes" => {
             let Some(obj) = v.as_object() else {
                 return String::new();
@@ -399,30 +458,61 @@ pub fn insert_shape_defaults(v: &Value) -> Value {
 ///
 /// Sets are applied first (they address original array positions). Deletes
 /// next, highest index first, so removing a low index cannot shift an element
-/// whose edit was already applied. Inserts last, since they always append.
+/// whose edit was already applied. Element inserts next (they append into the
+/// arrays of their parents, which still sit at their original positions).
+///
+/// Slide-list edits run last: they are the only edits that reshape the slide
+/// array itself, so every edit addressing a slide by its original index must
+/// complete first. Slide-list deletes then run highest-index-first (they
+/// address original positions in the untouched array), and slide-list inserts
+/// ascending by target index (each new-document index stays valid as the
+/// array grows).
 pub fn order_edits(edits: Vec<Edit>) -> Vec<Edit> {
-    let mut deletes: Vec<Edit> = edits
-        .iter()
-        .filter(|e| e.op == EditOp::Delete)
-        .cloned()
-        .collect();
-    let mut sets: Vec<Edit> = edits
-        .iter()
-        .filter(|e| e.op == EditOp::Set)
-        .cloned()
-        .collect();
-    let mut inserts: Vec<Edit> = edits
-        .iter()
-        .filter(|e| e.op == EditOp::Insert)
-        .cloned()
-        .collect();
+    let mut deletes: Vec<Edit> = Vec::new();
+    let mut sets: Vec<Edit> = Vec::new();
+    let mut element_inserts: Vec<Edit> = Vec::new();
+    let mut slide_deletes: Vec<Edit> = Vec::new();
+    let mut slide_inserts: Vec<Edit> = Vec::new();
+
+    for edit in edits {
+        match edit.op {
+            EditOp::Set | EditOp::Replace => sets.push(edit),
+            EditOp::Delete => {
+                if is_slide_list_edit(&edit) {
+                    slide_deletes.push(edit);
+                } else {
+                    deletes.push(edit);
+                }
+            }
+            EditOp::Insert => {
+                if is_slide_list_edit(&edit) {
+                    slide_inserts.push(edit);
+                } else {
+                    element_inserts.push(edit);
+                }
+            }
+        }
+    }
 
     deletes.sort_by_key(|a| std::cmp::Reverse(terminal_index(a)));
-    inserts.sort_by_key(terminal_index);
+    element_inserts.sort_by_key(terminal_index);
+    slide_deletes.sort_by_key(|a| std::cmp::Reverse(terminal_index(a)));
+    slide_inserts.sort_by_key(terminal_index);
 
     sets.append(&mut deletes);
-    sets.append(&mut inserts);
+    sets.append(&mut element_inserts);
+    sets.append(&mut slide_deletes);
+    sets.append(&mut slide_inserts);
     sets
+}
+
+/// Whether the edit targets the slide list itself (`slides[i]`) rather than a
+/// slide's contents. Only slide-list edits change the slide array's shape.
+fn is_slide_list_edit(edit: &Edit) -> bool {
+    matches!(
+        edit.path.as_slice(),
+        [PathSegment::Field(f), PathSegment::Index(_)] if f == "slides"
+    )
 }
 
 /// The array index addressed by the final `Index` segment of the path, or
@@ -595,5 +685,89 @@ mod tests {
         assert_eq!(ordered[0].path, vec![index(1), field("b")]);
         assert_eq!(ordered[1].op, EditOp::Delete);
         assert_eq!(ordered[1].path, vec![index(0)]);
+    }
+
+    fn slide(name: &str) -> Value {
+        json!({ "shapes": [{"shape_type": "TEXT_BOX", "name": name}] })
+    }
+
+    #[test]
+    fn slide_shape_edit_is_a_replace() {
+        // A slide that gains a shape at its original index is regenerated in
+        // place rather than deleted and reinserted.
+        let cur = json!({ "slides": [slide("A"), slide("B"), slide("C")] });
+        let new = json!({
+            "slides": [
+                slide("A"),
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "B"}, {"shape_type": "TEXT_BOX", "name": "New"}] },
+                slide("C")
+            ]
+        });
+        let edits = diff(&cur, &new);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].op, EditOp::Replace);
+        assert_eq!(edits[0].path, vec![field("slides"), index(1)]);
+    }
+
+    #[test]
+    fn slide_insert_in_middle_is_an_insert() {
+        let cur = json!({ "slides": [slide("A"), slide("B")] });
+        let new = json!({ "slides": [slide("A"), slide("X"), slide("B")] });
+        let edits = diff(&cur, &new);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].op, EditOp::Insert);
+        assert_eq!(edits[0].path, vec![field("slides"), index(1)]);
+    }
+
+    #[test]
+    fn slide_removal_is_a_delete() {
+        let cur = json!({ "slides": [slide("A"), slide("B"), slide("C")] });
+        let new = json!({ "slides": [slide("A"), slide("C")] });
+        let edits = diff(&cur, &new);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].op, EditOp::Delete);
+        assert_eq!(edits[0].path, vec![field("slides"), index(1)]);
+    }
+
+    #[test]
+    fn slide_reorder_is_delete_plus_insert() {
+        let cur = json!({ "slides": [slide("A"), slide("B"), slide("C")] });
+        let new = json!({ "slides": [slide("C"), slide("A"), slide("B")] });
+        let edits = diff(&cur, &new);
+        let mut ops: Vec<EditOp> = edits.iter().map(|e| e.op).collect();
+        ops.sort_by_key(|o| match o {
+            EditOp::Delete => 0,
+            _ => 1,
+        });
+        assert_eq!(ops, vec![EditOp::Delete, EditOp::Insert]);
+        assert_eq!(edits[0].path, vec![field("slides"), index(2)]);
+        assert_eq!(edits[1].path, vec![field("slides"), index(0)]);
+    }
+
+    #[test]
+    fn slide_replace_and_insert_ordering() {
+        // A slide edited in place (shape added, so its signature changed) is a
+        // Replace and must apply before a slide-list insert, which reshapes
+        // the slide array.
+        let cur = json!({
+            "slides": [
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "A"}] },
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "B"}] }
+            ]
+        });
+        let new = json!({
+            "slides": [
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "A"}, {"shape_type": "TEXT_BOX", "name": "X"}] },
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "Z"}] },
+                { "shapes": [{"shape_type": "TEXT_BOX", "name": "B"}] }
+            ]
+        });
+        let edits = diff(&cur, &new);
+        assert_eq!(edits.len(), 2);
+        let ordered = order_edits(edits);
+        assert_eq!(ordered[0].op, EditOp::Replace);
+        assert_eq!(ordered[0].path, vec![field("slides"), index(0)]);
+        assert_eq!(ordered[1].op, EditOp::Insert);
+        assert_eq!(ordered[1].path, vec![field("slides"), index(1)]);
     }
 }

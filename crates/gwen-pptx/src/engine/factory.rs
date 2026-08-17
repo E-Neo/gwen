@@ -391,6 +391,39 @@ pub fn find_max_shape_id(xml_bytes: &[u8]) -> u32 {
     max_id
 }
 
+/// The highest `id` attribute among the `p:sldId` slide references in
+/// `presentation.xml`, used to pick the next unique slide id.
+pub fn find_max_slide_id(xml_bytes: &[u8]) -> u32 {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+    let mut max_id = 0u32;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                if e.name().as_ref() == b"p:sldId" {
+                    for attr in e.attributes() {
+                        if let Ok(a) = attr
+                            && a.key.as_ref() == b"id"
+                            && let Ok(v) = String::from_utf8_lossy(&a.value).parse::<u32>()
+                            && v > max_id
+                        {
+                            max_id = v;
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            _ => {}
+        }
+    }
+    max_id
+}
+
 fn write_open_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, attrs: &[(&str, &str)]) {
     use quick_xml::events::{BytesStart, Event};
     let mut elem = BytesStart::new(name);
@@ -423,6 +456,77 @@ fn write_text_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, text: &str) 
         .write_event(Event::Text(BytesText::new(text)))
         .unwrap();
     writer.write_event(Event::End(BytesEnd::new(name))).unwrap();
+}
+
+/// Generate a slide (`p:sld`) part from its DTO snapshot. Shapes with a
+/// `shape_id` of 0 (the sentinel the markdown parser emits for an omitted id)
+/// are assigned unique ids starting from 2 (the spTree group owns id 1).
+pub fn generate_slide_xml(slide: &SlideDto) -> AppResult<Vec<u8>> {
+    use quick_xml::events::BytesStart;
+
+    let mut shapes = slide.shapes.clone();
+    let mut next_id = shapes.iter().map(|s| s.shape_id).max().unwrap_or(0).max(2);
+    for shape in shapes.iter_mut() {
+        if shape.shape_id == 0 {
+            shape.shape_id = next_id;
+            next_id += 1;
+        }
+    }
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    let mut sld = BytesStart::new("p:sld");
+    sld.push_attribute((
+        "xmlns:a",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+    ));
+    sld.push_attribute((
+        "xmlns:r",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    ));
+    sld.push_attribute((
+        "xmlns:p",
+        "http://schemas.openxmlformats.org/presentationml/2006/main",
+    ));
+    write_open_tag_full(&mut writer, &sld);
+
+    write_open_tag(&mut writer, "p:cSld", &[]);
+    write_open_tag(&mut writer, "p:spTree", &[]);
+
+    write_open_tag(&mut writer, "p:nvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:cNvPr", &[("id", "1"), ("name", "")]);
+    write_empty_tag(&mut writer, "p:cNvGrpSpPr", &[]);
+    write_empty_tag(&mut writer, "p:nvPr", &[]);
+    write_close_tag(&mut writer, "p:nvGrpSpPr");
+
+    write_open_tag(&mut writer, "p:grpSpPr", &[]);
+    write_open_tag(&mut writer, "a:xfrm", &[]);
+    write_empty_tag(&mut writer, "a:off", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:ext", &[("cx", "0"), ("cy", "0")]);
+    write_empty_tag(&mut writer, "a:chOff", &[("x", "0"), ("y", "0")]);
+    write_empty_tag(&mut writer, "a:chExt", &[("cx", "0"), ("cy", "0")]);
+    write_close_tag(&mut writer, "a:xfrm");
+    write_close_tag(&mut writer, "p:grpSpPr");
+
+    for shape in &shapes {
+        let xml = crate::dto::xml::shape_to_xml(shape);
+        writer
+            .get_mut()
+            .write_all(xml.as_bytes())
+            .map_err(crate::error::AppError::Io)?;
+    }
+
+    write_close_tag(&mut writer, "p:spTree");
+    write_close_tag(&mut writer, "p:cSld");
+
+    write_open_tag(&mut writer, "p:clrMapOvr", &[]);
+    write_empty_tag(&mut writer, "a:masterClrMapping", &[]);
+    write_close_tag(&mut writer, "p:clrMapOvr");
+
+    write_close_tag(&mut writer, "p:sld");
+
+    let inner = writer.into_inner().into_inner();
+    Ok(inner)
 }
 
 /// Generate a notes slide (`p:notes`) part with the given shapes. When no

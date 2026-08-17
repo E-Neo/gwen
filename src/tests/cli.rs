@@ -41,13 +41,13 @@ fn markdown(input: &Path) -> String {
 }
 
 /// Apply a markdown mirror to `input`, producing a new deck in a temp dir.
-fn update(input: &Path, md: &str) -> PathBuf {
+fn build(input: &Path, md: &str) -> PathBuf {
     let dir = tmp();
     let md_file = dir.join("deck.md");
     std::fs::write(&md_file, md).unwrap();
     let output = dir.join("out.pptx");
     run_ok(&[
-        "update",
+        "build",
         "--input",
         input.to_str().unwrap(),
         "--markdown",
@@ -172,19 +172,19 @@ fn markdown_extracts_media_with_media_flag() {
         "extracted bytes match the embedded image"
     );
     assert!(
-        md.contains("--pptx-type: picture"),
+        md.contains("type=\"picture\""),
         "picture shape serialized into the mirror"
     );
 }
 
 #[test]
-fn update_core_properties_roundtrip() {
+fn build_core_properties_roundtrip() {
     let md = markdown(&fixture("template.pptx"));
     let edited = md.replace(
         "comments: \"generated using python-pptx\"",
         "comments: \"My Deck\"",
     );
-    let out = update(&fixture("template.pptx"), &edited);
+    let out = build(&fixture("template.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         out_md.contains("comments: \"My Deck\""),
@@ -193,10 +193,10 @@ fn update_core_properties_roundtrip() {
 }
 
 #[test]
-fn update_run_text_roundtrip() {
+fn build_run_text_roundtrip() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("\nAlpha\n", "\nChanged\n");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("Changed"),
@@ -209,10 +209,10 @@ fn update_run_text_roundtrip() {
 }
 
 #[test]
-fn update_rich_text_formatting() {
+fn build_rich_text_formatting() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("\nAlpha\n", "\n**Alpha**\n");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
         slide_xml.contains("<a:rPr b=\"1\">"),
@@ -225,41 +225,42 @@ fn update_rich_text_formatting() {
 }
 
 #[test]
-fn update_title_edit() {
-    // A title placeholder's paragraph[0] is the `## ` heading; editing the
-    // heading must write through to the title shape's first run.
-    let md = markdown(&fixture("two_slides.pptx"));
-    let _ = md; // two_slides has no title placeholder; exercise via a real one below.
+fn build_placeholder_text_edit() {
+    // A placeholder's paragraph[0] is a normal body paragraph in the mirror;
+    // editing it writes through to the placeholder's first run.
     let md = markdown(&fixture("placeholder.pptx"));
-    let edited = md.replacen("\n## \n", "\n## Reworked title\n", 1);
-    let out = update(&fixture("placeholder.pptx"), &edited);
+    let edited = md.replace(
+        "name=\"Title 1\" left=\"685800\" top=\"2130425\" width=\"7772400\" height=\"1470025\" -->\n<span></span>\n\n",
+        "name=\"Title 1\" left=\"685800\" top=\"2130425\" width=\"7772400\" height=\"1470025\" -->\nReworked title\n\n",
+    );
+    let out = build(&fixture("placeholder.pptx"), &edited);
     let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
         slide_xml.contains("Reworked title"),
-        "title text written to the slide"
+        "placeholder text written to the slide"
     );
     let out_md = markdown(&out);
     assert!(
-        out_md.contains("\n## Reworked title\n"),
-        "edited title round-trips through the heading"
+        slide_block(&out_md, 0).contains("Reworked title"),
+        "edited placeholder text round-trips"
     );
 }
 
 #[test]
-fn update_whole_paragraph_replace() {
+fn build_whole_paragraph_replace() {
     // Replace a paragraph with two: a bold+size run (via a style block class)
     // and a centered one.
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md
         .replace(
-            "<!-- text-frame class=\"tf-4\" -->\nAlpha\n",
-            "<!-- text-frame class=\"tf-4\" -->\n<span class=\"run-1\">Hi</span>\n\n<!-- paragraph class=\"center-para\" -->\nThere\n",
+            "\nAlpha\n",
+            "\n<span class=\"run-1\">Hi</span>\n\n<!-- paragraph class=\"center-para\" -->\nThere\n",
         )
         .replace(
             "</style>",
             ".run-1 {\n    font-size: 2000;\n    font-weight: bold;\n}\n.center-para {\n    text-align: center;\n}\n</style>",
         );
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
@@ -273,24 +274,24 @@ fn update_whole_paragraph_replace() {
 }
 
 #[test]
-fn update_delete_paragraph() {
+fn build_delete_paragraph() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("\nAlpha\n", "\n\n");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(!block.contains("Alpha"), "paragraph removed from the shape");
     assert!(
-        block.contains("<!-- shape class=\"textbox-1\""),
+        block.contains("<!-- shape "),
         "shape survives the paragraph removal"
     );
 }
 
 #[test]
-fn update_append_paragraph() {
+fn build_append_paragraph() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("Alpha\n\n\n## Slide 2", "Alpha\n\nAppended\n\n## Slide 2");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("Appended"),
@@ -299,13 +300,13 @@ fn update_append_paragraph() {
 }
 
 #[test]
-fn update_background_roundtrip() {
+fn build_background_roundtrip() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace(
-        "## Slide 1\n\n<!-- shape class=\"textbox-1\"",
-        "## Slide 1\n\n<!-- background fill=\"SOLID:FF00FF\" -->\n\n<!-- shape class=\"textbox-1\"",
+        "## Slide 1\n\n<!-- shape type=\"textbox\"",
+        "## Slide 1\n\n<!-- background fill=\"SOLID:FF00FF\" -->\n\n<!-- shape type=\"textbox\"",
     );
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let slide1_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
         slide1_xml.contains("<a:srgbClr val=\"FF00FF\"/>"),
@@ -316,10 +317,10 @@ fn update_background_roundtrip() {
 }
 
 #[test]
-fn update_table_cell_text() {
+fn build_table_cell_text() {
     let md = markdown(&fixture("table_chart.pptx"));
     let edited = md.replace("\n| A |  |\n", "\n| Zed |  |\n");
-    let out = update(&fixture("table_chart.pptx"), &edited);
+    let out = build(&fixture("table_chart.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("| Zed |  |"),
@@ -328,10 +329,10 @@ fn update_table_cell_text() {
 }
 
 #[test]
-fn update_table_cell_text_cleared() {
+fn build_table_cell_text_cleared() {
     let md = markdown(&fixture("table_chart.pptx"));
     let edited = md.replace("\n| A |  |\n", "\n|  |  |\n");
-    let out = update(&fixture("table_chart.pptx"), &edited);
+    let out = build(&fixture("table_chart.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("|  |  |"),
@@ -342,11 +343,11 @@ fn update_table_cell_text_cleared() {
 }
 
 #[test]
-fn update_delete_shape() {
+fn build_delete_shape() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let block = "<!-- shape class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\n<!-- text-frame class=\"tf-4\" -->\nAlpha\n\n\n## Slide 2";
+    let block = "<!-- shape type=\"textbox\" auto-shape=\"rect\" class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\nAlpha\n\n\n## Slide 2";
     let edited = md.replace(block, "## Slide 2");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).is_empty(),
@@ -360,12 +361,12 @@ fn update_delete_shape() {
 }
 
 #[test]
-fn update_theme_roundtrip() {
+fn build_theme_roundtrip() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md
         .replace("accent1: \"4F81BD\"", "accent1: \"FF0000\"")
         .replace("major: \"Calibri\"", "major: \"Arial\"");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(out_md.contains("accent1: \"FF0000\""), "theme color edited");
     assert!(out_md.contains("major: \"Arial\""), "theme font edited");
@@ -382,7 +383,7 @@ fn update_theme_roundtrip() {
 }
 
 #[test]
-fn update_delete_theme_color_by_removing_row_errors() {
+fn build_delete_theme_color_by_removing_row_errors() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("  accent1: \"4F81BD\"\n", "");
     let dir = tmp();
@@ -390,7 +391,7 @@ fn update_delete_theme_color_by_removing_row_errors() {
     std::fs::write(&md_file, &edited).unwrap();
     let status = Command::new(bin())
         .args([
-            "update",
+            "build",
             "--input",
             fixture("two_slides.pptx").to_str().unwrap(),
             "--markdown",
@@ -409,13 +410,15 @@ fn update_delete_theme_color_by_removing_row_errors() {
 }
 
 #[test]
-fn update_delete_text_frame_by_removing_block() {
+fn build_delete_text_frame_by_removing_block() {
+    // A shape's text frame is implied by its body paragraphs; removing them
+    // all (leaving only the shape marker) deletes the txBody.
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace(
-        "<!-- shape class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\n<!-- text-frame class=\"tf-4\" -->\nAlpha",
-        "<!-- shape class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->",
+        "<!-- shape type=\"textbox\" auto-shape=\"rect\" class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\nAlpha",
+        "<!-- shape type=\"textbox\" auto-shape=\"rect\" class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->",
     );
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let slide_xml = read_zip_entry(&out, "ppt/slides/slide1.xml");
     assert!(
         !slide_xml.contains("<p:txBody"),
@@ -424,7 +427,7 @@ fn update_delete_text_frame_by_removing_block() {
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
-        block.contains("<!-- shape ") && !block.contains("<!-- text-frame"),
+        block.contains("<!-- shape "),
         "shape survives without its text frame"
     );
 }
@@ -446,13 +449,13 @@ fn master_query_exposes_shapes() {
 }
 
 #[test]
-fn update_master_shape_persists() {
+fn build_master_shape_persists() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace(
-        "<!-- shape class=\"placeholder-1\" name=\"Title Placeholder 1\" left=\"457200\" top=\"274638\" width=\"8229600\" height=\"1143000\" -->",
-        "<!-- shape class=\"placeholder-1\" name=\"Title Placeholder 1\" left=\"100000\" top=\"274638\" width=\"8229600\" height=\"1143000\" -->",
+        "<!-- shape type=\"placeholder\" auto-shape=\"rect\" class=\"placeholder-1\" name=\"Title Placeholder 1\" left=\"457200\" top=\"274638\" width=\"8229600\" height=\"1143000\" -->",
+        "<!-- shape type=\"placeholder\" auto-shape=\"rect\" class=\"placeholder-1\" name=\"Title Placeholder 1\" left=\"100000\" top=\"274638\" width=\"8229600\" height=\"1143000\" -->",
     );
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         out_md.contains("left=\"100000\""),
@@ -461,17 +464,17 @@ fn update_master_shape_persists() {
 }
 
 #[test]
-fn update_table_row_add_and_remove_roundtrip() {
+fn build_table_row_add_and_remove_roundtrip() {
     let md = markdown(&fixture("table_chart.pptx"));
     let with_row = md.replace("\n| A |  |\n", "\n| A |  |\n| New |  |\n");
-    let out = update(&fixture("table_chart.pptx"), &with_row);
+    let out = build(&fixture("table_chart.pptx"), &with_row);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("| New |  |"),
         "appended table row present"
     );
 
-    let removed = update(&out, &md);
+    let removed = build(&out, &md);
     let out_md = markdown(&removed);
     assert!(
         !slide_block(&out_md, 0).contains("| New |  |"),
@@ -480,16 +483,11 @@ fn update_table_row_add_and_remove_roundtrip() {
 }
 
 #[test]
-fn update_append_shape() {
+fn build_append_shape() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let new_shape = "<!-- shape class=\"new-textbox\" name=\"New\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nHi\n";
-    let edited = md
-        .replace("\n\n## Slide 2", &format!("\n\n{new_shape}\n\n## Slide 2"))
-        .replace(
-            "</style>",
-            ".new-textbox {\n    --pptx-type: text_box;\n}\n</style>",
-        );
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let new_shape = "<!-- shape type=\"textbox\" name=\"New\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nHi\n";
+    let edited = md.replace("\n\n## Slide 2", &format!("\n\n{new_shape}\n\n## Slide 2"));
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let block = slide_block(&out_md, 0);
     assert!(
@@ -499,26 +497,21 @@ fn update_append_shape() {
 }
 
 #[test]
-fn update_notes_slide_create_and_delete() {
+fn build_notes_slide_create_and_delete() {
     let md = markdown(&fixture("two_slides.pptx"));
-    let notes = "### Notes\n\n<!-- shape class=\"notes-textbox\" name=\"Notes\" left=\"100\" top=\"100\" width=\"500\" height=\"300\" -->\nNotes!\n";
-    let with_notes = md
-        .replace("\n\n## Slide 2", &format!("\n\n{notes}\n\n## Slide 2"))
-        .replace(
-            "</style>",
-            ".notes-textbox {\n    --pptx-type: text_box;\n}\n</style>",
-        );
-    let out = update(&fixture("two_slides.pptx"), &with_notes);
+    let notes = "### Notes\n\n<!-- shape type=\"textbox\" name=\"Notes\" left=\"100\" top=\"100\" width=\"500\" height=\"300\" -->\nNotes!\n";
+    let with_notes = md.replace("\n\n## Slide 2", &format!("\n\n{notes}\n\n## Slide 2"));
+    let out = build(&fixture("two_slides.pptx"), &with_notes);
     let out_md = markdown(&out);
     assert!(
         slide_block(&out_md, 0).contains("Notes!"),
         "notes slide created"
     );
 
-    let deleted = update(&out, &md);
+    let deleted = build(&out, &md);
     let out_md = markdown(&deleted);
     assert!(
-        !out_md.contains("### Notes"),
+        !slide_block(&out_md, 0).contains("### Notes"),
         "notes slide removed when the mirror is reverted"
     );
 }
@@ -528,8 +521,8 @@ fn placeholder_inherits_geometry_and_style() {
     let md = markdown(&fixture("placeholder.pptx"));
     let block = slide_block(&md, 0);
     assert!(
-        block.contains("<!-- title -->") && block.contains("<!-- shape class=\""),
-        "title placeholder serialized with a title marker"
+        block.contains("type=\"placeholder\"") && block.contains("<!-- shape "),
+        "title placeholder serialized as a normal shape"
     );
     assert!(
         md.contains("name=\"Title 1\""),
@@ -542,13 +535,15 @@ fn placeholder_inherits_geometry_and_style() {
 }
 
 #[test]
-fn update_default_paragraph_style_roundtrips() {
+fn build_default_paragraph_style_roundtrips() {
+    // The default paragraph style folds into the shape's styling class; the
+    // folded `.placeholder-6` rule carries the placeholder's dp (plus its fill
+    // and frame properties).
     let md = markdown(&fixture("placeholder.pptx"));
-    let old = ".dp-4 {\n    text-align: center;\n    font-size: 3200;\n    font-family: \"Calibri\";\n    font-weight: bold;\n    color: SCHEME(tx1);\n}";
-    let new =
-        ".dp-4 {\n    text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";\n}";
+    let old = ".placeholder-6 {\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: center;\n    font-size: 3200;\n    font-family: \"Calibri\";\n    font-weight: bold;\n    color: SCHEME(tx1);\n}";
+    let new = ".placeholder-6 {\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";\n}";
     let edited = md.replace(old, new);
-    let out = update(&fixture("placeholder.pptx"), &edited);
+    let out = build(&fixture("placeholder.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(
         out_md.contains("text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";"),
@@ -557,10 +552,10 @@ fn update_default_paragraph_style_roundtrips() {
 }
 
 #[test]
-fn update_does_not_touch_unmentioned_fields() {
+fn build_does_not_touch_unmentioned_fields() {
     let md = markdown(&fixture("two_slides.pptx"));
     let edited = md.replace("\nAlpha\n", "\nEdited\n");
-    let out = update(&fixture("two_slides.pptx"), &edited);
+    let out = build(&fixture("two_slides.pptx"), &edited);
     let out_md = markdown(&out);
     let before = slide_block(&md, 1);
     let after = slide_block(&out_md, 1);
@@ -571,4 +566,93 @@ fn update_does_not_touch_unmentioned_fields() {
     let theme_before = md.split("# Master 1").next().unwrap();
     let theme_after = out_md.split("# Master 1").next().unwrap();
     assert_eq!(theme_before, theme_after, "theme untouched");
+}
+
+#[test]
+fn build_add_slide() {
+    let md = markdown(&fixture("two_slides.pptx"));
+    let new_slide = "## Slide 2\n\n<!-- shape type=\"textbox\" name=\"Brand New\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nFresh\n\n## Slide 2\n\n";
+    let edited = md.replace("\n## Slide 2\n", &format!("\n{new_slide}"));
+    let out = build(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 1).contains("Fresh"),
+        "inserted slide at index 1"
+    );
+    assert_eq!(
+        slide_block(&out_md, 2),
+        slide_block(&md, 1),
+        "original second slide shifted, content preserved"
+    );
+    let pres = read_zip_entry(&out, "ppt/presentation.xml");
+    assert_eq!(
+        pres.matches("<p:sldId ").count(),
+        3,
+        "three slide references in the presentation"
+    );
+    // The inserted slide got its own part, content-type override and rel.
+    let ct = read_zip_entry(&out, "[Content_Types].xml");
+    assert!(ct.contains("slides/slide3.xml"), "new part registered");
+}
+
+#[test]
+fn build_delete_slide() {
+    // Delete the trailing slide: content-matched slides keep the leading one,
+    // so the last slide is unambiguous to remove.
+    let md = markdown(&fixture("two_slides.pptx"));
+    let second_start = md.find("\n## Slide 2\n").unwrap() + 1;
+    let edited = md[..second_start].to_string();
+    let out = build(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("Alpha"),
+        "leading slide survives"
+    );
+    let pres = read_zip_entry(&out, "ppt/presentation.xml");
+    assert_eq!(
+        pres.matches("<p:sldId ").count(),
+        1,
+        "one slide reference remains"
+    );
+    // The removed slide's part and content-type override are gone.
+    let ct = read_zip_entry(&out, "[Content_Types].xml");
+    assert!(
+        !ct.contains("slides/slide2.xml"),
+        "deleted slide unregistered"
+    );
+}
+
+#[test]
+fn build_delete_slide_keeps_replaced_slide_part_name() {
+    // A shape edit on an existing slide is a Replace, so the part keeps its
+    // filename instead of being rebuilt under a new name.
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace(
+        "<!-- shape type=\"textbox\" auto-shape=\"rect\" class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\nAlpha",
+        "<!-- shape type=\"textbox\" auto-shape=\"rect\" class=\"textbox-1\" name=\"TextBox 1\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"914400\" -->\nAlpha\nBeta",
+    );
+    let out = build(&fixture("two_slides.pptx"), &edited);
+    let slide1 = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(
+        slide1.contains("Beta"),
+        "slide rebuilt in place under its original part name"
+    );
+}
+
+#[test]
+fn build_move_slide() {
+    // Rename the moved slide's shape so its content signature differs from
+    // the remaining slide, making the move unambiguous to match.
+    let md = markdown(&fixture("two_slides.pptx"));
+    let prefix = &md[..md.find("\n## Slide 1\n").unwrap()];
+    let alpha_block = slide_block(&md, 0);
+    let beta_block = slide_block(&md, 1);
+    let renamed_beta = beta_block.replace("name=\"TextBox 1\"", "name=\"Moved Box\"");
+    let edited = format!("{prefix}\n## Slide 1\n\n{renamed_beta}\n\n## Slide 2\n\n{alpha_block}\n");
+    let out = build(&fixture("two_slides.pptx"), &edited);
+    let out_md = markdown(&out);
+    assert!(
+        slide_block(&out_md, 0).contains("Moved Box"),
+        "second slide moved to the front (with its renamed shape)"
+    );
 }

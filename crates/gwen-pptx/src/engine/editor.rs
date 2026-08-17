@@ -471,6 +471,142 @@ pub fn replace_presentation_property(
     Ok(writer.into_inner())
 }
 
+/// Insert a `p:sldId` reference into the presentation's slide list at the
+/// given child position (0-based). `r_id` is the id of the presentation-level
+/// relationship to the new slide part.
+pub fn insert_slide_ref(
+    xml_bytes: &[u8],
+    index: usize,
+    r_id: &str,
+    slide_id: u32,
+) -> AppResult<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut in_list = false;
+    let mut seen = 0usize;
+    let mut inserted = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(ref e)) => {
+                if e.name().as_ref() == b"p:sldIdLst" {
+                    in_list = true;
+                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Empty(ref e)) => {
+                let is_sld_id = e.name().as_ref() == b"p:sldId";
+                if in_list && is_sld_id && !inserted && seen == index {
+                    writer
+                        .write_event(slide_ref_event(r_id, slide_id))
+                        .map_err(AppError::Io)?;
+                    inserted = true;
+                }
+                if is_sld_id {
+                    seen += 1;
+                }
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::End(ref e)) => {
+                if e.name().as_ref() == b"p:sldIdLst" {
+                    if !inserted {
+                        writer
+                            .write_event(slide_ref_event(r_id, slide_id))
+                            .map_err(AppError::Io)?;
+                        inserted = true;
+                    }
+                    in_list = false;
+                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(e)),
+            Ok(e) => {
+                writer.write_event(e).map_err(AppError::Io)?;
+            }
+        }
+    }
+
+    if !inserted {
+        return Err(AppError::PathParse(
+            "presentation.xml has no p:sldIdLst".to_string(),
+        ));
+    }
+    Ok(writer.into_inner())
+}
+
+/// Remove the `index`-th `p:sldId` reference from the presentation's slide
+/// list.
+pub fn remove_slide_ref(xml_bytes: &[u8], index: usize) -> AppResult<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut in_list = false;
+    let mut seen = 0usize;
+    let mut removed = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(ref e)) => {
+                if e.name().as_ref() == b"p:sldIdLst" {
+                    in_list = true;
+                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Empty(ref e)) => {
+                let is_sld_id = e.name().as_ref() == b"p:sldId";
+                if in_list && is_sld_id {
+                    if seen == index {
+                        removed = true;
+                        seen += 1;
+                        continue;
+                    }
+                    seen += 1;
+                }
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::End(ref e)) => {
+                if e.name().as_ref() == b"p:sldIdLst" {
+                    in_list = false;
+                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(AppError::Io)?;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(e)),
+            Ok(e) => {
+                writer.write_event(e).map_err(AppError::Io)?;
+            }
+        }
+    }
+
+    if !removed {
+        return Err(AppError::PathParse(format!("No p:sldId at index {index}")));
+    }
+    Ok(writer.into_inner())
+}
+
+fn slide_ref_event(r_id: &str, slide_id: u32) -> Event<'static> {
+    let mut elem = BytesStart::new("p:sldId");
+    elem.push_attribute(("id", slide_id.to_string().as_str()));
+    elem.push_attribute(("r:id", r_id));
+    Event::Empty(elem)
+}
+
 fn replace_table_tbl(xml_bytes: &[u8], shape_idx: usize, new_tbl: &[u8]) -> AppResult<Vec<u8>> {
     let mut reader = Reader::from_reader(xml_bytes);
     reader.config_mut().trim_text(true);

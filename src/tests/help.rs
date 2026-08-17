@@ -83,13 +83,13 @@ fn example_lines(help: &str) -> Vec<&str> {
 
 #[test]
 fn every_help_example_runs() {
-    let subs: [Option<&str>; 3] = [None, Some("markdown"), Some("update")];
+    let subs: [Option<&str>; 3] = [None, Some("markdown"), Some("build")];
 
     let dir = tmp();
     let input = dir.join("deck.pptx");
     std::fs::copy(fixture("table_chart.pptx"), &input).unwrap();
 
-    // Pre-create deck.md (the markdown mirror used by update examples) so the
+    // Pre-create deck.md (the markdown mirror used by build examples) so the
     // examples run regardless of their order in the help text.
     let mirror = Command::new(bin())
         .args(["markdown", "--input", input.to_str().unwrap()])

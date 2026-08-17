@@ -2,9 +2,10 @@ use pulldown_cmark::{Event, Options, Parser as MdParser, Tag, TagEnd};
 use serde_json::{Map, Value, json};
 
 use super::error::{MdError, MdResult, MdSpan};
+use super::markers::{ATTR_AUTO_SHAPE, ATTR_TYPE, shape_type_from_token};
 use super::style::{
-    Styles, font_from_decls, para_from_decls, parse_style_block, shape_attrs, shape_from_decls,
-    tf_from_decls, unquote,
+    Styles, font_from_decls, has_para_decls, para_from_decls, parse_style_block, shape_attrs,
+    shape_from_decls, tf_from_decls, unquote,
 };
 
 /// The parsed document plus the source span of every editable element, keyed by
@@ -174,6 +175,11 @@ struct TfBuf {
 struct ShapeBuf {
     map: Map<String, Value>,
     grid: Option<String>,
+    /// Frame body properties folded into the shape class, merged into the
+    /// frame when its first paragraph appears.
+    tf_props: Map<String, Value>,
+    /// The default paragraph style folded into the shape class.
+    tf_dps: Option<Value>,
     tf: Option<TfBuf>,
     table: Option<Value>,
     span: Option<MdSpan>,
@@ -184,7 +190,6 @@ struct SlideBuf {
     background: Value,
     shapes: Vec<Value>,
     notes_shapes: Option<Vec<Value>>,
-    title: Option<String>,
 }
 
 /// A paragraph under construction.
@@ -208,13 +213,8 @@ pub struct Parser<'a> {
     slide: Option<SlideBuf>,
     in_notes: bool,
 
-    title_runs: Vec<Value>,
-    title_bound: bool,
-    title_attrs: Option<Map<String, Value>>,
-    title_marker: bool,
     heading_span: Option<MdSpan>,
     heading_level: Option<u32>,
-    title_para: Option<Runs>,
 
     shape: Option<ShapeBuf>,
     para_attrs: Option<Map<String, Value>>,
@@ -242,13 +242,8 @@ impl<'a> Parser<'a> {
             master: None,
             slide: None,
             in_notes: false,
-            title_runs: Vec::new(),
-            title_bound: false,
-            title_attrs: None,
-            title_marker: false,
             heading_span: None,
             heading_level: None,
-            title_para: None,
             shape: None,
             para_attrs: None,
             para: None,
@@ -319,19 +314,13 @@ impl<'a> Parser<'a> {
                     background: json!({ "fill": { "type": Value::Null } }),
                     shapes: Vec::new(),
                     notes_shapes: None,
-                    title: None,
                 });
                 self.in_notes = false;
-                self.title_runs = Vec::new();
-                self.title_bound = false;
-                self.title_attrs = None;
-                self.title_marker = false;
                 let span = self.span_at(off);
                 self.heading_span = Some(span.clone());
                 self.spans
                     .push((format!("slides[{}]", self.slides.len()), span));
                 self.heading_level = Some(2);
-                self.title_para = Some(Runs::new());
             }
             _ => {
                 self.begin_paragraph(off);
@@ -344,22 +333,7 @@ impl<'a> Parser<'a> {
     fn end_heading(&mut self) {
         match self.heading_level.take() {
             Some(1) => {}
-            Some(2) => {
-                self.title_runs = self
-                    .title_para
-                    .take()
-                    .map(|mut t| t.finish())
-                    .unwrap_or_default();
-                let text: String = self
-                    .title_runs
-                    .iter()
-                    .filter_map(|r| r.get("text").and_then(Value::as_str))
-                    .collect();
-                let title = if is_slide_n(&text) { None } else { Some(text) };
-                if let Some(slide) = &mut self.slide {
-                    slide.title = title;
-                }
-            }
+            Some(2) => {}
             Some(_) => {
                 let is_notes = self
                     .para
@@ -393,35 +367,10 @@ impl<'a> Parser<'a> {
         };
         match key.as_str() {
             "shape" => self.begin_shape(&attrs, off)?,
-            "text-frame" => {
-                if let Some(class) = attr_value(&attrs, "class") {
-                    let decls = self.resolve_class(class, off)?;
-                    self.ensure_tf();
-                    if let Some(shape) = &mut self.shape {
-                        let tf = shape.tf.get_or_insert_with(TfBuf::default);
-                        tf.props = tf_from_decls(&decls);
-                    }
-                }
-            }
-            "default-paragraph" => {
-                if let Some(class) = attr_value(&attrs, "class") {
-                    let decls = self.resolve_class(class, off)?;
-                    self.ensure_tf();
-                    if let Some(shape) = &mut self.shape {
-                        let tf = shape.tf.get_or_insert_with(TfBuf::default);
-                        tf.dps = Some(Value::Object(para_from_decls(&decls)));
-                    }
-                }
-            }
             "paragraph" => {
                 if let Some(class) = attr_value(&attrs, "class") {
                     let decls = self.resolve_class(class, off)?;
-                    let style = para_from_decls(&decls);
-                    if self.shape.is_some() {
-                        self.para_attrs = Some(style);
-                    } else {
-                        self.title_attrs = Some(style);
-                    }
+                    self.para_attrs = Some(para_from_decls(&decls));
                 }
             }
             "background" => {
@@ -431,9 +380,6 @@ impl<'a> Parser<'a> {
                     slide.background = background_value(fill);
                 }
             }
-            "title" => {
-                self.title_marker = true;
-            }
             _ => {}
         }
         Ok(())
@@ -441,15 +387,40 @@ impl<'a> Parser<'a> {
 
     fn begin_shape(&mut self, attrs: &[(String, String)], off: usize) -> MdResult<()> {
         self.finalize_shape();
-        let mut map = match attr_value(attrs, "class") {
-            Some(class) => shape_from_decls(&self.resolve_class(class, off)?),
-            None => shape_from_decls(&[]),
+        let decls = match attr_value(attrs, "class") {
+            Some(class) => self.resolve_class(class, off)?,
+            None => Vec::new(),
         };
+        let mut map = shape_from_decls(&decls);
+        if let Some(ty) = attr_value(attrs, ATTR_TYPE) {
+            map.insert(
+                "shape_type".into(),
+                Value::String(shape_type_from_token(ty)),
+            );
+        } else {
+            map.insert("shape_type".into(), Value::String(String::new()));
+        }
+        if let Some(v) = attr_value(attrs, ATTR_AUTO_SHAPE) {
+            map.insert("auto_shape_type".into(), Value::String(v.to_string()));
+        }
         shape_attrs(&mut map, attrs);
         let grid = attr_value(attrs, "grid").map(str::to_string);
+
+        // Frame body properties and the default paragraph style fold into the
+        // shape class; they materialize on the frame when its first paragraph
+        // appears (a text frame exists only with content, matching the query
+        // projection).
+        let tf_props = tf_from_decls(&decls);
+        let tf_dps = if has_para_decls(&decls) {
+            Some(Value::Object(para_from_decls(&decls)))
+        } else {
+            None
+        };
         self.shape = Some(ShapeBuf {
             map,
             grid,
+            tf_props,
+            tf_dps,
             tf: None,
             table: None,
             span: Some(self.span_at(off)),
@@ -490,12 +461,8 @@ impl<'a> Parser<'a> {
             return;
         }
         match self.heading_level {
-            Some(1) => return,
-            Some(2) => {
-                let tp = self.title_para.get_or_insert_with(Runs::new);
-                apply_inl(tp, inl);
-                return;
-            }
+            // Heading text is structural only: `## Slide N` text is ignored.
+            Some(1) | Some(2) => return,
             _ => {}
         }
         self.ensure_para();
@@ -578,50 +545,16 @@ impl<'a> Parser<'a> {
     // -- finalization ------------------------------------------------------
 
     fn ensure_tf(&mut self) {
-        let created = self.shape.as_ref().and_then(|s| s.tf.as_ref()).is_none();
-        if created {
-            if let Some(shape) = &mut self.shape {
-                shape.tf = Some(TfBuf::default());
-            }
-            self.bind_title();
-        }
-    }
-
-    /// Bind the slide heading to the shape that follows a `<!-- title -->`
-    /// marker. The heading becomes paragraph[0]. Without the marker nothing
-    /// binds: the heading is only the slide-level `title` text, and body
-    /// paragraphs keep their indices.
-    fn bind_title(&mut self) {
-        let Some(shape) = self.shape.as_mut() else {
-            return;
-        };
-        if shape.tf.is_none() || self.title_bound || self.slide.is_none() || self.in_notes {
-            return;
-        }
-        if !self.title_marker {
-            return;
-        }
-        let mut para0 = Map::new();
-        if !self.title_runs.is_empty() {
-            para0.insert("runs".into(), Value::Array(self.title_runs.clone()));
-        }
-        para0.insert("level".into(), json!(0));
-        if let Some(attrs) = &self.title_attrs {
-            for (k, v) in attrs {
-                para0.insert(k.clone(), v.clone());
-            }
-        }
-        let tf = shape.tf.as_mut().expect("text frame exists");
-        tf.paragraphs.insert(0, Value::Object(para0));
-        self.title_bound = true;
-        if let Some(span) = &self.heading_span
-            && let Some(prefix) = self.container_prefix()
+        if self.shape.as_ref().and_then(|s| s.tf.as_ref()).is_none()
+            && let Some(shape) = &mut self.shape
         {
-            let m = self.target_len();
-            self.spans.push((
-                format!("{prefix}.shapes[{m}].text_frame.paragraphs[0]"),
-                span.clone(),
-            ));
+            let props = std::mem::take(&mut shape.tf_props);
+            let dps = shape.tf_dps.take();
+            shape.tf = Some(TfBuf {
+                props,
+                dps,
+                paragraphs: Vec::new(),
+            });
         }
     }
 
@@ -656,9 +589,6 @@ impl<'a> Parser<'a> {
             return;
         };
         let mut obj = Map::new();
-        if let Some(title) = &slide.title {
-            obj.insert("title".into(), json!(title));
-        }
         obj.insert("shapes".into(), json!(slide.shapes));
         obj.insert("background".into(), slide.background);
         let notes = match slide.notes_shapes {
@@ -840,20 +770,26 @@ fn background_value(value: &str) -> Value {
     }
 }
 
-/// Whether a title matches the auto-generated fallback `## Slide N`.
-fn is_slide_n(text: &str) -> bool {
-    let t = text.trim();
-    let Some(rest) = t.strip_prefix("Slide ") else {
-        return false;
-    };
-    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-}
-
 // -- inline parsing ----------------------------------------------------------
 
 /// Legacy `<span data-*>` support; the current format resolves `<span
 /// class="...">` against the style block.
 fn font_from_span(attrs: &Map<String, Value>) -> Map<String, Value> {
+    let mut font = Map::new();
+    for (key, field) in [
+        ("size", "size"),
+        ("name", "name"),
+        ("underline", "underline"),
+        ("bold", "bold"),
+        ("italic", "italic"),
+    ] {
+        if let Some(v) = attrs.get(key) {
+            font.insert(field.to_string(), v.clone());
+        }
+    }
+    if let Some(v) = attrs.get("color").and_then(Value::as_str) {
+        font.insert("color".into(), color_from_attr(v));
+    }
     let mut font = Map::new();
     for (key, field) in [
         ("size", "size"),
@@ -914,9 +850,9 @@ fn span_tag_parts(tag: &str) -> (Map<String, Value>, Option<String>) {
 
 // -- comment parsing ---------------------------------------------------------
 
-/// Parse a marker comment like `<!-- shape class="textbox-1" name="X" -->`
-/// into its key (`shape`) and attribute pairs. Bare words (no `=`) are kept
-/// as the key position; `<!-- title -->` yields `("title", [])`.
+/// Parse a marker comment like `<!-- shape type="textbox" class="textbox-1"
+/// name="X" -->` into its key (`shape`) and attribute pairs. Bare words (no
+/// `=`) are kept as the key position; a key-less comment yields `(key, [])`.
 fn parse_comment(text: &str) -> Option<(String, Vec<(String, String)>)> {
     let t = text.trim();
     let t = t.strip_prefix("<!--")?.trim_start();

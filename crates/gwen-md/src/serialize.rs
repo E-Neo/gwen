@@ -1,8 +1,9 @@
 use serde_json::{Map, Value};
 
+use super::markers::{legend, shape_type_token};
 use super::normalize;
 use super::style::{
-    StyleRegistry, para_decls, quote, run_decls, scalar, shape_decls, shape_kind, tf_decls,
+    Decl, StyleRegistry, para_decls, quote, run_decls, scalar, shape_decls, shape_kind, tf_decls,
 };
 
 /// Serialize a presentation snapshot (the JSON produced by `query_value`) into
@@ -11,18 +12,21 @@ use super::style::{
 /// placeholder flags, slide layout references, chart data, hyperlinks, ...)
 /// are deliberately omitted and reconstructed from the original deck on apply.
 ///
-/// Format:
-/// - YAML front matter (`pptx`, `core_properties`, `theme`) delimited by `---`;
-/// - a `<style>` block of deduplicated, content-addressed CSS classes
-///   referenced by `<!-- shape class="..." -->`, `<!-- text-frame
-///   class="..." -->`, `<!-- default-paragraph class="..." -->`,
-///   `<!-- paragraph class="..." -->` and inline `<span class="...">` markers;
-/// - shape geometry and identity live in the shape marker's HTML attributes
-///   (`<!-- shape class="textbox-1" name="TextBox 4" left="914400" ... -->`);
-/// - `# Master N` sections, `## Slide title` headings (paragraph[0] of the
-///   slide's title placeholder, bound back by a `<!-- title -->` marker),
-///   `### Notes` sections, and body
-///   paragraphs rendered from runs with native emphasis where possible.
+/// Format (see `docs/mirror-format.md` and `markers::legend`):
+/// - YAML front matter (`pptx`, `core_properties`, `theme`) delimited by `---`,
+///   followed by the always-on legend comment;
+/// - a `<style>` block of deduplicated, content-addressed CSS classes. Each
+///   shape class folds the shape's fill/outline, its frame properties and its
+///   default paragraph style into one rule, referenced by the shape marker's
+///   `class=` attribute;
+/// - shape identity and geometry live in the shape marker's HTML attributes
+///   (`<!-- shape type="textbox" class="textbox-1" name="TextBox 4"
+///   left="914400" ... -->`);
+/// - `# Master N` sections, `## Slide N` headings (structural anchors whose
+///   text is ignored), `### Notes` sections, and body paragraphs rendered from
+///   runs with native emphasis where possible. A `<!-- paragraph class="..."
+///   -->` marker precedes any paragraph whose own style deviates from the
+///   shape default.
 pub fn serialize(snapshot: &Value) -> String {
     let doc = normalize::normalize(snapshot);
     let obj = doc.as_object().expect("snapshot is an object");
@@ -33,6 +37,8 @@ pub fn serialize(snapshot: &Value) -> String {
     let mut out = String::new();
     write_front_matter(&mut out, obj);
     out.push('\n');
+    out.push_str(legend());
+    out.push('\n');
     out.push_str(&reg.to_style_block());
     out.push('\n');
 
@@ -41,7 +47,7 @@ pub fn serialize(snapshot: &Value) -> String {
             out.push_str(&format!("# Master {}\n\n", i + 1));
             if let Some(shapes) = master.get("shapes").and_then(Value::as_array) {
                 for shape in shapes {
-                    write_shape(&mut out, &mut reg, shape, false, false);
+                    write_shape(&mut out, &mut reg, shape);
                 }
             }
             out.push('\n');
@@ -91,12 +97,8 @@ fn register_shape(reg: &mut StyleRegistry, shape: &Value) {
     };
     let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
     let auto = obj.get("auto_shape_type").and_then(Value::as_str);
-    reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
+    reg.class_for(&shape_kind(shape_type, auto), &shape_class_decls(obj));
     if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
-        reg.class_for("tf", &tf_decls(tf));
-        if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
-            reg.class_for("dp", &para_decls(dps));
-        }
         if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
             for para in paras {
                 register_para(reg, para);
@@ -113,6 +115,21 @@ fn register_shape(reg: &mut StyleRegistry, shape: &Value) {
             }
         }
     }
+}
+
+/// The declarations for a shape's styling class: the shape fill/outline plus,
+/// for text frames, the frame body properties and the default paragraph style
+/// folded into the same rule. On parse one class feeds `shape_from_decls`,
+/// `tf_from_decls` and `para_from_decls`.
+fn shape_class_decls(obj: &Map<String, Value>) -> Vec<Decl> {
+    let mut decls = shape_decls(obj);
+    if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
+        decls.extend(tf_decls(tf));
+        if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
+            decls.extend(para_decls(dps));
+        }
+    }
+    decls
 }
 
 fn register_para(reg: &mut StyleRegistry, para: &Value) {
@@ -174,74 +191,24 @@ fn write_slide(out: &mut String, reg: &mut StyleRegistry, slide: &Value, idx: us
     let Some(shapes) = shapes else {
         return;
     };
-    let title_idx = title_shape_index(obj);
-
-    match title_idx {
-        Some(i) => {
-            let para0 = &shapes[i]["text_frame"]["paragraphs"][0];
-            let runs = para0
-                .get("runs")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            out.push_str(&format!("## {}\n", render_runs(reg, runs)));
-        }
-        None => out.push_str(&format!("## Slide {}\n", idx + 1)),
-    }
+    out.push_str(&format!("## Slide {}\n", idx + 1));
     write_background(out, slide);
     out.push('\n');
 
-    for (i, shape) in shapes.iter().enumerate() {
-        let is_title = title_idx == Some(i);
-        if is_title {
-            out.push_str("<!-- title -->\n");
-        }
-        write_shape(out, reg, shape, is_title, is_title);
+    for shape in shapes {
+        write_shape(out, reg, shape);
     }
 
     if let Some(notes) = obj.get("notes").filter(|v| !v.is_null()) {
         out.push_str("### Notes\n\n");
         if let Some(notes_shapes) = notes.get("shapes").and_then(Value::as_array) {
             for shape in notes_shapes {
-                write_shape(out, reg, shape, false, false);
+                write_shape(out, reg, shape);
             }
         }
         out.push('\n');
     }
     out.push('\n');
-}
-
-/// The first title placeholder in the slide's `shapes` array. Its
-/// paragraph[0] is the source of the slide title (serialized as a `##`
-/// heading and bound back on parse by a `<!-- title -->` marker). Only
-/// genuine title placeholders bind; a plain text box keeps its paragraph[0]
-/// in the body.
-fn title_shape_index(slide: &Map<String, Value>) -> Option<usize> {
-    slide
-        .get("shapes")
-        .and_then(Value::as_array)?
-        .iter()
-        .position(is_title_placeholder)
-}
-
-fn is_title_placeholder(shape: &Value) -> bool {
-    let Some(obj) = shape.as_object() else {
-        return false;
-    };
-    if !obj
-        .get("is_placeholder")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    matches!(
-        obj.get("placeholder_format")
-            .and_then(Value::as_object)
-            .and_then(|f| f.get("type"))
-            .and_then(Value::as_str),
-        Some("TITLE") | Some("CENTER_TITLE")
-    )
 }
 
 fn write_background(out: &mut String, slide: &Value) {
@@ -265,45 +232,16 @@ fn write_background(out: &mut String, slide: &Value) {
     out.push_str(&format!("<!-- background fill=\"{}\" -->\n", val));
 }
 
-fn write_shape(
-    out: &mut String,
-    reg: &mut StyleRegistry,
-    shape: &Value,
-    skip_para0: bool,
-    is_title: bool,
-) {
+fn write_shape(out: &mut String, reg: &mut StyleRegistry, shape: &Value) {
     let Some(obj) = shape.as_object() else {
         return;
     };
 
-    if is_title
-        && skip_para0
-        && let Some(tf) = obj.get("text_frame").and_then(Value::as_object)
-        && let Some(para0) = tf
-            .get("paragraphs")
-            .and_then(Value::as_array)
-            .and_then(|p| p.first())
-        && let Some(po) = para0.as_object()
-        && !para_decls(po).is_empty()
-    {
-        let pclass = reg.class_for("para", &para_decls(po));
-        out.push_str(&format!("<!-- paragraph class=\"{pclass}\" -->\n"));
-    }
-
     write_shape_marker(out, reg, obj);
 
     if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
-        let tclass = reg.class_for("tf", &tf_decls(tf));
-        out.push_str(&format!("<!-- text-frame class=\"{tclass}\" -->\n"));
-        if let Some(dps) = tf.get("default_paragraph_style").and_then(Value::as_object) {
-            let dclass = reg.class_for("dp", &para_decls(dps));
-            out.push_str(&format!("<!-- default-paragraph class=\"{dclass}\" -->\n"));
-        }
         if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
-            for (i, para) in paras.iter().enumerate() {
-                if skip_para0 && i == 0 {
-                    continue;
-                }
+            for para in paras {
                 write_paragraph(out, reg, para);
             }
         }
@@ -312,16 +250,20 @@ fn write_shape(
     }
 }
 
-/// Emit the shape marker: `<!-- shape class="textbox-1" name="TextBox 4"
-/// left="914400" top="152400" width="6096000" height="914400" rotation="-20"
-/// grid="775018,936978" crop-left="0.1" -->`. Attributes are emitted only for
-/// non-null snapshot values.
+/// Emit the shape marker: `<!-- shape type="textbox" class="textbox-1"
+/// name="TextBox 4" left="914400" top="152400" width="6096000" height="914400"
+/// rotation="-20" grid="775018,936978" crop-left="0.1" -->`. Attributes are
+/// emitted only for non-null snapshot values.
 fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<String, Value>) {
     let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
     let auto = obj.get("auto_shape_type").and_then(Value::as_str);
-    let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_decls(obj));
+    let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_class_decls(obj));
 
-    let mut parts = vec![format!("class=\"{sclass}\"")];
+    let mut parts = vec![format!("type=\"{}\"", shape_type_token(shape_type))];
+    if let Some(v) = auto {
+        parts.push(format!("auto-shape=\"{}\"", escape_attr(v)));
+    }
+    parts.push(format!("class=\"{sclass}\""));
     if let Some(v) = obj.get("name").and_then(Value::as_str) {
         parts.push(format!("name=\"{}\"", escape_attr(v)));
     }
