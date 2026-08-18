@@ -82,17 +82,13 @@ fn merge_text_style(target: &mut ShapeDto, source: &ShapeDto) {
     let Some(src) = &source.text_frame else {
         return;
     };
-    let dst = target.text_frame.get_or_insert_with(|| TextFrameDto {
-        paragraphs: Vec::new(),
-        auto_size: None,
-        word_wrap: None,
-        vertical_anchor: None,
-        margin_left: None,
-        margin_right: None,
-        margin_top: None,
-        margin_bottom: None,
-        default_paragraph_style: None,
-    });
+    // A shape that owns no text body has nothing to inherit text defaults
+    // into: fabricating a frame here would make the read-only projection
+    // diverge from the markdown mirror (which renders a text frame only when
+    // the shape has one).
+    let Some(dst) = target.text_frame.as_mut() else {
+        return;
+    };
     if dst.auto_size.is_none() {
         dst.auto_size = src.auto_size.clone();
     }
@@ -663,5 +659,54 @@ mod tests {
         let s = &shapes[0];
         assert_eq!(s.left, Some(10));
         assert_eq!(s.height, Some(40));
+    }
+
+    #[test]
+    fn shape_without_text_body_gets_no_fabricated_frame() {
+        // notes slide sldImg placeholder has no txBody; the notesMaster's
+        // sldImg placeholder owns one. Geometry/fill must still be inherited,
+        // but the shape must NOT gain a text frame it does not have.
+        let master_sp = shape(
+            30,
+            Some(r#"type="sldImg" idx="2""#),
+            r#"<a:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></a:xfrm><a:noFill/><a:ln w="12700"><a:solidFill><a:prstClr val="black"/></a:solidFill></a:ln>"#,
+            r#"<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody>"#,
+        );
+        let master = format!("{HDR}{master_sp}{FTR}");
+        let notes_sp = shape(3, Some(r#"type="sldImg""#), "", "");
+        let notes = format!("{HDR}{notes_sp}{FTR}");
+        let mut parts = HashMap::new();
+        parts.insert(
+            "ppt/notesSlides/notesSlide1.xml".to_string(),
+            notes.into_bytes(),
+        );
+        parts.insert(
+            "ppt/notesMasters/notesMaster1.xml".to_string(),
+            master.into_bytes(),
+        );
+        let mut relationships = HashMap::new();
+        relationships.insert(
+            "ppt/notesSlides/notesSlide1.xml".to_string(),
+            rel(
+                "../notesMasters/notesMaster1.xml",
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster",
+            ),
+        );
+        let pkg = Package::from_parts(parts, relationships);
+        let mut shapes = crate::model::slide::parse_slide_shapes(
+            pkg.get_part("ppt/notesSlides/notesSlide1.xml").unwrap(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        resolve_placeholder_properties(&pkg, "ppt/notesSlides/notesSlide1.xml", &mut shapes)
+            .unwrap();
+        let s = &shapes[0];
+        assert_eq!(s.left, Some(10));
+        assert_eq!(s.width, Some(30));
+        assert_eq!(s.fill.as_ref().unwrap().fill_type, Some(FillType::NoFill));
+        assert!(
+            s.text_frame.is_none(),
+            "shape without its own txBody must not gain a text frame"
+        );
     }
 }

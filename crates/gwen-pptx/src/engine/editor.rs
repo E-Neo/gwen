@@ -5,18 +5,10 @@ use quick_xml::Reader;
 use quick_xml::Writer;
 use quick_xml::events::{BytesStart, Event};
 
+use super::xml_edit::is_shape_tag;
 use crate::dto::ShapeDto;
 use crate::error::{AppError, AppResult};
 use crate::path;
-
-/// True for any element that opens a shape: a regular shape, picture,
-/// connector, group, or graphic frame (table/chart).
-fn is_shape_tag(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame"
-    )
-}
 
 pub fn remove_shape(xml_bytes: &[u8], shape_idx: usize) -> AppResult<Vec<u8>> {
     let mut reader = Reader::from_reader(xml_bytes);
@@ -140,7 +132,7 @@ pub fn insert_shape_at(
     Ok(writer.into_inner())
 }
 
-pub fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> AppResult<Vec<u8>> {
+fn replace_txbody(xml_bytes: &[u8], shape_idx: usize, new_txbody: &[u8]) -> AppResult<Vec<u8>> {
     let mut reader = Reader::from_reader(xml_bytes);
     reader.config_mut().trim_text(true);
     let mut writer = Writer::new(Vec::new());

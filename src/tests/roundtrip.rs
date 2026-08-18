@@ -1,15 +1,18 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gwen_md::{normalize, parse, serialize};
 use gwen_pptx::engine::{query, readonly};
 use gwen_pptx::opc::Package;
 use serde_json::Value;
 
-fn fixture(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
+#[path = "decks.rs"]
+mod decks;
+
+#[path = "support.rs"]
+mod support;
+
+fn fixture(name: &str) -> PathBuf {
+    decks::deck(name)
 }
 
 fn snapshot(path: &Path) -> Value {
@@ -69,4 +72,11 @@ fn table_chart_roundtrips() {
 #[test]
 fn placeholder_roundtrips() {
     assert_roundtrip("placeholder.pptx");
+}
+
+/// A notes slide whose `sldImg` placeholder has no text body: placeholder
+/// resolution must not fabricate a text frame the shape does not own.
+#[test]
+fn notes_placeholder_roundtrips() {
+    assert_roundtrip("notes_placeholder.pptx");
 }

@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 /// - adjacent runs with identical formatting are merged into a single run;
 /// - runs whose text is empty are dropped.
 ///
-/// Applied to both sides of the update diff (so merging never produces edits)
+/// Applied to both sides of the build diff (so merging never produces edits)
 /// and inside `serialize` (so the mirror never carries redundant boundaries).
 pub fn normalize(v: &Value) -> Value {
     fn walk(v: &Value) -> Value {
@@ -64,7 +64,7 @@ fn font_key(run: &Map<String, Value>) -> Option<String> {
 }
 
 /// A canonical, order-insensitive string for a JSON value.
-pub fn canonical(v: &Value) -> String {
+fn canonical(v: &Value) -> String {
     match v {
         Value::Object(map) => {
             let mut parts: Vec<String> = map

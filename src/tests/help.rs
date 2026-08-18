@@ -1,27 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gwen")
-}
+#[path = "decks.rs"]
+mod decks;
+
+#[path = "support.rs"]
+mod support;
+
+use support::{bin, tmp};
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-fn tmp() -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "gwen-help-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    decks::deck(name)
 }
 
 fn help_for(sub: Option<&str>) -> String {

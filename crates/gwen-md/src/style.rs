@@ -1,5 +1,9 @@
 use serde_json::{Map, Value};
 
+use super::markers::{
+    ATTR_CROP_PREFIX, ATTR_GRID, ATTR_NAME, ATTR_ROTATION, LENGTH_ATTRS, parse_length,
+};
+
 /// A single CSS declaration, e.g. `left: 914400`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decl {
@@ -162,7 +166,7 @@ fn push_outline_decls(out: &mut Vec<Decl>, outline: &Map<String, Value>) {
 }
 
 /// `RGB(FF0000)` / `SCHEME(tx1)` from a `ColorFormatDto`-shaped object.
-pub fn color_token(color: &Map<String, Value>) -> String {
+fn color_token(color: &Map<String, Value>) -> String {
     let ty = color.get("type").and_then(Value::as_str).unwrap_or("");
     let value = color
         .get("rgb")
@@ -274,7 +278,7 @@ pub fn run_decls(font: &Map<String, Value>) -> Vec<Decl> {
 // ---------------------------------------------------------------------------
 
 /// A `--pptx-*` / geometry declaration value with its raw string token.
-pub fn decl_str<'a>(decls: &'a [Decl], prop: &str) -> Option<&'a str> {
+fn decl_str<'a>(decls: &'a [Decl], prop: &str) -> Option<&'a str> {
     decls
         .iter()
         .find(|d| d.prop == prop)
@@ -333,24 +337,24 @@ pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
 pub fn shape_attrs(shape: &mut Map<String, Value>, attrs: &[(String, String)]) {
     for (key, value) in attrs {
         match key.as_str() {
-            "name" => {
+            ATTR_NAME => {
                 shape.insert("name".into(), Value::String(value.clone()));
             }
-            "left" | "top" | "width" | "height" => {
-                if let Some(v) = super::markers::parse_length(value) {
-                    shape.insert(key.clone(), Value::from(v));
+            key if LENGTH_ATTRS.contains(&key) => {
+                if let Some(v) = parse_length(value) {
+                    shape.insert(key.to_string(), Value::from(v));
                 }
             }
-            "rotation" => {
+            ATTR_ROTATION => {
                 if let Ok(v) = value.parse::<f64>() {
                     shape.insert("rotation".into(), Value::from(v));
                 }
             }
-            "grid" => {
+            ATTR_GRID => {
                 // Consumed by the table builder, which needs the raw widths.
             }
             _ => {
-                if let Some(side) = key.strip_prefix("crop-")
+                if let Some(side) = key.strip_prefix(ATTR_CROP_PREFIX)
                     && let Ok(v) = value.parse::<f64>()
                     && matches!(side, "left" | "top" | "right" | "bottom")
                 {

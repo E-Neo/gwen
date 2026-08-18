@@ -1,93 +1,17 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gwen")
-}
+#[path = "decks.rs"]
+mod decks;
+
+#[path = "support.rs"]
+mod support;
+
+use support::{bin, build, markdown, read_zip_entry, run_ok, slide_block, tmp};
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-fn tmp() -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "gwen-it-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn run_ok(args: &[&str]) -> String {
-    let out = Command::new(bin()).args(args).output().expect("run binary");
-    assert!(
-        out.status.success(),
-        "command failed: {args:?}\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
-}
-
-fn markdown(input: &Path) -> String {
-    run_ok(&["markdown", "--input", input.to_str().unwrap()])
-}
-
-/// Apply a markdown mirror to `input`, producing a new deck in a temp dir.
-fn build(input: &Path, md: &str) -> PathBuf {
-    let dir = tmp();
-    let md_file = dir.join("deck.md");
-    std::fs::write(&md_file, md).unwrap();
-    let output = dir.join("out.pptx");
-    run_ok(&[
-        "build",
-        "--input",
-        input.to_str().unwrap(),
-        "--markdown",
-        md_file.to_str().unwrap(),
-        "--output",
-        output.to_str().unwrap(),
-    ]);
-    output
-}
-
-fn read_zip_entry(path: &Path, name: &str) -> String {
-    let file = std::fs::File::open(path).unwrap();
-    let mut zip = zip::ZipArchive::new(file).unwrap();
-    let mut entry = zip.by_name(name).unwrap();
-    let mut buf = String::new();
-    std::io::Read::read_to_string(&mut entry, &mut buf).unwrap();
-    buf
-}
-
-/// The block for slide `n` (0-based): everything after its `## ` heading up to
-/// the next `## `/`# ` heading (or end of mirror).
-fn slide_block(md: &str, n: usize) -> String {
-    let idxs: Vec<usize> = md.match_indices("\n## ").map(|(i, _)| i + 1).collect();
-    assert!(idxs.len() > n, "slide {n} not found");
-    let start = idxs[n];
-    let line_end = md[start..]
-        .find('\n')
-        .map(|i| start + i + 1)
-        .unwrap_or(md.len());
-    let end = match idxs.get(n + 1) {
-        Some(&next) => {
-            let master = md[next..]
-                .find("\n# ")
-                .map(|j| next + j)
-                .unwrap_or(md.len());
-            next.min(master)
-        }
-        None => md.len(),
-    };
-    md[line_end..end].trim().to_string()
+    decks::deck(name)
 }
 
 #[test]
@@ -448,6 +372,46 @@ fn master_query_exposes_shapes() {
     );
 }
 
+/// Failed edits surface a human-readable location (with the shape's name) and
+/// a next-step suggestion, not a raw path.
+#[test]
+fn build_failure_diagnostics_point_at_shape() {
+    let md = markdown(&fixture("two_slides.pptx"));
+    let edited = md.replace(" left=\"914400\"", "");
+    let dir = tmp();
+    let md_file = dir.join("deck.md");
+    std::fs::write(&md_file, &edited).unwrap();
+    let out = Command::new(bin())
+        .args([
+            "build",
+            "--input",
+            fixture("two_slides.pptx").to_str().unwrap(),
+            "--markdown",
+            md_file.to_str().unwrap(),
+            "--output",
+            dir.join("out.pptx").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "removing a shape attribute must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be removed from a shape"),
+        "clear message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Slide 1, shape 1 (TextBox 1)"),
+        "human location with shape name, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Set the attribute to a value"),
+        "next-step advice, got: {stderr}"
+    );
+}
+
 #[test]
 fn build_master_shape_persists() {
     let md = markdown(&fixture("two_slides.pptx"));
@@ -537,12 +501,27 @@ fn placeholder_inherits_geometry_and_style() {
 #[test]
 fn build_default_paragraph_style_roundtrips() {
     // The default paragraph style folds into the shape's styling class; the
-    // folded `.placeholder-6` rule carries the placeholder's dp (plus its fill
-    // and frame properties).
+    // folded class carries the placeholder's dp (plus its fill and frame
+    // properties). The class name is content-addressed, so derive it from the
+    // title placeholder's shape marker.
     let md = markdown(&fixture("placeholder.pptx"));
-    let old = ".placeholder-6 {\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: center;\n    font-size: 3200;\n    font-family: \"Calibri\";\n    font-weight: bold;\n    color: SCHEME(tx1);\n}";
-    let new = ".placeholder-6 {\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";\n}";
-    let edited = md.replace(old, new);
+    let marker = md
+        .lines()
+        .find(|l| l.contains("name=\"Title 1\""))
+        .expect("title placeholder marker");
+    let sclass = marker
+        .split("class=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("styling class");
+    let old = format!(
+        ".{sclass} {{\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: center;\n    font-size: 3200;\n    font-family: \"Calibri\";\n    font-weight: bold;\n    color: SCHEME(tx1);\n}}"
+    );
+    let new = format!(
+        ".{sclass} {{\n    fill: RGB(C7000B);\n    --pptx-auto-size: shape_to_fit_text;\n    --pptx-vertical-anchor: top;\n    text-align: left;\n    font-size: 2800;\n    font-family: \"Arial\";\n}}"
+    );
+    let edited = md.replace(&old, &new);
+    assert!(edited != md, "styling class found in the mirror");
     let out = build(&fixture("placeholder.pptx"), &edited);
     let out_md = markdown(&out);
     assert!(

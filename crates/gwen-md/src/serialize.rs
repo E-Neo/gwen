@@ -1,6 +1,9 @@
 use serde_json::{Map, Value};
 
-use super::markers::{legend, shape_type_token};
+use super::markers::{
+    ATTR_GRID, ATTR_NAME, ATTR_ROTATION, ATTR_TYPE, ATTR_WIDTH, LENGTH_ATTRS, legend,
+    shape_type_token,
+};
 use super::normalize;
 use super::style::{
     Decl, StyleRegistry, para_decls, quote, run_decls, scalar, shape_decls, shape_kind, tf_decls,
@@ -259,33 +262,33 @@ fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<Strin
     let auto = obj.get("auto_shape_type").and_then(Value::as_str);
     let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_class_decls(obj));
 
-    let mut parts = vec![format!("type=\"{}\"", shape_type_token(shape_type))];
+    let mut parts = vec![format!("{ATTR_TYPE}=\"{}\"", shape_type_token(shape_type))];
     if let Some(v) = auto {
         parts.push(format!("auto-shape=\"{}\"", escape_attr(v)));
     }
     parts.push(format!("class=\"{sclass}\""));
-    if let Some(v) = obj.get("name").and_then(Value::as_str) {
-        parts.push(format!("name=\"{}\"", escape_attr(v)));
+    if let Some(v) = obj.get(ATTR_NAME).and_then(Value::as_str) {
+        parts.push(format!("{ATTR_NAME}=\"{}\"", escape_attr(v)));
     }
-    for key in ["left", "top", "width", "height"] {
+    for key in LENGTH_ATTRS {
         if let Some(v) = obj.get(key) {
             parts.push(format!("{key}=\"{}\"", scalar(v)));
         }
     }
-    if let Some(v) = obj.get("rotation") {
-        parts.push(format!("rotation=\"{}\"", scalar(v)));
+    if let Some(v) = obj.get(ATTR_ROTATION) {
+        parts.push(format!("{ATTR_ROTATION}=\"{}\"", scalar(v)));
     }
     if let Some(grid) = obj
         .get("table")
         .and_then(Value::as_object)
-        .and_then(|t| t.get("grid"))
+        .and_then(|t| t.get(ATTR_GRID))
         .and_then(Value::as_array)
     {
         let widths: Vec<String> = grid
             .iter()
-            .filter_map(|g| g.as_object().and_then(|o| o.get("width")).map(scalar))
+            .filter_map(|g| g.as_object().and_then(|o| o.get(ATTR_WIDTH)).map(scalar))
             .collect();
-        parts.push(format!("grid=\"{}\"", widths.join(",")));
+        parts.push(format!("{ATTR_GRID}=\"{}\"", widths.join(",")));
     }
     if let Some(crop) = obj.get("crop").and_then(Value::as_object) {
         for side in ["left", "top", "right", "bottom"] {

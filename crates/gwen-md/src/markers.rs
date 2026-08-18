@@ -37,7 +37,7 @@ pub const ATTR_CROP_PREFIX: &str = "crop-";
 
 /// The geometry attributes that accept a length: raw EMU or a unit-suffixed
 /// value (`1in`, `3cm`, `25mm`, `72pt`, `96px`).
-pub const LENGTH_ATTRS: [&str; 4] = ["left", "top", "width", "height"];
+pub const LENGTH_ATTRS: [&str; 4] = [ATTR_LEFT, ATTR_TOP, ATTR_WIDTH, ATTR_HEIGHT];
 
 /// EMU in one inch; the base unit of the OOXML geometry grid.
 pub const EMU_PER_IN: i64 = 914_400;

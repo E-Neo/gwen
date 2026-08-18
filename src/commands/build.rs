@@ -6,7 +6,7 @@ use gwen_pptx::opc::Package;
 use gwen_pptx::path::PathSegment;
 use miette::Report;
 
-use crate::diag::{Diag, markdown_path_breadcrumb, plain};
+use crate::diag::{Diag, advice, describe_path, plain};
 
 fn edit_path(path: &[PathSegment]) -> String {
     let mut out = String::new();
@@ -53,8 +53,15 @@ pub fn execute(input: &str, md_path: &str, output: &str) -> miette::Result<()> {
                 .filter(|(k, _)| span_matches(k, &path_str))
                 .max_by_key(|(k, _)| k.len())
                 .map(|(_, s)| s);
-            let help = markdown_path_breadcrumb(&parsed.doc, &path_str);
-            let help = (!help.is_empty()).then_some(help);
+            let mut help = Vec::new();
+            let loc = describe_path(&parsed.doc, &path_str);
+            if !loc.is_empty() {
+                help.push(format!("at {loc}"));
+            }
+            if let Some(suggestion) = advice(&e.to_string()) {
+                help.push(suggestion);
+            }
+            let help = (!help.is_empty()).then(|| help.join("\n"));
             return match span {
                 Some(s) => Err(Report::new(Diag::at(&md, e.to_string(), s, help))),
                 None => Err(Report::new(Diag::plain(match help {

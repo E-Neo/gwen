@@ -34,19 +34,8 @@ pub fn resolve_chart_part_by_rid(
     let rel = rels
         .get(r_id)
         .ok_or_else(|| AppError::PathParse(format!("Chart relationship {r_id} not found")))?;
-    let base_dir = container_uri.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let rel_path = rel.target.trim_start_matches('/');
-    let mut parts: Vec<&str> = base_dir.split('/').collect();
-    for seg in rel_path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            _ => parts.push(seg),
-        }
-    }
-    Ok(parts.join("/"))
+    pkg.resolve_relationship_target(container_uri, rel)
+        .ok_or_else(|| AppError::PathParse(format!("Chart relationship {r_id} has no target part")))
 }
 
 /// Resolve the theme part URI (e.g. `ppt/theme/theme1.xml`), if present.

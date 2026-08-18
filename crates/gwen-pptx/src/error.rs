@@ -11,9 +11,6 @@ pub enum AppError {
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
 
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
     #[error("Path parse error: {0}")]
     PathParse(String),
 

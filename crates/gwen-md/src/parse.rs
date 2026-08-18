@@ -2,7 +2,10 @@ use pulldown_cmark::{Event, Options, Parser as MdParser, Tag, TagEnd};
 use serde_json::{Map, Value, json};
 
 use super::error::{MdError, MdResult, MdSpan};
-use super::markers::{ATTR_AUTO_SHAPE, ATTR_TYPE, shape_type_from_token};
+use super::markers::{
+    ATTR_AUTO_SHAPE, ATTR_CLASS, ATTR_FILL, ATTR_GRID, ATTR_NAME, ATTR_TYPE, MARKER_BACKGROUND,
+    MARKER_PARAGRAPH, MARKER_SHAPE, shape_type_from_token,
+};
 use super::style::{
     Styles, font_from_decls, has_para_decls, para_from_decls, parse_style_block, shape_attrs,
     shape_from_decls, tf_from_decls, unquote,
@@ -10,7 +13,7 @@ use super::style::{
 
 /// The parsed document plus the source span of every editable element, keyed by
 /// its JSON path (e.g. `slides[0].shapes[1].text_frame.paragraphs[2]`). The
-/// update command uses these to attach rustc-style diagnostics to failed edits.
+/// build command uses these to attach rustc-style diagnostics to failed edits.
 #[derive(Debug)]
 pub struct ParsedDoc {
     pub doc: Value,
@@ -366,15 +369,15 @@ impl<'a> Parser<'a> {
             return Ok(());
         };
         match key.as_str() {
-            "shape" => self.begin_shape(&attrs, off)?,
-            "paragraph" => {
-                if let Some(class) = attr_value(&attrs, "class") {
+            MARKER_SHAPE => self.begin_shape(&attrs, off)?,
+            MARKER_PARAGRAPH => {
+                if let Some(class) = attr_value(&attrs, ATTR_CLASS) {
                     let decls = self.resolve_class(class, off)?;
                     self.para_attrs = Some(para_from_decls(&decls));
                 }
             }
-            "background" => {
-                if let Some(fill) = attr_value(&attrs, "fill")
+            MARKER_BACKGROUND => {
+                if let Some(fill) = attr_value(&attrs, ATTR_FILL)
                     && let Some(slide) = &mut self.slide
                 {
                     slide.background = background_value(fill);
@@ -387,7 +390,7 @@ impl<'a> Parser<'a> {
 
     fn begin_shape(&mut self, attrs: &[(String, String)], off: usize) -> MdResult<()> {
         self.finalize_shape();
-        let decls = match attr_value(attrs, "class") {
+        let decls = match attr_value(attrs, ATTR_CLASS) {
             Some(class) => self.resolve_class(class, off)?,
             None => Vec::new(),
         };
@@ -404,7 +407,7 @@ impl<'a> Parser<'a> {
             map.insert("auto_shape_type".into(), Value::String(v.to_string()));
         }
         shape_attrs(&mut map, attrs);
-        let grid = attr_value(attrs, "grid").map(str::to_string);
+        let grid = attr_value(attrs, ATTR_GRID).map(str::to_string);
 
         // Frame body properties and the default paragraph style fold into the
         // shape class; they materialize on the frame when its first paragraph
@@ -666,13 +669,9 @@ impl<'a> Parser<'a> {
             .find('\n')
             .map(|i| offset + i)
             .unwrap_or(self.source.len());
-        let snippet = self.source[line_start..line_end]
-            .trim_end_matches('\r')
-            .to_string();
         MdSpan {
             line,
             col,
-            snippet,
             offset,
             len: line_end.saturating_sub(offset),
         }
@@ -778,7 +777,7 @@ fn font_from_span(attrs: &Map<String, Value>) -> Map<String, Value> {
     let mut font = Map::new();
     for (key, field) in [
         ("size", "size"),
-        ("name", "name"),
+        (ATTR_NAME, "name"),
         ("underline", "underline"),
         ("bold", "bold"),
         ("italic", "italic"),
@@ -793,7 +792,7 @@ fn font_from_span(attrs: &Map<String, Value>) -> Map<String, Value> {
     let mut font = Map::new();
     for (key, field) in [
         ("size", "size"),
-        ("name", "name"),
+        (ATTR_NAME, "name"),
         ("underline", "underline"),
         ("bold", "bold"),
         ("italic", "italic"),
@@ -833,7 +832,7 @@ fn span_tag_parts(tag: &str) -> (Map<String, Value>, Option<String>) {
     let mut attrs = Map::new();
     for (k, v) in tokenize_attrs(inner) {
         let Some(v) = v else { continue };
-        if k == "class" {
+        if k == ATTR_CLASS {
             class = Some(v);
             continue;
         }

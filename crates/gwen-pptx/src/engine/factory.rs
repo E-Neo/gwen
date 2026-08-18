@@ -61,63 +61,11 @@ fn generate_table_xml(shape: &AddShape, new_id: u32) -> AppResult<Vec<u8>> {
             "http://schemas.openxmlformats.org/drawingml/2006/table",
         )],
     );
-    write_open_tag(&mut writer, "a:tbl", &[]);
-
-    write_open_tag(&mut writer, "a:tblPr", &[]);
-    write_empty_tag(&mut writer, "a:noFill", &[]);
-    write_close_tag(&mut writer, "a:tblPr");
-
-    write_open_tag(&mut writer, "a:tblGrid", &[]);
-    for col in &table.grid {
-        write_empty_tag(&mut writer, "a:gridCol", &[("w", &col.width.to_string())]);
-    }
-    write_close_tag(&mut writer, "a:tblGrid");
-
-    for row in &table.rows {
-        let h_str = row.height.map(|h| h.to_string());
-        let mut row_attrs: Vec<(&str, &str)> = Vec::new();
-        if let Some(ref h) = h_str {
-            row_attrs.push(("h", h));
-        }
-        write_open_tag(&mut writer, "a:tr", &row_attrs);
-        for cell in &row.cells {
-            let rs_str = cell.row_span.map(|v| v.to_string());
-            let gs_str = cell.grid_span.map(|v| v.to_string());
-            let mut cell_attrs: Vec<(&str, &str)> = Vec::new();
-            if let Some(ref rs) = rs_str {
-                cell_attrs.push(("rowSpan", rs));
-            }
-            if let Some(ref gs) = gs_str {
-                cell_attrs.push(("gridSpan", gs));
-            }
-            write_open_tag(&mut writer, "a:tc", &cell_attrs);
-            if let Some(ref tf) = cell.text_frame {
-                writer
-                    .get_mut()
-                    .write_all(b"<a:txBody>")
-                    .map_err(crate::error::AppError::Io)?;
-                let txbody = crate::dto::xml::txbody_to_xml(tf);
-                writer
-                    .get_mut()
-                    .write_all(txbody.as_bytes())
-                    .map_err(crate::error::AppError::Io)?;
-                writer
-                    .get_mut()
-                    .write_all(b"</a:txBody>")
-                    .map_err(crate::error::AppError::Io)?;
-            } else {
-                write_open_tag(&mut writer, "a:txBody", &[]);
-                write_empty_tag(&mut writer, "a:bodyPr", &[]);
-                write_open_tag(&mut writer, "a:p", &[]);
-                write_close_tag(&mut writer, "a:p");
-                write_close_tag(&mut writer, "a:txBody");
-            }
-            write_close_tag(&mut writer, "a:tc");
-        }
-        write_close_tag(&mut writer, "a:tr");
-    }
-
-    write_close_tag(&mut writer, "a:tbl");
+    let tbl_xml = crate::dto::xml::table_to_xml(table);
+    writer
+        .get_mut()
+        .write_all(tbl_xml.as_bytes())
+        .map_err(crate::error::AppError::Io)?;
     write_close_tag(&mut writer, "a:graphicData");
     write_close_tag(&mut writer, "a:graphic");
     write_close_tag(&mut writer, "p:graphicFrame");

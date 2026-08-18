@@ -2,6 +2,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::error::{AppError, AppResult};
+use crate::opc::Package;
 
 #[derive(serde::Serialize)]
 pub struct Presentation {
@@ -65,22 +66,15 @@ impl Presentation {
         })
     }
 
-    pub fn resolve_slide_uris(
-        &self,
-        rels: &std::collections::HashMap<String, super::super::opc::Relationship>,
-    ) -> Vec<String> {
+    pub fn resolve_slide_uris(&self, pkg: &Package) -> Vec<String> {
+        let Some(rels) = pkg.get_rels("ppt/presentation.xml") else {
+            return Vec::new();
+        };
         self.slide_uris
             .iter()
             .map(|r_id| {
                 rels.get(r_id)
-                    .map(|r| {
-                        let target = &r.target;
-                        if target.starts_with("ppt/") || target.starts_with('/') {
-                            target.clone()
-                        } else {
-                            format!("ppt/{target}")
-                        }
-                    })
+                    .and_then(|r| pkg.resolve_relationship_target("ppt/presentation.xml", r))
                     .unwrap_or_default()
             })
             .collect()

@@ -6,6 +6,7 @@ use crate::model::presentation::Presentation;
 use crate::opc::Package;
 use crate::path::{self, PathSegment};
 
+use super::readonly::is_read_only_shape_field;
 use super::update_diff::{Edit, EditOp};
 use super::{editor, factory, update_diff, xml_edit};
 
@@ -24,19 +25,6 @@ const PARA_PROPS: [&str; 5] = [
     "line_spacing",
     "space_before",
     "space_after",
-];
-const READ_ONLY_SHAPE: [&str; 11] = [
-    "shape_id",
-    "shape_type",
-    "is_placeholder",
-    "has_text_frame",
-    "placeholder_format",
-    "image",
-    "ch_off_x",
-    "ch_off_y",
-    "ch_ext_cx",
-    "ch_ext_cy",
-    "shapes",
 ];
 
 /// Apply an ordered list of edits to a package, failing loudly on the first
@@ -116,7 +104,7 @@ fn slide_uri(pres: &Presentation, idx: usize) -> AppResult<&str> {
 
 fn notes_uri(pkg: &Package, slide_uri: &str) -> AppResult<String> {
     crate::model::notes::resolve_notes_uri(pkg, slide_uri)
-        .ok_or_else(|| AppError::PathParse("Slide has no notes slide".to_string()))
+        .ok_or_else(|| AppError::PathParse("The slide has no notes".to_string()))
 }
 
 fn read_part(pkg: &Package, uri: &str) -> AppResult<Vec<u8>> {
@@ -125,7 +113,7 @@ fn read_part(pkg: &Package, uri: &str) -> AppResult<Vec<u8>> {
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))
 }
 
-/// Apply a single edit to a package. Exposed so the update command can apply
+/// Apply a single edit to a package. Exposed so the build command can apply
 /// edits one at a time and attach markdown source spans to failures.
 pub fn apply_edit(pkg: &mut Package, pres: &Presentation, edit: &Edit) -> AppResult<()> {
     let resolved = path::resolve_path(&edit.path)?;
@@ -529,8 +517,7 @@ fn apply_notes_edit(
                     .ok_or(AppError::InvalidValue("notes value required".to_string()))?;
                 if notes_uri(pkg, slide_uri).is_ok() {
                     return Err(AppError::PathParse(
-                        "Slide already has notes; edit slides[N].notes.shapes[M] instead"
-                            .to_string(),
+                        "The slide already has notes; edit its notes shapes instead".to_string(),
                     ));
                 }
                 create_notes_slide(pkg, slide_uri, value)
@@ -636,10 +623,10 @@ fn shape_part_edit(
     let seg = remaining.first();
 
     if let Some(PathSegment::Field(name)) = seg
-        && READ_ONLY_SHAPE.contains(&name.as_str())
+        && is_read_only_shape_field(name)
     {
         return Err(AppError::PathParse(format!(
-            "Shape field '{name}' is read-only and cannot be edited"
+            "`{name}` is derived from the deck and cannot be edited in the mirror"
         )));
     }
 
@@ -656,7 +643,7 @@ fn shape_part_edit(
             editor::replace_shape_attr(xml, shape_idx, remaining, &scalar(val))
         }
         (EditOp::Delete, Some(PathSegment::Field(n))) if SHAPE_ATTRS.contains(&n.as_str()) => Err(
-            AppError::PathParse(format!("Shape attribute '{n}' cannot be deleted")),
+            AppError::PathParse(format!("`{n}` cannot be removed from a shape")),
         ),
 
         (EditOp::Set, Some(PathSegment::Field(n))) if n == "text" => {
@@ -737,7 +724,7 @@ fn shape_part_edit(
         }
 
         (EditOp::Set, Some(PathSegment::Field(n))) if n == "shapes" => Err(AppError::PathParse(
-            "Group child shapes are not editable via update".to_string(),
+            "Grouped shapes are read-only; edit them in the original deck".to_string(),
         )),
 
         _ => Err(AppError::PathParse(format!(
@@ -776,7 +763,7 @@ fn text_frame_set(
             xml_edit::replace_lst_style_lossless(xml, shape_idx, &json_str(value))
         }
         [PathSegment::Field(n), tail @ ..] if n == "default_paragraph_style" => Err(
-            AppError::PathParse("default_paragraph_style is edited as a whole".to_string()),
+            AppError::PathParse("The default paragraph style is edited as a whole".to_string()),
         ),
         [PathSegment::Field(n), tail @ ..] if n == "paragraphs" => {
             paragraph_set(xml, shape_idx, tail, value)
@@ -1000,7 +987,9 @@ fn run_font_set(
         return Err(AppError::PathParse("Font property required".to_string()));
     };
     if prop == "hyperlink" {
-        return Err(AppError::PathParse("hyperlink is read-only".to_string()));
+        return Err(AppError::PathParse(
+            "Hyperlinks are fixed by the deck and cannot be edited".to_string(),
+        ));
     }
     let mut path = vec![
         PathSegment::Field("text_frame".to_string()),
@@ -1393,7 +1382,9 @@ fn chart_series_insert(
             ];
             xml_edit::add_chart_point_lossless(xml, &path, *j, &scalar(val))
         }
-        _ => Err(AppError::PathParse("Unsupported chart insert".to_string())),
+        _ => Err(AppError::PathParse(
+            "Chart insertion is not supported".to_string(),
+        )),
     }
 }
 

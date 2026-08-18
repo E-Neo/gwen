@@ -4,7 +4,7 @@ use crate::path::PathSegment;
 use PathSegment::{Field, Index};
 
 /// Strip every read-only field from a value so it matches what the markdown
-/// mirror can express. The `update` diff runs against this projection, and the
+/// mirror can express. The `build` diff runs against this projection, and the
 /// round-trip property test compares against it.
 pub fn project(v: &Value) -> Value {
     fn walk(v: &Value, path: &mut Vec<PathSegment>) -> Value {
@@ -37,6 +37,30 @@ pub fn project(v: &Value) -> Value {
     walk(v, &mut Vec::new())
 }
 
+/// Shape fields the markdown mirror cannot express. The projection strips them
+/// and the apply engine rejects edits to them; `shape_type` is the exception —
+/// the mirror expresses it as the `type` token, so it stays in the projection,
+/// but the engine still refuses to change it because it fixes the shape's
+/// identity.
+pub const SHAPE_PROJECTION_FIELDS: &[&str] = &[
+    "shape_id",
+    "is_placeholder",
+    "has_text_frame",
+    "placeholder_format",
+    "image",
+    "ch_off_x",
+    "ch_off_y",
+    "ch_ext_cx",
+    "ch_ext_cy",
+    "shapes",
+    "chart",
+];
+
+/// Whether a shape field must be rejected as read-only by the apply engine.
+pub fn is_read_only_shape_field(name: &str) -> bool {
+    name == "shape_type" || SHAPE_PROJECTION_FIELDS.contains(&name)
+}
+
 /// Whether a field, at the given JSON path, is read-only: it is not part of
 /// the editable markdown mirror, is never emitted by `markdown`, and must not
 /// produce edits when absent from an edited document.
@@ -45,22 +69,7 @@ pub fn project(v: &Value) -> Value {
 /// snapshot before comparing against `parse(serialize(snapshot))`.
 pub fn skip_key(path: &[PathSegment], key: &str) -> bool {
     match last_two(path) {
-        (Some(Field(f)), Some(Index(_))) if f == "shapes" => {
-            matches!(
-                key,
-                "shape_id"
-                    | "is_placeholder"
-                    | "has_text_frame"
-                    | "placeholder_format"
-                    | "image"
-                    | "ch_off_x"
-                    | "ch_off_y"
-                    | "ch_ext_cx"
-                    | "ch_ext_cy"
-                    | "shapes"
-                    | "chart"
-            )
-        }
+        (Some(Field(f)), Some(Index(_))) if f == "shapes" => SHAPE_PROJECTION_FIELDS.contains(&key),
         (Some(Field(f)), Some(Index(_))) if f == "slides" => key == "slide_layout",
         (Some(Field(f)), Some(Index(_))) if f == "slide_masters" => {
             matches!(key, "name" | "slide_layouts")

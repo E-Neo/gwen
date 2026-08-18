@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// A source location in the markdown document. Byte `offset`/`len` anchor the
-/// location for miette-style diagnostics; `line`/`col`/`snippet` are the
+/// location for miette-style diagnostics; `line`/`col` are the
 /// human-readable view.
 #[derive(Debug, Clone)]
 pub struct MdSpan {
@@ -9,8 +9,6 @@ pub struct MdSpan {
     pub line: usize,
     /// 1-based column.
     pub col: usize,
-    /// The source line, for the caret display.
-    pub snippet: String,
     /// Byte offset of the location in the original source.
     pub offset: usize,
     /// Length of the located region in bytes.
@@ -25,53 +23,11 @@ pub struct MdError {
 }
 
 impl MdError {
-    pub fn new(
-        message: impl Into<String>,
-        line: usize,
-        col: usize,
-        snippet: impl Into<String>,
-    ) -> Self {
-        MdError {
-            message: message.into(),
-            span: MdSpan {
-                line,
-                col,
-                snippet: snippet.into(),
-                offset: 0,
-                len: 0,
-            },
-        }
-    }
-
     pub fn at(message: impl Into<String>, span: MdSpan) -> Self {
         MdError {
             message: message.into(),
             span,
         }
-    }
-
-    pub fn render(&self) -> String {
-        let line = self.span.line.to_string();
-        let pad = " ".repeat(line.len());
-        let caret = " ".repeat(self.span.col.saturating_sub(1)) + "^";
-        format!(
-            "error: {}\n  --> markdown:{}:{}\n  {} |\n{} | {}\n  {} {}\n",
-            self.message, self.span.line, self.span.col, pad, line, self.span.snippet, pad, caret,
-        )
-    }
-}
-
-impl MdSpan {
-    /// Render a rustc-style note for this span, mentioning the failing
-    /// document path (e.g. `slides[0].shapes[1]`).
-    pub fn render_at(&self, path: &str) -> String {
-        let line = self.line.to_string();
-        let pad = " ".repeat(line.len());
-        let caret = " ".repeat(self.col.saturating_sub(1)) + "^";
-        format!(
-            "  --> markdown:{}:{}\n  {} |\n{} | {}\n  {} {} (while updating '{path}')\n",
-            self.line, self.col, pad, line, self.snippet, pad, caret,
-        )
     }
 }
 

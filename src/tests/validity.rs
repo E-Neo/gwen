@@ -3,66 +3,19 @@
 //! relationships resolve, and every part has a content type.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use gwen_pptx::opc::Package;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_gwen")
-}
+#[path = "decks.rs"]
+mod decks;
+
+#[path = "support.rs"]
+mod support;
+
+use support::{build, markdown};
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-fn tmp() -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "gwen-val-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn build(input: &Path, md: &str) -> PathBuf {
-    let dir = tmp();
-    let md_file = dir.join("deck.md");
-    std::fs::write(&md_file, md).unwrap();
-    let output = dir.join("out.pptx");
-    let out = Command::new(bin())
-        .args([
-            "build",
-            "--input",
-            input.to_str().unwrap(),
-            "--markdown",
-            md_file.to_str().unwrap(),
-            "--output",
-            output.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "build failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    output
-}
-
-fn markdown(input: &Path) -> String {
-    let out = Command::new(bin())
-        .args(["markdown", "--input", input.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "markdown failed");
-    String::from_utf8(out.stdout).unwrap()
+    decks::deck(name)
 }
 
 /// Structural checks on a rebuilt deck.

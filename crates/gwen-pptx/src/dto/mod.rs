@@ -15,9 +15,6 @@ pub enum ShapeType {
     Table,
     Media,
     Freeform,
-    EmbeddedOleObject,
-    LinkedOleObject,
-    Comment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,7 +28,6 @@ pub enum PlaceholderType {
     Chart,
     Table,
     ClipArt,
-    Picture,
     Diagram,
     Media,
     SlideImage,
@@ -58,10 +54,6 @@ pub struct PlaceholderFormatDto {
 pub enum ColorType {
     Rgb,
     Scheme,
-    Hsl,
-    Scrgb,
-    System,
-    Preset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -44,7 +44,7 @@ fn parse_shapes(
 
     // Chart data lives in separate OPC parts; resolve each chart shape's part
     // and merge the full chart (type + series) into the shape JSON so query
-    // output round-trips through `update`.
+    // output round-trips through `build`.
     for shape in &mut shapes {
         if shape.chart.is_some() {
             let r_id = shape.chart.as_ref().and_then(|c| c.r_id.as_ref()).cloned();
@@ -126,22 +126,19 @@ fn master_json(pkg: &Package, master_uri: &str, media_dir: Option<&str>) -> serd
 }
 
 /// Open a presentation and resolve its slide URIs, sharing the boilerplate
-/// between `query` and `update`.
+/// between `query` and `build`.
 pub fn load_presentation(pkg: &Package) -> AppResult<Presentation> {
     let pres_part = pkg
         .get_part("ppt/presentation.xml")
         .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml".to_string()))?;
-    let pres_rels = pkg
-        .get_rels("ppt/presentation.xml")
-        .ok_or_else(|| AppError::PartNotFound("ppt/presentation.xml rels".to_string()))?;
     let mut pres = Presentation::parse(pres_part)?;
-    pres.slide_uris = pres.resolve_slide_uris(pres_rels);
+    pres.slide_uris = pres.resolve_slide_uris(pkg);
     Ok(pres)
 }
 
 /// Build the JSON projection for a resolved path (the JSON document the
 /// Markdown mirror mirrors). `media_dir` extracts referenced media when given.
-pub fn query_value(
+fn query_value(
     pkg: &Package,
     pres: &Presentation,
     resolved: &path::ResolvedPath,
