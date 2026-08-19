@@ -12,7 +12,7 @@ mod decks;
 #[path = "support.rs"]
 mod support;
 
-use support::{build, markdown};
+use support::{build_project, new_project};
 
 fn fixture(name: &str) -> PathBuf {
     decks::deck(name)
@@ -99,39 +99,83 @@ mod crate_xml {
     }
 }
 
+/// Add a slide to a project by editing the slide list and writing a new slide
+/// file, then verify the rebuilt package stays structurally sound.
 #[test]
-fn add_delete_move_slides_produce_valid_packages() {
-    let md = markdown(&fixture("two_slides.pptx"));
+fn adding_a_slide_produces_a_valid_package() {
+    let project = new_project(&fixture("two_slides.pptx"), "deck");
+    let slides = project.join("src").join("slides");
 
-    // Add a slide in the middle.
-    let new_slide = "## Slide 2\n\n<!-- shape type=\"textbox\" name=\"Brand New\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nFresh\n\n## Slide 2\n\n";
-    let with_three = build(
-        &fixture("two_slides.pptx"),
-        &md.replace("\n## Slide 2\n", &format!("\n{new_slide}")),
+    // Append a slide ref to the index and drop in a fresh slide file.
+    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
+    let ref_marker = "<!-- slide uri=\"ppt/slides/slide2.xml\" src=\"slides/slide2.md\" -->\n";
+    let md = md.replace(
+        ref_marker,
+        &format!(
+            "{ref_marker}<!-- slide uri=\"ppt/slides/slide3.xml\" src=\"slides/slide3.md\" -->\n"
+        ),
     );
-    assert_valid(&with_three);
+    std::fs::write(project.join("PRESENTATION.md"), md).unwrap();
 
-    // Delete the trailing slide.
-    let second = md.find("\n## Slide 2\n").unwrap() + 1;
-    let one = build(&fixture("two_slides.pptx"), &md[..second]);
-    assert_valid(&one);
+    let slide = "---\nuri: \"ppt/slides/slide3.xml\"\nname: \"\"\nmaster: \"0\"\nlayout: \"0\"\n---\n\n<!-- shape type=\"textbox\" name=\"Brand New\" id=\"9\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nFresh\n";
+    std::fs::write(slides.join("slide3.md"), slide).unwrap();
 
-    // Reorder.
-    let prefix = &md[..md.find("\n## Slide 1\n").unwrap()];
-    let alpha = crate_slide_block(&md, 0);
-    let beta = crate_slide_block(&md, 1).replace("name=\"TextBox 1\"", "name=\"Moved Box\"");
-    let reordered = format!("{prefix}\n## Slide 1\n\n{beta}\n\n## Slide 2\n\n{alpha}\n");
-    let moved = build(&fixture("two_slides.pptx"), &reordered);
-    assert_valid(&moved);
+    let out = build_project(&project);
+    assert_valid(&out);
+    assert!(read_zip_entry(&out, "ppt/slides/slide3.xml").contains("Fresh"));
 }
 
-fn crate_slide_block(md: &str, n: usize) -> String {
-    let idxs: Vec<usize> = md.match_indices("\n## ").map(|(i, _)| i + 1).collect();
-    let start = idxs[n];
-    let line_end = md[start..]
-        .find('\n')
-        .map(|i| start + i + 1)
-        .unwrap_or(md.len());
-    let end = idxs.get(n + 1).copied().unwrap_or(md.len());
-    md[line_end..end].trim().to_string()
+/// Delete a slide by removing its reference from the index and removing its
+/// mirror file, then verify the rebuilt package stays structurally sound.
+#[test]
+fn deleting_a_slide_produces_a_valid_package() {
+    let project = new_project(&fixture("two_slides.pptx"), "deck");
+    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
+    let md = md.replace(
+        "<!-- slide uri=\"ppt/slides/slide2.xml\" src=\"slides/slide2.md\" -->\n",
+        "",
+    );
+    std::fs::write(project.join("PRESENTATION.md"), md).unwrap();
+    std::fs::remove_file(project.join("src").join("slides").join("slide2.md")).unwrap();
+
+    let out = build_project(&project);
+    assert_valid(&out);
+    let file = std::fs::File::open(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    assert!(
+        zip.by_name("ppt/slides/slide2.xml").is_err(),
+        "deleted slide part must be absent from the rebuilt deck"
+    );
+}
+
+/// A table + chart deck rebuilds into a package whose chart part and table
+/// survive structurally.
+#[test]
+fn table_chart_deck_rebuilds_valid() {
+    let project = new_project(&fixture("table_chart.pptx"), "deck");
+    let out = build_project(&project);
+    assert_valid(&out);
+    assert!(read_zip_entry(&out, "ppt/charts/chart1.xml").contains("barChart"));
+    assert!(read_zip_entry(&out, "ppt/slides/slide1.xml").contains("a:tbl"));
+}
+
+/// The notes slide fixture (a placeholder with no text body) rebuilds into a
+/// valid package.
+#[test]
+fn notes_deck_rebuilds_valid() {
+    let project = new_project(&fixture("notes_placeholder.pptx"), "deck");
+    let out = build_project(&project);
+    assert_valid(&out);
+    assert!(
+        read_zip_entry(&out, "ppt/notesSlides/notesSlide1.xml").contains("Slide Image Placeholder")
+    );
+}
+
+fn read_zip_entry(path: &Path, name: &str) -> String {
+    let file = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut entry = zip.by_name(name).unwrap();
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut buf).unwrap();
+    buf
 }

@@ -327,7 +327,9 @@ pub struct ShapeDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ch_ext_cy: Option<i64>,
 
+    #[serde(default)]
     pub is_placeholder: bool,
+    #[serde(default)]
     pub has_text_frame: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]

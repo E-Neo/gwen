@@ -1,7 +1,9 @@
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::markers::{
-    ATTR_CROP_PREFIX, ATTR_GRID, ATTR_NAME, ATTR_ROTATION, LENGTH_ATTRS, parse_length,
+    ATTR_CH_EXT_CX, ATTR_CH_EXT_CY, ATTR_CH_OFF_X, ATTR_CH_OFF_Y, ATTR_CROP_PREFIX, ATTR_GRID,
+    ATTR_ID, ATTR_IMAGE, ATTR_NAME, ATTR_PH_IDX, ATTR_PH_SZ, ATTR_PH_TYPE, ATTR_PLACEHOLDER,
+    ATTR_ROTATION, LENGTH_ATTRS, parse_length,
 };
 
 /// A single CSS declaration, e.g. `left: 914400`.
@@ -352,6 +354,48 @@ pub fn shape_attrs(shape: &mut Map<String, Value>, attrs: &[(String, String)]) {
             }
             ATTR_GRID => {
                 // Consumed by the table builder, which needs the raw widths.
+            }
+            ATTR_ID => {
+                if let Ok(v) = value.parse::<u32>() {
+                    shape.insert("shape_id".into(), json!(v));
+                }
+            }
+            ATTR_PLACEHOLDER => {
+                shape.insert("is_placeholder".into(), json!(true));
+            }
+            ATTR_PH_TYPE | ATTR_PH_IDX | ATTR_PH_SZ => {
+                let ph = shape
+                    .entry("placeholder_format")
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .expect("placeholder_format is an object");
+                match key.as_str() {
+                    ATTR_PH_TYPE => {
+                        ph.insert("type".into(), Value::String(value.clone()));
+                    }
+                    ATTR_PH_IDX => {
+                        if let Ok(v) = value.parse::<i32>() {
+                            ph.insert("idx".into(), json!(v));
+                        }
+                    }
+                    _ => {
+                        ph.insert("sz".into(), Value::String(value.clone()));
+                    }
+                }
+            }
+            ATTR_IMAGE => {
+                shape.insert("image".into(), Value::String(value.clone()));
+            }
+            ATTR_CH_OFF_X | ATTR_CH_OFF_Y | ATTR_CH_EXT_CX | ATTR_CH_EXT_CY => {
+                if let Ok(v) = value.parse::<i64>() {
+                    let field = match key.as_str() {
+                        ATTR_CH_OFF_X => "ch_off_x",
+                        ATTR_CH_OFF_Y => "ch_off_y",
+                        ATTR_CH_EXT_CX => "ch_ext_cx",
+                        _ => "ch_ext_cy",
+                    };
+                    shape.insert(field.into(), json!(v));
+                }
             }
             _ => {
                 if let Some(side) = key.strip_prefix(ATTR_CROP_PREFIX)

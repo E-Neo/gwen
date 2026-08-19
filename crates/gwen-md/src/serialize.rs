@@ -1,8 +1,14 @@
+use std::path::Path;
+
 use serde_json::{Map, Value};
 
+use super::error::MdResult;
 use super::markers::{
-    ATTR_GRID, ATTR_NAME, ATTR_ROTATION, ATTR_TYPE, ATTR_WIDTH, LENGTH_ATTRS, legend,
-    shape_type_token,
+    ATTR_CH_EXT_CX, ATTR_CH_EXT_CY, ATTR_CH_OFF_X, ATTR_CH_OFF_Y, ATTR_CHART_TYPE, ATTR_GRID,
+    ATTR_ID, ATTR_IMAGE, ATTR_MERGE, ATTR_NAME, ATTR_PH_IDX, ATTR_PH_SZ, ATTR_PH_TYPE,
+    ATTR_PLACEHOLDER, ATTR_ROTATION, ATTR_ROW_HEIGHTS, ATTR_SRC, ATTR_TYPE, ATTR_URI, ATTR_WIDTH,
+    LENGTH_ATTRS, MARKER_BACKGROUND, MARKER_END_GROUP, MARKER_LAYOUT, MARKER_MASTER, MARKER_SLIDE,
+    legend, shape_type_token,
 };
 use super::normalize;
 use super::style::{
@@ -50,7 +56,7 @@ pub fn serialize(snapshot: &Value) -> String {
             out.push_str(&format!("# Master {}\n\n", i + 1));
             if let Some(shapes) = master.get("shapes").and_then(Value::as_array) {
                 for shape in shapes {
-                    write_shape(&mut out, &mut reg, shape);
+                    write_shape(&mut out, &mut reg, shape, false);
                 }
             }
             out.push('\n');
@@ -116,6 +122,11 @@ fn register_shape(reg: &mut StyleRegistry, shape: &Value) {
                     register_cell(reg, cell);
                 }
             }
+        }
+    }
+    if let Some(children) = obj.get("shapes").and_then(Value::as_array) {
+        for child in children {
+            register_shape(reg, child);
         }
     }
 }
@@ -199,14 +210,14 @@ fn write_slide(out: &mut String, reg: &mut StyleRegistry, slide: &Value, idx: us
     out.push('\n');
 
     for shape in shapes {
-        write_shape(out, reg, shape);
+        write_shape(out, reg, shape, false);
     }
 
     if let Some(notes) = obj.get("notes").filter(|v| !v.is_null()) {
         out.push_str("### Notes\n\n");
         if let Some(notes_shapes) = notes.get("shapes").and_then(Value::as_array) {
             for shape in notes_shapes {
-                write_shape(out, reg, shape);
+                write_shape(out, reg, shape, false);
             }
         }
         out.push('\n');
@@ -232,32 +243,51 @@ fn write_background(out: &mut String, slide: &Value) {
     } else {
         format!("{}:{}", ty.to_ascii_uppercase(), color)
     };
-    out.push_str(&format!("<!-- background fill=\"{}\" -->\n", val));
+    out.push_str(&format!("<!-- {MARKER_BACKGROUND} fill=\"{}\" -->\n", val));
 }
 
-fn write_shape(out: &mut String, reg: &mut StyleRegistry, shape: &Value) {
+fn write_shape(out: &mut String, reg: &mut StyleRegistry, shape: &Value, complete: bool) {
     let Some(obj) = shape.as_object() else {
         return;
     };
 
-    write_shape_marker(out, reg, obj);
+    write_shape_marker(out, reg, obj, complete);
 
-    if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
+    let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
+    if shape_type == "GROUP" {
+        if complete {
+            if let Some(children) = obj.get("shapes").and_then(Value::as_array) {
+                for child in children {
+                    write_shape(out, reg, child, true);
+                }
+            }
+            out.push_str(&format!("<!-- {MARKER_END_GROUP} -->\n"));
+        }
+    } else if shape_type == "CHART" && complete {
+        write_chart_table(out, obj);
+    } else if let Some(tf) = obj.get("text_frame").and_then(Value::as_object) {
         if let Some(paras) = tf.get("paragraphs").and_then(Value::as_array) {
             for para in paras {
-                write_paragraph(out, reg, para);
+                write_paragraph(out, reg, para, complete);
             }
         }
     } else if let Some(table) = obj.get("table") {
-        write_table(out, reg, table);
+        write_table(out, reg, table, complete);
     }
 }
 
 /// Emit the shape marker: `<!-- shape type="textbox" class="textbox-1"
-/// name="TextBox 4" left="914400" top="152400" width="6096000" height="914400"
-/// rotation="-20" grid="775018,936978" crop-left="0.1" -->`. Attributes are
-/// emitted only for non-null snapshot values.
-fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<String, Value>) {
+/// id="4" name="TextBox 4" left="914400" top="152400" width="6096000"
+/// height="914400" rotation="-20" placeholder ph-type="TITLE" ph-idx="1"
+/// ph-sz="full" image="image1.png" grid="775018,936978" row-heights="1000"
+/// merge="1,0,2,1,0,0" crop-left="0.1" ch-off-x="0" ch-off-y="0" ch-ext-cx="0"
+/// ch-ext-cy="0" -->`. Attributes are emitted only for non-null snapshot values.
+fn write_shape_marker(
+    out: &mut String,
+    reg: &mut StyleRegistry,
+    obj: &Map<String, Value>,
+    complete: bool,
+) {
     let shape_type = obj.get("shape_type").and_then(Value::as_str).unwrap_or("");
     let auto = obj.get("auto_shape_type").and_then(Value::as_str);
     let sclass = reg.class_for(&shape_kind(shape_type, auto), &shape_class_decls(obj));
@@ -267,6 +297,9 @@ fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<Strin
         parts.push(format!("auto-shape=\"{}\"", escape_attr(v)));
     }
     parts.push(format!("class=\"{sclass}\""));
+    if complete && let Some(v) = obj.get("shape_id") {
+        parts.push(format!("{ATTR_ID}=\"{}\"", scalar(v)));
+    }
     if let Some(v) = obj.get(ATTR_NAME).and_then(Value::as_str) {
         parts.push(format!("{ATTR_NAME}=\"{}\"", escape_attr(v)));
     }
@@ -278,17 +311,76 @@ fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<Strin
     if let Some(v) = obj.get(ATTR_ROTATION) {
         parts.push(format!("{ATTR_ROTATION}=\"{}\"", scalar(v)));
     }
-    if let Some(grid) = obj
-        .get("table")
-        .and_then(Value::as_object)
-        .and_then(|t| t.get(ATTR_GRID))
-        .and_then(Value::as_array)
-    {
-        let widths: Vec<String> = grid
-            .iter()
-            .filter_map(|g| g.as_object().and_then(|o| o.get(ATTR_WIDTH)).map(scalar))
-            .collect();
-        parts.push(format!("{ATTR_GRID}=\"{}\"", widths.join(",")));
+    if complete {
+        if obj.get("is_placeholder").and_then(Value::as_bool) == Some(true) {
+            parts.push(ATTR_PLACEHOLDER.to_string());
+        }
+        if let Some(pf) = obj.get("placeholder_format").and_then(Value::as_object) {
+            if let Some(v) = pf.get("type").and_then(Value::as_str) {
+                parts.push(format!("{ATTR_PH_TYPE}=\"{}\"", escape_attr(v)));
+            }
+            if let Some(v) = pf.get("idx") {
+                parts.push(format!("{ATTR_PH_IDX}=\"{}\"", scalar(v)));
+            }
+            if let Some(v) = pf.get("sz").and_then(Value::as_str) {
+                parts.push(format!("{ATTR_PH_SZ}=\"{}\"", escape_attr(v)));
+            }
+        }
+        if let Some(v) = obj.get(ATTR_IMAGE).and_then(Value::as_str) {
+            parts.push(format!("{ATTR_IMAGE}=\"{}\"", escape_attr(v)));
+        }
+        for (key, attr) in [
+            ("ch_off_x", ATTR_CH_OFF_X),
+            ("ch_off_y", ATTR_CH_OFF_Y),
+            ("ch_ext_cx", ATTR_CH_EXT_CX),
+            ("ch_ext_cy", ATTR_CH_EXT_CY),
+        ] {
+            if let Some(v) = obj.get(key) {
+                parts.push(format!("{attr}=\"{}\"", scalar(v)));
+            }
+        }
+        if let Some(chart_type) = obj
+            .get("chart")
+            .and_then(Value::as_object)
+            .and_then(|c| c.get("chart_type"))
+            .and_then(Value::as_str)
+        {
+            parts.push(format!("{ATTR_CHART_TYPE}=\"{}\"", escape_attr(chart_type)));
+        }
+    }
+    if let Some(table) = obj.get("table").and_then(Value::as_object) {
+        if let Some(grid) = table.get(ATTR_GRID).and_then(Value::as_array).map(|g| {
+            g.iter()
+                .filter_map(|c| c.as_object().and_then(|o| o.get(ATTR_WIDTH)).map(scalar))
+                .collect::<Vec<_>>()
+                .join(",")
+        }) {
+            parts.push(format!("{ATTR_GRID}=\"{grid}\""));
+        }
+        if complete {
+            if let Some(heights) = table
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.get("height"))
+                        .map(scalar)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty())
+            {
+                parts.push(format!("{ATTR_ROW_HEIGHTS}=\"{heights}\""));
+            }
+            if let Some(merges) = table
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|rows| merge_tokens(rows))
+                .filter(|t| !t.is_empty())
+            {
+                parts.push(format!("{ATTR_MERGE}=\"{}\"", merges.join(";")));
+            }
+        }
     }
     if let Some(crop) = obj.get("crop").and_then(Value::as_object) {
         for side in ["left", "top", "right", "bottom"] {
@@ -300,7 +392,86 @@ fn write_shape_marker(out: &mut String, reg: &mut StyleRegistry, obj: &Map<Strin
     out.push_str(&format!("<!-- shape {} -->\n", parts.join(" ")));
 }
 
-fn write_paragraph(out: &mut String, reg: &mut StyleRegistry, para: &Value) {
+/// Per-cell merge tokens (`r,c,gridSpan,rowSpan,hMerge,vMerge`) for every
+/// table cell carrying a merge property.
+fn merge_tokens(rows: &[Value]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        let Some(cells) = row.get("cells").and_then(Value::as_array) else {
+            continue;
+        };
+        for (ci, cell) in cells.iter().enumerate() {
+            let Some(c) = cell.as_object() else {
+                continue;
+            };
+            let grid_span = c.get("grid_span").and_then(Value::as_u64).unwrap_or(0);
+            let row_span = c.get("row_span").and_then(Value::as_u64).unwrap_or(0);
+            let h_merge = c.get("h_merge").and_then(Value::as_bool).unwrap_or(false);
+            let v_merge = c.get("v_merge").and_then(Value::as_bool).unwrap_or(false);
+            if grid_span > 0 || row_span > 0 || h_merge || v_merge {
+                out.push(format!(
+                    "{ri},{ci},{grid_span},{row_span},{},",
+                    if h_merge { 1 } else { 0 }
+                ));
+                let last = out.last_mut().expect("just pushed");
+                last.push(if v_merge { '1' } else { '0' });
+            }
+        }
+    }
+    out
+}
+
+/// The series table under a `type="chart"` marker: header row = categories,
+/// later rows = series name + values.
+fn write_chart_table(out: &mut String, obj: &Map<String, Value>) {
+    let Some(chart) = obj.get("chart").and_then(Value::as_object) else {
+        out.push('\n');
+        return;
+    };
+    let Some(series) = chart.get("series").and_then(Value::as_array) else {
+        out.push('\n');
+        return;
+    };
+    let cats: Vec<String> = series
+        .first()
+        .and_then(|s| s.get("categories"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(chart_cell).collect())
+        .unwrap_or_default();
+    let cols = cats.len() + 1;
+    out.push_str(&format!(
+        "| {} |\n",
+        std::iter::once(String::new())
+            .chain(cats.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    out.push_str(&format!("| {} |\n", vec!["---"; cols].join(" | ")));
+    for s in series {
+        let name = s.get("name").and_then(Value::as_str).unwrap_or("");
+        let values: Vec<String> = s
+            .get("values")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(scalar).collect())
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "| {} | {} |\n",
+            chart_cell_str(name),
+            values.join(" | ")
+        ));
+    }
+    out.push('\n');
+}
+
+fn chart_cell(v: &Value) -> String {
+    chart_cell_str(v.as_str().unwrap_or(""))
+}
+
+fn chart_cell_str(s: &str) -> String {
+    escape_text(s)
+}
+
+fn write_paragraph(out: &mut String, reg: &mut StyleRegistry, para: &Value, complete: bool) {
     let Some(obj) = para.as_object() else {
         return;
     };
@@ -313,7 +484,7 @@ fn write_paragraph(out: &mut String, reg: &mut StyleRegistry, para: &Value) {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let content = render_runs(reg, runs);
+    let content = render_runs(reg, runs, complete);
     if content.is_empty() {
         out.push_str("<span></span>\n\n");
     } else {
@@ -350,31 +521,57 @@ fn starts_with_ordered_list(b: &[u8]) -> bool {
     i < b.len() && b[i] == b'.' && (i + 1 >= b.len() || b[i + 1] == b' ' || b[i + 1] == b'\t')
 }
 
-fn render_runs(reg: &mut StyleRegistry, runs: &[Value]) -> String {
+fn render_runs(reg: &mut StyleRegistry, runs: &[Value], complete: bool) -> String {
     let mut out = String::new();
     for run in runs {
-        out.push_str(&render_run(reg, run));
+        out.push_str(&render_run(reg, run, complete));
     }
     out
 }
 
-fn render_run(reg: &mut StyleRegistry, run: &Value) -> String {
+fn render_run(reg: &mut StyleRegistry, run: &Value, complete: bool) -> String {
     let Some(obj) = run.as_object() else {
         return String::new();
     };
     let text = obj.get("text").and_then(Value::as_str).unwrap_or("");
+    let link = if complete {
+        obj.get("hyperlink")
+            .and_then(Value::as_object)
+            .and_then(|h| h.get("address"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
     let Some(font) = obj
         .get("font")
         .and_then(Value::as_object)
         .filter(|f| !f.is_empty())
     else {
-        return escape_text(text);
+        let body = escape_text(text);
+        return link.map_or(body.clone(), |url| format!("[{body}]({})", escape_url(url)));
     };
-    if let Some((open, close)) = native_emphasis(font) {
-        return format!("{open}{}{close}", escape_text(text));
+    let body = if let Some((open, close)) = native_emphasis(font) {
+        format!("{open}{}{close}", escape_text(text))
+    } else {
+        let class = reg.class_for("run", &run_decls(font));
+        format!("<span class=\"{class}\">{}</span>", escape_text(text))
+    };
+    link.map_or(body.clone(), |url| format!("[{body}]({})", escape_url(url)))
+}
+
+/// Escape a link destination so the `[text](url)` form parses back verbatim.
+fn escape_url(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '(' => out.push_str("\\("),
+            ')' => out.push_str("\\)"),
+            _ => out.push(c),
+        }
     }
-    let class = reg.class_for("run", &run_decls(font));
-    format!("<span class=\"{class}\">{}</span>", escape_text(text))
+    out
 }
 
 /// Emphasis markers for a font that is exactly `{bold:true}`, `{italic:true}`
@@ -400,7 +597,7 @@ fn native_emphasis(font: &Map<String, Value>) -> Option<(&'static str, &'static 
     }
 }
 
-fn write_table(out: &mut String, reg: &mut StyleRegistry, table: &Value) {
+fn write_table(out: &mut String, reg: &mut StyleRegistry, table: &Value, complete: bool) {
     let Some(obj) = table.as_object() else {
         out.push('\n');
         return;
@@ -417,7 +614,7 @@ fn write_table(out: &mut String, reg: &mut StyleRegistry, table: &Value) {
     let header: Vec<String> = rows
         .first()
         .and_then(|r| r.get("cells").and_then(Value::as_array))
-        .map(|cells| cells.iter().map(|c| write_cell(reg, c)).collect())
+        .map(|cells| cells.iter().map(|c| write_cell(reg, c, complete)).collect())
         .unwrap_or_default();
     out.push_str(&format!("| {} |\n", header.join(" | ")));
     out.push_str(&format!("| {} |\n", vec!["---"; cols].join(" | ")));
@@ -425,14 +622,14 @@ fn write_table(out: &mut String, reg: &mut StyleRegistry, table: &Value) {
         let cells: Vec<String> = row
             .get("cells")
             .and_then(Value::as_array)
-            .map(|c| c.iter().map(|c| write_cell(reg, c)).collect())
+            .map(|c| c.iter().map(|c| write_cell(reg, c, complete)).collect())
             .unwrap_or_default();
         out.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
     out.push('\n');
 }
 
-fn write_cell(reg: &mut StyleRegistry, cell: &Value) -> String {
+fn write_cell(reg: &mut StyleRegistry, cell: &Value, complete: bool) -> String {
     let Some(tf) = cell.get("text_frame").and_then(Value::as_object) else {
         return String::new();
     };
@@ -448,6 +645,7 @@ fn write_cell(reg: &mut StyleRegistry, cell: &Value) -> String {
                     .and_then(Value::as_array)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
+                complete,
             )
         })
         .collect::<Vec<_>>()
@@ -566,4 +764,255 @@ fn escape_text(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Multi-file project mirror
+// ---------------------------------------------------------------------------
+
+/// Write the full project mirror for `snapshot` under `dir`: `PRESENTATION.md`
+/// plus `src/masters/`, `src/layouts/` and `src/slides/`. The snapshot must be
+/// the complete query output (including `uri` fields); binary parts and media
+/// are captured separately by the `gwen new` command.
+pub fn write_document(snapshot: &Value, dir: &Path) -> MdResult<()> {
+    let doc = normalize::normalize(snapshot);
+    let obj = doc.as_object().ok_or_else(|| {
+        super::error::MdError::at(
+            "snapshot must be an object",
+            super::error::MdSpan {
+                line: 0,
+                col: 0,
+                offset: 0,
+                len: 0,
+            },
+        )
+    })?;
+    let src = dir.join("src");
+    let masters_dir = src.join("masters");
+    let layouts_dir = src.join("layouts");
+    let slides_dir = src.join("slides");
+    for d in [&masters_dir, &layouts_dir, &slides_dir] {
+        std::fs::create_dir_all(d)?;
+    }
+
+    let mut pres = String::new();
+    write_front_matter(&mut pres, obj);
+    pres.push('\n');
+    pres.push_str(legend());
+    pres.push('\n');
+
+    let mut layout_file = 0usize;
+    if let Some(masters) = obj.get("slide_masters").and_then(Value::as_array) {
+        for (i, master) in masters.iter().enumerate() {
+            let src_ref = format!("masters/master{}.md", i + 1);
+            let uri = master.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+            let name = master.get("name").and_then(Value::as_str).unwrap_or("");
+            write_ref(
+                &mut pres,
+                MARKER_MASTER,
+                &[("name", name), (ATTR_URI, uri), (ATTR_SRC, &src_ref)],
+            );
+            write_master_file(&masters_dir, &layouts_dir, &mut layout_file, i + 1, master)?;
+        }
+    }
+    if let Some(slides) = obj.get("slides").and_then(Value::as_array) {
+        for (i, slide) in slides.iter().enumerate() {
+            let src_ref = format!("slides/slide{}.md", i + 1);
+            let uri = slide.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+            write_ref(
+                &mut pres,
+                MARKER_SLIDE,
+                &[("name", ""), (ATTR_URI, uri), (ATTR_SRC, &src_ref)],
+            );
+            write_slide_file(&slides_dir, i + 1, slide)?;
+        }
+    }
+
+    std::fs::write(dir.join("PRESENTATION.md"), pres)?;
+    Ok(())
+}
+
+/// A `<!-- key name="..." uri="..." src="..." -->` reference line. Attributes
+/// with empty values are omitted.
+fn write_ref(out: &mut String, key: &str, attrs: &[(&str, &str)]) {
+    let mut parts = Vec::new();
+    for (k, v) in attrs {
+        if !v.is_empty() {
+            parts.push(format!("{k}=\"{}\"", escape_attr(v)));
+        }
+    }
+    out.push_str(&format!("<!-- {key} {} -->\n", parts.join(" ")));
+}
+
+/// A string view of a scalar value (numbers and strings).
+fn scalar_str(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// A per-file YAML front matter from key/value pairs, all values quoted.
+fn write_file_front(out: &mut String, pairs: &[(&str, &str)]) {
+    out.push_str("---\n");
+    for (k, v) in pairs {
+        out.push_str(&format!("{k}: {}\n", quote(v)));
+    }
+    out.push_str("---\n");
+}
+
+fn write_master_file(
+    masters_dir: &Path,
+    layouts_dir: &Path,
+    layout_file: &mut usize,
+    n: usize,
+    master: &Value,
+) -> MdResult<()> {
+    let obj = master.as_object().cloned().unwrap_or_default();
+    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+    let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
+
+    let mut out = String::new();
+    write_file_front(&mut out, &[(ATTR_URI, uri), ("name", name)]);
+    out.push('\n');
+    out.push_str(&format!(
+        "<!-- Gwen mirror part: masters/master{n}.md -->\n\n"
+    ));
+
+    let shapes = obj
+        .get("shapes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut reg = StyleRegistry::new();
+    for shape in &shapes {
+        register_shape(&mut reg, shape);
+    }
+    out.push_str(&reg.to_style_block());
+    out.push('\n');
+    for shape in &shapes {
+        write_shape(&mut out, &mut reg, shape, true);
+    }
+    out.push('\n');
+
+    if let Some(layouts) = obj.get("slide_layouts").and_then(Value::as_array) {
+        for layout in layouts {
+            *layout_file += 1;
+            let lsrc = format!("layouts/layout{layout_file}.md");
+            let luri = layout.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+            let lname = layout.get("name").and_then(Value::as_str).unwrap_or("");
+            write_ref(
+                &mut out,
+                MARKER_LAYOUT,
+                &[("name", lname), (ATTR_URI, luri), (ATTR_SRC, &lsrc)],
+            );
+            write_layout_file(layouts_dir, *layout_file, layout)?;
+        }
+    }
+
+    std::fs::write(masters_dir.join(format!("master{n}.md")), out)?;
+    Ok(())
+}
+
+fn write_layout_file(layouts_dir: &Path, n: usize, layout: &Value) -> MdResult<()> {
+    let obj = layout.as_object().cloned().unwrap_or_default();
+    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+    let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
+
+    let mut out = String::new();
+    write_file_front(&mut out, &[(ATTR_URI, uri), ("name", name)]);
+    out.push('\n');
+    out.push_str(&format!(
+        "<!-- Gwen mirror part: layouts/layout{n}.md -->\n\n"
+    ));
+
+    let shapes = obj
+        .get("shapes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut reg = StyleRegistry::new();
+    for shape in &shapes {
+        register_shape(&mut reg, shape);
+    }
+    out.push_str(&reg.to_style_block());
+    out.push('\n');
+    for shape in &shapes {
+        write_shape(&mut out, &mut reg, shape, true);
+    }
+    std::fs::write(layouts_dir.join(format!("layout{n}.md")), out)?;
+    Ok(())
+}
+
+fn write_slide_file(slides_dir: &Path, n: usize, slide: &Value) -> MdResult<()> {
+    let obj = slide.as_object().cloned().unwrap_or_default();
+    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+    let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
+    let layout = obj
+        .get("slide_layout")
+        .and_then(Value::as_object)
+        .map(|l| {
+            let m = l
+                .get("master")
+                .and_then(scalar_str)
+                .unwrap_or_else(|| "".to_string());
+            let l = l
+                .get("layout")
+                .and_then(scalar_str)
+                .unwrap_or_else(|| "".to_string());
+            (m, l)
+        })
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    write_file_front(
+        &mut out,
+        &[
+            (ATTR_URI, uri),
+            ("name", name),
+            ("master", &layout.0),
+            ("layout", &layout.1),
+        ],
+    );
+    out.push('\n');
+    out.push_str(&format!(
+        "<!-- Gwen mirror part: slides/slide{n}.md -->\n\n"
+    ));
+
+    let shapes = obj
+        .get("shapes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut notes_shapes: Vec<Value> = Vec::new();
+    if let Some(notes) = obj.get("notes").filter(|v| !v.is_null())
+        && let Some(ns) = notes.get("shapes").and_then(Value::as_array)
+    {
+        notes_shapes = ns.clone();
+    }
+    let mut reg = StyleRegistry::new();
+    for shape in &shapes {
+        register_shape(&mut reg, shape);
+    }
+    for shape in &notes_shapes {
+        register_shape(&mut reg, shape);
+    }
+    out.push_str(&reg.to_style_block());
+    out.push('\n');
+
+    write_background(&mut out, slide);
+    out.push('\n');
+    for shape in &shapes {
+        write_shape(&mut out, &mut reg, shape, true);
+    }
+    if !notes_shapes.is_empty() {
+        out.push_str("### Notes\n\n");
+        for shape in &notes_shapes {
+            write_shape(&mut out, &mut reg, shape, true);
+        }
+        out.push('\n');
+    }
+    std::fs::write(slides_dir.join(format!("slide{n}.md")), out)?;
+    Ok(())
 }

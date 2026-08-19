@@ -6,28 +6,27 @@ use clap::{Parser, Subcommand};
     about = "Lossless Markdown editing of PowerPoint (.pptx) files",
     after_help = concat!(
         "\u{1b}[1;4mWorkflow:\u{1b}[0m\n",
-        r#"  Everything is driven by the Markdown mirror that `markdown` emits. You
-  edit the Markdown and rebuild the deck with `build`.
+        r#"  Everything is driven by a project directory holding a Markdown mirror
+  plus the unmodeled parts captured from the template deck.
 
-    1. gwen markdown --input deck.pptx > deck.md
-    2. Edit deck.md (change text, recolor a run, move or add a shape,
-       edit a theme color, add or delete a slide, ...).
-    3. gwen build --input deck.pptx --markdown deck.md --output out.pptx
+    1. gwen new deck --pptx template.pptx
+    2. Edit deck/PRESENTATION.md (change text, recolor a run, move or add a
+       shape, edit a theme color, add or delete a slide, ...).
+    3. gwen build deck   # -> deck/target/<name>.pptx
 
-  `build` diffs your Markdown against the original file and applies only the
-  changes: things you did not touch are left exactly as they are, and
-  unmodeled XML (shadows, gradients, effects) survives untouched.
-
+  `build` regenerates the whole deck from the mirror and the captured parts:
+  things you did not model in Markdown (shadows, gradients, effects,
+  unmodeled XML) survive untouched because they were captured verbatim.
 "#,
         "\u{1b}[1;4mMarkdown editing:\u{1b}[0m\n",
         r#"  The mirror is plain Markdown plus HTML comment markers. The full grammar
   is documented in docs/mirror-format.md and in a legend at the top of every
   mirror.
 
-  Slides are separated by `## ` headings (structural: `## Slide 2`; the text
-  is only a label). Masters are `# Master N`, notes `### Notes`. A `<style>`
-  block at the top (plus a YAML front matter with slide geometry, theme and
-  core properties) defines classes that pin the unmodeled XML.
+  PRESENTATION.md lists slides, masters and layouts as `## ` sections
+  pointing at per-slide files in src/slides/, src/masters/, src/layouts/.
+  A YAML front matter holds the presentation name, slide geometry, theme and
+  core properties.
 
   Each shape carries one readable marker followed by its content (markdown
   paragraphs, or a markdown table for tables):
@@ -55,8 +54,8 @@ use clap::{Parser, Subcommand};
 
 "#,
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  gwen markdown --input deck.pptx > deck.md
-  gwen build --input deck.pptx --markdown deck.md --output out.pptx"#
+        r#"  gwen new deck --pptx template.pptx
+  gwen build deck"#
     ),
     subcommand_required = true,
     arg_required_else_help = true
@@ -68,44 +67,35 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Dump a presentation to an editable Markdown mirror
+    /// Create a new project directory from a template deck
     #[command(after_help = concat!(
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  gwen markdown --input deck.pptx > deck.md
-  gwen markdown --input deck.pptx --media media/ > deck.md
+        r#"  gwen new deck --pptx template.pptx
 
-The mirror covers slides and their shapes (text frames, tables), masters,
-theme and core properties. Pass --media <DIR> to also write every image
-referenced by the deck into DIR."#
+Creates deck/ with a Markdown mirror (PRESENTATION.md plus src/slides,
+src/masters, src/layouts), the template's unmodeled parts captured into
+src/parts, extracted images into src/media, and a config.toml.
+Errors if deck/ already exists."#
     ))]
-    Markdown {
-        /// Input PPTX file path
-        #[arg(long)]
-        input: String,
+    New {
+        /// New project directory (must not exist yet)
+        project: String,
 
-        /// Directory to extract media files into
+        /// Template PPTX file to initialize the project from
         #[arg(long)]
-        media: Option<String>,
+        pptx: String,
     },
-    /// Apply an edited Markdown mirror to the presentation
+    /// Compile a project directory into target/<name>.pptx
     #[command(after_help = concat!(
         "\u{1b}[1;4mExamples:\u{1b}[0m\n",
-        r#"  gwen build --input deck.pptx --markdown deck.md --output out.pptx
+        r#"  gwen build deck
 
-Only the parts you changed are applied; the rest of the deck is left
-byte-for-byte intact. The original deck is never modified."#
+Rebuilds deck/target/<name>.pptx from the Markdown mirror and the captured
+parts. The project name comes from [presentation] name in config.toml."#
     ))]
     Build {
-        /// Input PPTX file path (the original, used for lossless diffing)
-        #[arg(long)]
-        input: String,
-
-        /// Markdown mirror to apply (as produced by markdown)
-        #[arg(long)]
-        markdown: String,
-
-        /// Output PPTX file path
-        #[arg(long)]
-        output: String,
+        /// Project directory (defaults to the current directory)
+        #[arg(default_value = ".")]
+        project: String,
     },
 }

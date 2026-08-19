@@ -24,8 +24,17 @@ impl Package {
         Self::from_archive(&mut archive)
     }
 
+    /// An empty package, used as the starting point for compiling a deck from
+    /// scratch. Parts and relationships are added with `set_part` /
+    /// `add_relationship`.
+    pub fn empty() -> Self {
+        Package {
+            parts: HashMap::new(),
+            relationships: HashMap::new(),
+        }
+    }
+
     /// Build a package directly from in-memory parts and relationships.
-    #[cfg(test)]
     pub fn from_parts(
         parts: HashMap<String, Vec<u8>>,
         relationships: HashMap<String, HashMap<String, Relationship>>,
@@ -119,6 +128,51 @@ impl Package {
 
     pub fn get_rels(&self, uri: &str) -> Option<&HashMap<String, Relationship>> {
         self.relationships.get(uri)
+    }
+
+    /// The serialized `.rels` XML for a source part, for capturing rels into a
+    /// project's `src/parts/_rels/` directory.
+    pub fn rels_xml_for(&self, source_uri: &str) -> Option<Vec<u8>> {
+        let rels = self.relationships.get(source_uri)?;
+        serialize_rels_xml(rels).ok()
+    }
+
+    /// Extract `PartName` → `ContentType` overrides from a `[Content_Types].xml`
+    /// part, for writing a project's `_content-types.toml`.
+    pub fn content_type_overrides(data: &[u8]) -> AppResult<HashMap<String, String>> {
+        let mut reader = Reader::from_reader(data);
+        reader.config_mut().trim_text(true);
+        let mut out = HashMap::new();
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                    if e.name().as_ref() == b"Override" {
+                        let mut part_name = None;
+                        let mut content_type = None;
+                        for a in e.attributes().flatten() {
+                            match a.key.as_ref() {
+                                b"PartName" => {
+                                    part_name = Some(String::from_utf8_lossy(&a.value).to_string())
+                                }
+                                b"ContentType" => {
+                                    content_type =
+                                        Some(String::from_utf8_lossy(&a.value).to_string())
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let (Some(p), Some(c)) = (part_name, content_type) {
+                            out.insert(p.trim_start_matches('/').to_string(), c);
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(AppError::Xml(e)),
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 
     pub fn add_relationship(&mut self, source_uri: &str, rel: Relationship) -> String {

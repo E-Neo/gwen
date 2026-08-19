@@ -1,8 +1,8 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
-use crate::engine::xml_edit::core_prop_key;
 use crate::error::{AppError, AppResult};
+use crate::xml_parse::core_prop_key;
 
 /// Parse the standard core properties from a `docProps/core.xml` part into a
 /// JSON object keyed by snake_case property name (e.g. `title`, `author`).

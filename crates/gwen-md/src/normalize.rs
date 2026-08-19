@@ -39,10 +39,10 @@ fn normalize_runs(runs: &[Value]) -> Vec<Value> {
         if text.is_empty() {
             continue;
         }
-        let key = font_key(obj);
+        let key = run_key(obj);
         if let Some(last) = out.last_mut()
             && let Some(last_obj) = last.as_object_mut()
-            && font_key(last_obj) == key
+            && run_key(last_obj) == key
             && let Some(Value::String(s)) = last_obj.get_mut("text")
         {
             s.push_str(text);
@@ -54,12 +54,28 @@ fn normalize_runs(runs: &[Value]) -> Vec<Value> {
 }
 
 /// The formatting identity of a run: `None` when the run carries no effective
-/// font (absent or an empty object), otherwise a canonical string.
-fn font_key(run: &Map<String, Value>) -> Option<String> {
-    match run.get("font") {
+/// font and no hyperlink, otherwise a canonical string. Two runs merge only
+/// when they share both formatting and link target, so a linked run never
+/// absorbs plain text that happens to be adjacent.
+fn run_key(run: &Map<String, Value>) -> Option<String> {
+    let font = match run.get("font") {
         None | Some(Value::Null) => None,
         Some(Value::Object(m)) if m.is_empty() => None,
         Some(font) => Some(canonical(font)),
+    };
+    let link = run
+        .get("hyperlink")
+        .and_then(Value::as_object)
+        .and_then(|h| h.get("address"))
+        .and_then(Value::as_str);
+    match (font, link) {
+        (None, None) => None,
+        (font, link) => Some(format!(
+            "font={} link={}",
+            font.unwrap_or_default(),
+            link.map(|s| format!("\"{s}\""))
+                .unwrap_or_else(|| "none".into())
+        )),
     }
 }
 
@@ -165,5 +181,39 @@ mod tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0]["text"], "xy");
+    }
+
+    #[test]
+    fn keeps_linked_and_plain_runs_separate() {
+        let v = json!({
+            "paragraphs": [
+                {"runs": [
+                    {"text": "click here", "hyperlink": {"address": "https://example.com"}},
+                    {"text": " and more"},
+                ]}
+            ]
+        });
+        let n = normalize(&v);
+        let runs = n["paragraphs"][0]["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "link must not absorb adjacent plain text");
+        assert_eq!(runs[0]["text"], "click here");
+        assert!(runs[1].get("hyperlink").is_none());
+    }
+
+    #[test]
+    fn merges_adjacent_runs_sharing_a_link() {
+        let v = json!({
+            "paragraphs": [
+                {"runs": [
+                    {"text": "click ", "hyperlink": {"address": "https://example.com"}},
+                    {"text": "here", "hyperlink": {"address": "https://example.com"}},
+                ]}
+            ]
+        });
+        let n = normalize(&v);
+        let runs = n["paragraphs"][0]["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["text"], "click here");
+        assert_eq!(runs[0]["hyperlink"]["address"], "https://example.com");
     }
 }

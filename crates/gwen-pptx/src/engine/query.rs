@@ -8,8 +8,84 @@ use crate::model::core_props;
 use crate::model::notes;
 use crate::model::presentation::Presentation;
 use crate::model::slide;
-use crate::opc::Package;
+use crate::opc::{Package, Relationship};
 use crate::path;
+
+/// Resolve every run hyperlink's `r_id` relationship into a self-contained
+/// `address`, then drop the relationship scaffolding. This is what makes the
+/// mirror's `[text](url)` form lossless: an external relationship becomes its
+/// URL, an internal slide relationship becomes `slide://N`, and any other
+/// internal target becomes `internal://<part uri>`. Links that resolve to
+/// nothing are dropped.
+fn resolve_run_hyperlinks(
+    pkg: &Package,
+    source_uri: &str,
+    rels: Option<&HashMap<String, Relationship>>,
+    shapes: &mut [crate::dto::ShapeDto],
+) {
+    for shape in shapes {
+        if let Some(tf) = &mut shape.text_frame {
+            for para in &mut tf.paragraphs {
+                for run in &mut para.runs {
+                    resolve_run_hyperlink(pkg, source_uri, rels, run);
+                }
+            }
+        }
+        if let Some(table) = &mut shape.table {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    if let Some(tf) = &mut cell.text_frame {
+                        for para in &mut tf.paragraphs {
+                            for run in &mut para.runs {
+                                resolve_run_hyperlink(pkg, source_uri, rels, run);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(children) = &mut shape.shapes {
+            resolve_run_hyperlinks(pkg, source_uri, rels, children);
+        }
+    }
+}
+
+fn resolve_run_hyperlink(
+    pkg: &Package,
+    source_uri: &str,
+    rels: Option<&HashMap<String, Relationship>>,
+    run: &mut crate::dto::RunDto,
+) {
+    let Some(hyperlink) = &mut run.hyperlink else {
+        return;
+    };
+    if hyperlink.address.is_none()
+        && let Some(r_id) = &hyperlink.r_id
+        && let Some(rel) = rels.and_then(|rels| rels.get(r_id))
+    {
+        if rel.target_mode.as_deref() == Some("External") {
+            hyperlink.address = Some(rel.target.clone());
+        } else if let Some(target_uri) = pkg.resolve_relationship_target(source_uri, rel) {
+            hyperlink.address = Some(match slide_index_from_uri(&target_uri) {
+                Some(n) => format!("slide://{n}"),
+                None => format!("internal://{target_uri}"),
+            });
+        }
+    }
+    if hyperlink.address.is_some() {
+        hyperlink.tooltip = None;
+        hyperlink.r_id = None;
+    } else {
+        run.hyperlink = None;
+    }
+}
+
+fn slide_index_from_uri(uri: &str) -> Option<usize> {
+    uri.strip_prefix("ppt/slides/slide")?
+        .strip_suffix(".xml")?
+        .parse()
+        .ok()
+}
 
 fn build_image_map(
     rels: Option<&HashMap<String, crate::opc::Relationship>>,
@@ -40,6 +116,7 @@ fn parse_shapes(
     let rels = pkg.get_rels(uri);
     let image_map = build_image_map(rels);
     let mut shapes = slide::parse_slide_shapes(part_data, &image_map)?;
+    resolve_run_hyperlinks(pkg, uri, rels, &mut shapes);
     crate::model::placeholder::resolve_placeholder_properties(pkg, uri, &mut shapes)?;
 
     // Chart data lives in separate OPC parts; resolve each chart shape's part
@@ -90,7 +167,7 @@ fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<se
     let part_data = pkg
         .get_part(uri)
         .ok_or_else(|| AppError::PartNotFound(uri.to_string()))?;
-    let background = crate::engine::xml_edit::parse_slide_background(part_data);
+    let background = crate::xml_parse::parse_slide_background(part_data);
 
     let notes = notes::resolve_notes_uri(pkg, uri).map(|notes_uri| {
         let shapes = parse_shapes(pkg, &notes_uri, media_dir).ok();
@@ -104,6 +181,7 @@ fn slide_json(pkg: &Package, uri: &str, media_dir: Option<&str>) -> AppResult<se
     });
 
     Ok(json!({
+        "uri": uri,
         "shapes": shapes,
         "background": background,
         "notes": notes,
@@ -119,10 +197,10 @@ fn master_json(pkg: &Package, master_uri: &str, media_dir: Option<&str>) -> serd
         .map(|layout_uri| {
             let shapes = parse_shapes(pkg, &layout_uri, media_dir).unwrap_or_default();
             let name = crate::model::parts::c_sld_name(pkg, &layout_uri);
-            json!({ "name": name, "shapes": shapes })
+            json!({ "uri": layout_uri, "name": name, "shapes": shapes })
         })
         .collect::<Vec<_>>();
-    json!({ "name": name, "slide_layouts": slide_layouts, "shapes": shapes })
+    json!({ "uri": master_uri, "name": name, "slide_layouts": slide_layouts, "shapes": shapes })
 }
 
 /// Open a presentation and resolve its slide URIs, sharing the boilerplate

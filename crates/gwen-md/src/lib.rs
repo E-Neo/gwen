@@ -6,5 +6,5 @@ pub mod serialize;
 pub mod style;
 
 pub use error::{MdError, MdResult, MdSpan};
-pub use parse::{ParsedDoc, parse};
-pub use serialize::serialize;
+pub use parse::{FileKind, ParsedDoc, parse, parse_file, read_document};
+pub use serialize::{serialize, write_document};

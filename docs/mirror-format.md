@@ -1,34 +1,61 @@
 # The Gwen Markdown Mirror — format v2
 
-`gwen markdown` turns a `.pptx` into a plain-Markdown *mirror*; `gwen build`
-applies an edited mirror to the original deck, writing only the parts you
-changed (everything else stays byte-for-byte intact, including unmodeled XML
-such as shadows, gradients and effects).
+`gwen new <project> --pptx <template.pptx>` turns a `.pptx` into a *project
+directory* holding a plain-Markdown *mirror* plus every part the mirror cannot
+express. `gwen build <project>` regenerates the deck from the mirror and the
+captured parts, writing the output to `target/<name>.pptx`.
 
 This document is the specification. Every generated mirror also starts with a
 legend comment summarizing the same grammar.
 
-## Document structure
+## Project layout
 
-A mirror is, in order:
+```
+deck/
+  config.toml            [presentation] name (defaults to the template's file
+                         stem) plus the front matter values
+  PRESENTATION.md        the index: presentation name, slide geometry, theme,
+                         core properties, and one `<!-- slide -->` marker per
+                         slide, one `<!-- master -->` marker per master
+  src/
+    masters/master1.md   one slide master per file; `<!-- layout -->` markers
+                         reference its layout files
+    layouts/layout1.md   one slide layout per file
+    slides/slide1.md     one slide per file; `### Notes` holds its notes
+    parts/               every part the mirror cannot express, preserved
+                         byte-for-byte (plus _rels/, _fragments/,
+                         _content-types.toml)
+    media/               picture/chart image files, keyed by filename
+```
 
-1. a YAML **front matter** (`---` delimited) with `pptx.slide_width`,
-   `pptx.slide_height`, `theme`, and `core_properties`;
-2. the **legend** comment (a single `<!-- ... -->` block; ignored by the
-   parser);
-3. a `<style>` block defining every class referenced below;
-4. `# Master N` sections for each slide master's shapes;
-5. `## Slide N` sections — one per slide — and their shapes;
-6. optional `### Notes` sections inside a slide.
+## The index (`PRESENTATION.md`)
 
-### Slide headings
+A YAML front matter holds the presentation name, slide geometry and the theme
+reference:
 
-A slide is introduced by a level-2 heading. The heading is a **structural
-anchor**: its text is ignored, so `## Slide 1`, `## Cover`, and `## Anything`
-all mean "the next slide". Add a slide by writing a new `## ` section; delete
-one by removing its section. Order matters — slides are matched by index.
+```yaml
+---
+name: "My Deck"
+slide_width: 9144000
+slide_height: 6858000
+theme: "ppt/theme/theme1.xml"
+---
+```
 
-`# Master N` headings and `### Notes` headings are likewise structural.
+The body lists masters and slides as HTML comment markers. Order matters — the
+slides are matched by index.
+
+```html
+<!-- master name="Office Theme" uri="ppt/slideMasters/slideMaster1.xml"
+              src="masters/master1.md" -->
+<!-- slide uri="ppt/slides/slide1.xml" src="slides/slide1.md" -->
+<!-- slide uri="ppt/slides/slide2.xml" src="slides/slide2.md" -->
+```
+
+Each slide file starts with its own front matter (`uri`, `name`, `master`,
+`layout`) followed by a legend and its shapes. Each master file starts with its
+own front matter and a `<style>` block, its shapes, and one `<!-- layout
+src="layouts/layout1.md" -->` marker per layout.
 
 ## Shape markers
 
@@ -53,6 +80,12 @@ Attributes:
 | `rotation` | Degrees, clockwise positive. |
 | `grid` | Comma-separated table column widths in EMU. |
 | `crop-left/top/right/bottom` | Picture crop, fraction 0.0–1.0 of the cropped amount. |
+| `id` | The shape's unique id; leave it out on new shapes to auto-assign. |
+| `placeholder`, `ph-type`, `ph-idx`, `ph-sz` | Placeholder identity. |
+| `image` | The media filename for `type="picture"` (relative to `src/media`). |
+| `row-heights`, `merge` | Table row heights and merged cells. |
+| `chart-type` | The chart geometry for `type="chart"` (e.g. `c:barChart`). |
+| `ch-off-x/y`, `ch-ext-cx/cy` | A group's child coordinate system. |
 
 Geometry, identity and grid are read from the marker's attributes; everything
 else about the shape's look lives in its `class`.
@@ -117,21 +150,29 @@ Runs render with native Markdown emphasis when possible (`**bold**`,
 Text with <span class="run-1">custom</span> formatting
 ```
 
+Links are native Markdown:
+
+```html
+[See the docs](https://example.com)
+[Next slide](slide://2)
+```
+
 ## Editing rules
 
 * **delete a shape** — remove its marker and content;
 * **add a shape** — copy an existing marker block and edit it, or write a new
   one; `type="textbox"` needs no class;
-* **add a slide** — write a new `## ` section in the right position; it is
-  inserted there with a fresh slide part and a slide layout copied from the
-  nearest slide;
-* **delete a slide** — remove its whole `## ` section; the slide part, its
-  relationships, notes slide and content-type override are removed too;
-* **reorder a slide** — move its `## ` block; slides are matched by their
-  shape signature (shape types and names in order), so a slide whose signature
-  changed while staying at the same index is *regenerated in place* — its part
-  name, slide layout and notes survive. Slides matched by position after an
-  insert/delete are left byte-for-byte intact;
+* **add a slide** — write a new `<!-- slide uri=... src=... -->` marker in the
+  right position in the index and a new file `src/slides/slideN.md`; a fresh
+  slide part is created with the slide layout copied from the nearest slide;
+* **delete a slide** — remove its marker from the index and its mirror file;
+  the slide part, its relationships, notes slide and content-type override are
+  removed too;
+* **reorder a slide** — move its marker in the index; slides are matched by
+  their shape signature (shape types and names in order), so a slide whose
+  signature changed while staying at the same index is *regenerated in place* —
+  its part name, slide layout and notes survive. Slides matched by position
+  after an insert/delete are left byte-for-byte intact;
 * **edit styling** — edit the referenced class in the `<style>` block;
 * **read-only fields** (`shape_id`, placeholder flags, slide layouts, table
   row heights, cell paragraph styles, chart data) are never emitted and are

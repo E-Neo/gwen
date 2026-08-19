@@ -29,6 +29,24 @@ impl MdError {
             span,
         }
     }
+
+    pub fn io(err: std::io::Error) -> Self {
+        MdError::at(
+            format!("I/O error: {err}"),
+            MdSpan {
+                line: 0,
+                col: 0,
+                offset: 0,
+                len: 0,
+            },
+        )
+    }
+}
+
+impl From<std::io::Error> for MdError {
+    fn from(err: std::io::Error) -> Self {
+        MdError::io(err)
+    }
 }
 
 impl fmt::Display for MdError {

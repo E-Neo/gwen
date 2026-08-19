@@ -1,7 +1,6 @@
 use serde_json::json;
 
-use crate::engine::xml_edit;
-use crate::engine::xml_edit::{THEME_COLOR_NAMES, find_child_elem_range, find_elem_range};
+use crate::xml_parse::{THEME_COLOR_NAMES, find_child_elem_range, find_elem_range, read_events};
 
 fn read_attr(events: &[quick_xml::events::Event<'_>], i: usize, key: &[u8]) -> Option<String> {
     let e = match &events[i] {
@@ -16,7 +15,7 @@ fn read_attr(events: &[quick_xml::events::Event<'_>], i: usize, key: &[u8]) -> O
 
 /// Query a theme part: `{ "colors": {...}, "fonts": { "major": ..., "minor": ... } }`.
 pub fn parse_theme(xml: &[u8]) -> serde_json::Value {
-    let events = match xml_edit::read_events(xml) {
+    let events = match read_events(xml) {
         Ok(e) => e,
         Err(_) => return json!({}),
     };

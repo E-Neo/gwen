@@ -1,7 +1,6 @@
 use serde_json::json;
 
-use crate::engine::xml_edit;
-use crate::engine::xml_edit::find_elem_range;
+use crate::xml_parse::{find_elem_range, is_chart_type_tag, read_events};
 
 /// Read all `c:v` values under a cache (`c:strCache`/`c:numCache`/`c:strLit`/`c:numLit`)
 /// located within `[start, end]`.
@@ -55,7 +54,7 @@ fn read_series_name(
 
 /// Query a chart part: `{ "chart_type": ..., "series": [ { "name", "categories", "values" }, ... ] }`.
 pub fn parse_chart(xml: &[u8]) -> serde_json::Value {
-    let events = match xml_edit::read_events(xml) {
+    let events = match read_events(xml) {
         Ok(e) => e,
         Err(_) => return json!({}),
     };
@@ -75,7 +74,7 @@ pub fn parse_chart(xml: &[u8]) -> serde_json::Value {
         let mut i = plot_start + 1;
         while i < plot_end {
             if let quick_xml::events::Event::Start(e) = &events[i]
-                && xml_edit::is_chart_type_tag(e.name().as_ref())
+                && is_chart_type_tag(e.name().as_ref())
             {
                 name = Some(String::from_utf8_lossy(e.name().as_ref()).to_string());
                 break;

@@ -3,8 +3,9 @@ use serde_json::{Map, Value, json};
 
 use super::error::{MdError, MdResult, MdSpan};
 use super::markers::{
-    ATTR_AUTO_SHAPE, ATTR_CLASS, ATTR_FILL, ATTR_GRID, ATTR_NAME, ATTR_TYPE, MARKER_BACKGROUND,
-    MARKER_PARAGRAPH, MARKER_SHAPE, shape_type_from_token,
+    ATTR_AUTO_SHAPE, ATTR_CHART_TYPE, ATTR_CLASS, ATTR_FILL, ATTR_GRID, ATTR_MERGE, ATTR_NAME,
+    ATTR_ROW_HEIGHTS, ATTR_TYPE, MARKER_BACKGROUND, MARKER_END_GROUP, MARKER_PARAGRAPH,
+    MARKER_SHAPE, shape_type_from_token,
 };
 use super::style::{
     Styles, font_from_decls, has_para_decls, para_from_decls, parse_style_block, shape_attrs,
@@ -32,6 +33,8 @@ enum Inl {
     SpanClose,
     /// A `<br>` inside a table cell: separates paragraphs.
     Br,
+    /// An opening (Some(url)) or closing (None) markdown link.
+    Link(Option<String>),
 }
 
 /// Assembles inline events into a sequence of run objects.
@@ -42,6 +45,7 @@ struct Runs {
     italic: u32,
     span: Option<Map<String, Value>>,
     span_active: bool,
+    link: Option<String>,
     text_buf: String,
 }
 
@@ -54,8 +58,14 @@ impl Runs {
             italic: 0,
             span: None,
             span_active: false,
+            link: None,
             text_buf: String::new(),
         }
+    }
+
+    fn link(&mut self, url: Option<String>) {
+        self.flush();
+        self.link = url;
     }
 
     /// The concatenated plain text, for heading detection (`### Notes`).
@@ -146,6 +156,9 @@ impl Runs {
         if !font.is_empty() {
             run.insert("font".into(), Value::Object(font));
         }
+        if let Some(url) = &self.link {
+            run.insert("hyperlink".into(), json!({ "address": url.clone() }));
+        }
         self.runs.push(Value::Object(run));
     }
 
@@ -163,6 +176,7 @@ fn apply_inl(runs: &mut Runs, inl: Inl) {
         Inl::SpanOpen(attrs) => runs.span_open(attrs),
         Inl::SpanClose => runs.span_close(),
         Inl::Br => runs.add_text("\n"),
+        Inl::Link(url) => runs.link(url),
     }
 }
 
@@ -178,6 +192,9 @@ struct TfBuf {
 struct ShapeBuf {
     map: Map<String, Value>,
     grid: Option<String>,
+    row_heights: Option<Vec<i64>>,
+    merges: Vec<(usize, usize, u32, u32, bool, bool)>,
+    chart_type: Option<String>,
     /// Frame body properties folded into the shape class, merged into the
     /// frame when its first paragraph appears.
     tf_props: Map<String, Value>,
@@ -185,6 +202,9 @@ struct ShapeBuf {
     tf_dps: Option<Value>,
     tf: Option<TfBuf>,
     table: Option<Value>,
+    chart: Option<Value>,
+    /// Group children (for `type="group"`).
+    children: Vec<Value>,
     span: Option<MdSpan>,
 }
 
@@ -220,6 +240,8 @@ pub struct Parser<'a> {
     heading_level: Option<u32>,
 
     shape: Option<ShapeBuf>,
+    /// Open `type="group"` shapes; children accumulate into the innermost one.
+    group_stack: Vec<ShapeBuf>,
     para_attrs: Option<Map<String, Value>>,
     para: Option<ParaBuf>,
 
@@ -248,6 +270,7 @@ impl<'a> Parser<'a> {
             heading_span: None,
             heading_level: None,
             shape: None,
+            group_stack: Vec::new(),
             para_attrs: None,
             para: None,
             in_table: false,
@@ -275,6 +298,10 @@ impl<'a> Parser<'a> {
             Event::End(TagEnd::Strong) => self.handle_inline(Inl::Bold(false)),
             Event::Start(Tag::Emphasis) => self.handle_inline(Inl::Italic(true)),
             Event::End(TagEnd::Emphasis) => self.handle_inline(Inl::Italic(false)),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.handle_inline(Inl::Link(Some(dest_url.to_string())))
+            }
+            Event::End(TagEnd::Link) => self.handle_inline(Inl::Link(None)),
             Event::Start(Tag::Heading { level, .. }) => self.begin_heading(level as u32, off),
             Event::End(TagEnd::Heading(_)) => self.end_heading(),
             Event::Start(Tag::Paragraph) => self.begin_paragraph(off),
@@ -370,6 +397,7 @@ impl<'a> Parser<'a> {
         };
         match key.as_str() {
             MARKER_SHAPE => self.begin_shape(&attrs, off)?,
+            MARKER_END_GROUP => self.end_group(),
             MARKER_PARAGRAPH => {
                 if let Some(class) = attr_value(&attrs, ATTR_CLASS) {
                     let decls = self.resolve_class(class, off)?;
@@ -408,6 +436,15 @@ impl<'a> Parser<'a> {
         }
         shape_attrs(&mut map, attrs);
         let grid = attr_value(attrs, ATTR_GRID).map(str::to_string);
+        let row_heights = attr_value(attrs, ATTR_ROW_HEIGHTS).map(|v| {
+            v.split(',')
+                .filter_map(|w| w.trim().parse::<i64>().ok())
+                .collect()
+        });
+        let merges = attr_value(attrs, ATTR_MERGE)
+            .map(parse_merges)
+            .unwrap_or_default();
+        let chart_type = attr_value(attrs, ATTR_CHART_TYPE).map(str::to_string);
 
         // Frame body properties and the default paragraph style fold into the
         // shape class; they materialize on the frame when its first paragraph
@@ -419,16 +456,59 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.shape = Some(ShapeBuf {
+        let buf = ShapeBuf {
             map,
             grid,
+            row_heights,
+            merges,
+            chart_type,
             tf_props,
             tf_dps,
             tf: None,
             table: None,
+            chart: None,
+            children: Vec::new(),
             span: Some(self.span_at(off)),
-        });
+        };
+        let is_group = buf
+            .map
+            .get("shape_type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t == "GROUP");
+        if is_group {
+            self.group_stack.push(buf);
+        } else {
+            self.shape = Some(buf);
+        }
         Ok(())
+    }
+
+    /// Close the innermost open group: finalize the current shape into it,
+    /// then pop the group and route it to its parent (another group or the
+    /// containing slide/master).
+    fn end_group(&mut self) {
+        self.finalize_shape();
+        let Some(group) = self.group_stack.pop() else {
+            return;
+        };
+        let value = shape_value(&group);
+        if let Some(parent) = self.group_stack.last_mut() {
+            parent.children.push(value);
+        } else if let Some(shapes) = self.shape_target() {
+            shapes.push(value);
+        }
+    }
+
+    /// The shape container for the current context (group child, notes, slide
+    /// or master), or `None` outside any.
+    fn shape_target(&mut self) -> Option<&mut Vec<Value>> {
+        if self.in_notes {
+            self.slide.as_mut().and_then(|s| s.notes_shapes.as_mut())
+        } else if self.slide.is_some() {
+            self.slide.as_mut().map(|s| &mut s.shapes)
+        } else {
+            self.master.as_mut()
+        }
     }
 
     fn resolve_class(&self, class: &str, off: usize) -> MdResult<Vec<super::style::Decl>> {
@@ -540,8 +620,22 @@ impl<'a> Parser<'a> {
         self.in_table = false;
         let rows = std::mem::take(&mut self.table_rows);
         if let Some(shape) = &mut self.shape {
-            let grid = shape.grid.clone();
-            shape.table = Some(build_shape_table(&rows, grid.as_deref()));
+            let is_chart = shape
+                .map
+                .get("shape_type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t == "CHART");
+            if is_chart {
+                shape.chart = Some(build_chart(&rows, shape.chart_type.clone()));
+            } else {
+                let grid = shape.grid.clone();
+                shape.table = Some(build_shape_table(
+                    &rows,
+                    grid.as_deref(),
+                    &shape.row_heights,
+                    &shape.merges,
+                ));
+            }
         }
     }
 
@@ -568,14 +662,11 @@ impl<'a> Parser<'a> {
         };
         let value = shape_value(&shape);
         let m = self.target_len();
-        let target: Option<&mut Vec<Value>> = if self.in_notes {
-            self.slide.as_mut().and_then(|s| s.notes_shapes.as_mut())
-        } else if self.slide.is_some() {
-            self.slide.as_mut().map(|s| &mut s.shapes)
-        } else {
-            self.master.as_mut()
-        };
-        if let Some(shapes) = target {
+        if let Some(group) = self.group_stack.last_mut() {
+            group.children.push(value);
+            return;
+        }
+        if let Some(shapes) = self.shape_target() {
             shapes.push(value);
             if let Some(span) = &shape.span
                 && let Some(prefix) = self.container_prefix()
@@ -614,6 +705,26 @@ impl<'a> Parser<'a> {
         self.finalize_shape();
         self.finalize_slide();
         self.finalize_master();
+    }
+
+    /// Seed the parser for a standalone master/layout file (no structural
+    /// headings; shapes accumulate into `masters[0]`).
+    fn start_master(&mut self) {
+        self.finalize_all();
+        self.master = Some(Vec::new());
+        self.in_notes = false;
+    }
+
+    /// Seed the parser for a standalone slide file (no `## Slide` heading;
+    /// shapes accumulate into `slides[0]`, `### Notes` still routes to notes).
+    fn start_slide(&mut self) {
+        self.finalize_all();
+        self.slide = Some(SlideBuf {
+            background: json!({ "fill": { "type": Value::Null } }),
+            shapes: Vec::new(),
+            notes_shapes: None,
+        });
+        self.in_notes = false;
     }
 
     fn finish(self) -> Value {
@@ -696,6 +807,12 @@ fn shape_value(shape: &ShapeBuf) -> Value {
     if let Some(t) = &shape.table {
         obj.insert("table".into(), t.clone());
     }
+    if let Some(c) = &shape.chart {
+        obj.insert("chart".into(), c.clone());
+    }
+    if !shape.children.is_empty() {
+        obj.insert("shapes".into(), json!(shape.children));
+    }
     Value::Object(obj)
 }
 
@@ -705,7 +822,12 @@ fn level_zero() -> Map<String, Value> {
     m
 }
 
-fn build_shape_table(rows: &[Vec<Value>], grid: Option<&str>) -> Value {
+fn build_shape_table(
+    rows: &[Vec<Value>],
+    grid: Option<&str>,
+    row_heights: &Option<Vec<i64>>,
+    merges: &[(usize, usize, u32, u32, bool, bool)],
+) -> Value {
     let cols = rows.first().map(Vec::len).unwrap_or(0);
     let widths: Vec<i64> = grid
         .map(|g| g.split(',').filter_map(|w| w.trim().parse().ok()).collect())
@@ -720,8 +842,110 @@ fn build_shape_table(rows: &[Vec<Value>], grid: Option<&str>) -> Value {
             json!({ "width": width })
         })
         .collect();
-    let row_vals: Vec<Value> = rows.iter().map(|cells| json!({ "cells": cells })).collect();
+    let row_vals: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(ri, cells)| {
+            let mut row = Map::new();
+            if let Some(heights) = row_heights
+                && let Some(h) = heights.get(ri)
+            {
+                row.insert("height".into(), json!(h));
+            }
+            let cells_vals: Vec<Value> = cells
+                .iter()
+                .enumerate()
+                .map(|(ci, cell)| {
+                    let mut v = cell.clone();
+                    if let Some(m) = merges.iter().find(|m| m.0 == ri && m.1 == ci) {
+                        let obj = v.as_object_mut().expect("cell is an object");
+                        if m.2 > 1 {
+                            obj.insert("grid_span".into(), json!(m.2));
+                        }
+                        if m.3 > 1 {
+                            obj.insert("row_span".into(), json!(m.3));
+                        }
+                        if m.4 {
+                            obj.insert("h_merge".into(), json!(true));
+                        }
+                        if m.5 {
+                            obj.insert("v_merge".into(), json!(true));
+                        }
+                    }
+                    v
+                })
+                .collect();
+            row.insert("cells".into(), json!(cells_vals));
+            Value::Object(row)
+        })
+        .collect();
     json!({ "grid": grid_vals, "rows": row_vals })
+}
+
+/// Build a chart value from its series table: the header row is the category
+/// axis; each later row is a series (name + values).
+fn build_chart(rows: &[Vec<Value>], chart_type: Option<String>) -> Value {
+    let categories: Vec<String> = rows
+        .first()
+        .map(|cells| cells.iter().skip(1).map(cell_plain_text).collect())
+        .unwrap_or_default();
+    let mut series = Vec::new();
+    for row in rows.iter().skip(1) {
+        let mut cells = row.iter();
+        let name = cells.next().map(cell_plain_text).unwrap_or_default();
+        let values: Vec<f64> = cells
+            .filter_map(|c| cell_plain_text(c).trim().parse::<f64>().ok())
+            .collect();
+        series.push(json!({
+            "name": if name.is_empty() { Value::Null } else { json!(name) },
+            "categories": categories,
+            "values": values,
+        }));
+    }
+    json!({ "chart_type": chart_type, "series": series })
+}
+
+/// The concatenated plain text of a table cell.
+fn cell_plain_text(cell: &Value) -> String {
+    let mut out = String::new();
+    if let Some(paras) = cell
+        .get("text_frame")
+        .and_then(Value::as_object)
+        .and_then(|t| t.get("paragraphs"))
+        .and_then(Value::as_array)
+    {
+        for p in paras {
+            if let Some(runs) = p.get("runs").and_then(Value::as_array) {
+                for r in runs {
+                    if let Some(t) = r.get("text").and_then(Value::as_str) {
+                        out.push_str(t);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `r,c,gridSpan,rowSpan,hMerge,vMerge;...` attribute → merge records.
+fn parse_merges(s: &str) -> Vec<(usize, usize, u32, u32, bool, bool)> {
+    let mut out = Vec::new();
+    for tok in s.split(';') {
+        let parts: Vec<&str> = tok.split(',').collect();
+        if parts.len() != 6 {
+            continue;
+        }
+        let n = |i: usize| parts[i].trim().parse::<u32>().unwrap_or(0);
+        out.push((
+            n(0) as usize,
+            n(1) as usize,
+            n(2),
+            n(3),
+            n(4) == 1,
+            n(5) == 1,
+        ));
+    }
+    out
 }
 
 fn cell_value(tokens: &[Inl]) -> Value {
@@ -859,7 +1083,7 @@ fn parse_comment(text: &str) -> Option<(String, Vec<(String, String)>)> {
     let toks = tokenize_attrs(t);
     let mut it = toks.into_iter();
     let (key, _) = it.next()?;
-    let attrs: Vec<(String, String)> = it.filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+    let attrs: Vec<(String, String)> = it.map(|(k, v)| (k, v.unwrap_or_default())).collect();
     Some((key, attrs))
 }
 
@@ -968,6 +1192,252 @@ pub fn parse(md: &str) -> MdResult<ParsedDoc> {
     let spans = std::mem::take(&mut parser.spans);
     let doc = parser.finish();
     Ok(ParsedDoc { doc, spans })
+}
+
+// -- multi-file project parsing ----------------------------------------------
+
+/// The kind of a standalone markdown file under `src/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Master,
+    Layout,
+    Slide,
+}
+
+/// The parsed content of a standalone file plus its YAML front matter.
+#[derive(Debug)]
+pub struct FileDoc {
+    pub front: Option<Value>,
+    pub shapes: Vec<Value>,
+    pub background: Value,
+    pub notes: Option<Value>,
+}
+
+/// Parse a standalone master/layout/slide file (per-file front matter, shape
+/// markers, a slide's background and `### Notes`). No `# Master`/`## Slide`
+/// structural headings are required.
+pub fn parse_file(md: &str, kind: FileKind) -> MdResult<FileDoc> {
+    let source = md.strip_prefix('\u{feff}').unwrap_or(md);
+    let (front, body, _front_len) = split_front_matter(source);
+    let styles = parse_style_block(body);
+    let mut parser = Parser::new(source, styles);
+    match kind {
+        FileKind::Master | FileKind::Layout => parser.start_master(),
+        FileKind::Slide => parser.start_slide(),
+    }
+    let events = MdParser::new_ext(body, Options::ENABLE_TABLES).into_offset_iter();
+    for (event, _range) in events {
+        parser.handle(event, 0)?;
+    }
+    parser.finalize_all();
+
+    match kind {
+        FileKind::Master | FileKind::Layout => {
+            let m = parser
+                .masters
+                .pop()
+                .unwrap_or_else(|| json!({ "shapes": [] }));
+            Ok(FileDoc {
+                front,
+                shapes: m
+                    .get("shapes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                background: Value::Null,
+                notes: None,
+            })
+        }
+        FileKind::Slide => {
+            let slide = parser.slides.pop().unwrap_or_else(|| {
+                json!({
+                    "shapes": [],
+                    "background": { "fill": { "type": Value::Null } },
+                    "notes": Value::Null,
+                })
+            });
+            Ok(FileDoc {
+                front,
+                shapes: slide
+                    .get("shapes")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                background: slide
+                    .get("background")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                notes: slide.get("notes").filter(|v| !v.is_null()).cloned(),
+            })
+        }
+    }
+}
+
+/// A reference marker (`<!-- master ... -->`, `<!-- slide ... -->`) parsed from
+/// a project file.
+struct Ref {
+    key: String,
+    attrs: Vec<(String, String)>,
+}
+
+/// Scan a file for reference markers in order: `master`/`slide` in
+/// `PRESENTATION.md`, `layout` inside a master file.
+fn scan_refs(md: &str) -> Vec<Ref> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = md.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '<'
+            && bytes.get(i + 1) == Some(&'!')
+            && bytes.get(i + 2) == Some(&'-')
+            && bytes.get(i + 3) == Some(&'-')
+            && let Some(end) = find_comment_end(&bytes, i + 4)
+        {
+            let inner: String = bytes[i + 4..end].iter().collect();
+            let text = format!("<!--{inner}-->");
+            if let Some((key, attrs)) = parse_comment(&text)
+                && matches!(
+                    key.as_str(),
+                    super::markers::MARKER_MASTER
+                        | super::markers::MARKER_SLIDE
+                        | super::markers::MARKER_LAYOUT
+                )
+            {
+                out.push(Ref { key, attrs });
+            }
+            i = end + 2;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn find_comment_end(bytes: &[char], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i + 1 < bytes.len() {
+        if bytes[i] == '-' && bytes[i + 1] == '-' && bytes.get(i + 2) == Some(&'>') {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn ref_attr(attrs: &[(String, String)], key: &str) -> String {
+    attrs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// Read the full project mirror under `dir` (written by
+/// `serialize::write_document`) back into the query-shaped document value.
+pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
+    let pres_md = std::fs::read_to_string(dir.join("PRESENTATION.md"))?;
+    let parsed = parse(&pres_md)?;
+    let mut root = parsed.doc;
+    let root_obj = root.as_object_mut().expect("document is an object");
+
+    let refs = scan_refs(&pres_md);
+    let mut slide_masters: Vec<Value> = Vec::new();
+    let mut slides: Vec<Value> = Vec::new();
+
+    for r in refs {
+        match r.key.as_str() {
+            super::markers::MARKER_MASTER => {
+                let src = ref_attr(&r.attrs, super::markers::ATTR_SRC);
+                let uri = ref_attr(&r.attrs, super::markers::ATTR_URI);
+                let body = std::fs::read_to_string(dir.join("src").join(&src))?;
+                let doc = parse_file(&body, FileKind::Master)?;
+                let name = front_str(&doc.front, "name");
+                let mut layouts: Vec<Value> = Vec::new();
+                for lref in scan_refs(&body) {
+                    if lref.key != super::markers::MARKER_LAYOUT {
+                        continue;
+                    }
+                    let lsrc = ref_attr(&lref.attrs, super::markers::ATTR_SRC);
+                    let luri = ref_attr(&lref.attrs, super::markers::ATTR_URI);
+                    let lbody = std::fs::read_to_string(dir.join("src").join(&lsrc))?;
+                    let ldoc = parse_file(&lbody, FileKind::Layout)?;
+                    let lname = front_str(&ldoc.front, "name");
+                    layouts.push(json!({
+                        "uri": luri,
+                        "name": if lname.is_empty() { Value::Null } else { json!(lname) },
+                        "shapes": ldoc.shapes,
+                    }));
+                }
+                slide_masters.push(json!({
+                    "uri": uri,
+                    "name": if name.is_empty() { Value::Null } else { json!(name) },
+                    "shapes": doc.shapes,
+                    "slide_layouts": layouts,
+                }));
+            }
+            super::markers::MARKER_SLIDE => {
+                let src = ref_attr(&r.attrs, super::markers::ATTR_SRC);
+                let uri = ref_attr(&r.attrs, super::markers::ATTR_URI);
+                let body = std::fs::read_to_string(dir.join("src").join(&src))?;
+                let doc = parse_file(&body, FileKind::Slide)?;
+                let name = front_str(&doc.front, "name");
+                let m_idx = front_index(&doc.front, "master");
+                let l_idx = front_index(&doc.front, "layout");
+                let layout_name = slide_masters
+                    .get(m_idx)
+                    .and_then(|m| m.get("slide_layouts"))
+                    .and_then(Value::as_array)
+                    .and_then(|ls| ls.get(l_idx))
+                    .and_then(|l| l.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let mut slide_obj = json!({
+                    "uri": uri,
+                    "shapes": doc.shapes,
+                    "background": doc.background,
+                    "notes": doc.notes,
+                    "slide_layout": {
+                        "master": m_idx,
+                        "layout": l_idx,
+                        "name": if layout_name.is_empty() { Value::Null } else { json!(layout_name) },
+                    },
+                });
+                if !name.is_empty() {
+                    slide_obj
+                        .as_object_mut()
+                        .expect("slide object")
+                        .insert("name".into(), json!(name));
+                }
+                slides.push(slide_obj);
+            }
+            _ => {}
+        }
+    }
+
+    root_obj.insert("slide_masters".into(), json!(slide_masters));
+    root_obj.insert("slides".into(), json!(slides));
+    Ok(root)
+}
+
+fn front_str(front: &Option<Value>, key: &str) -> String {
+    front
+        .as_ref()
+        .and_then(|f| f.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// An integer front-matter value (YAML may store it as a number).
+fn front_index(front: &Option<Value>, key: &str) -> usize {
+    front
+        .as_ref()
+        .and_then(|f| f.get(key))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0) as usize
 }
 
 #[cfg(test)]

@@ -13,16 +13,8 @@ fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        Commands::Markdown { input, media } => {
-            commands::markdown::execute(&input, media.as_deref())?;
-        }
-        Commands::Build {
-            input,
-            markdown,
-            output,
-        } => {
-            commands::build::execute(&input, &markdown, &output)?;
-        }
+        Commands::New { project, pptx } => commands::new::execute(&project, &pptx)?,
+        Commands::Build { project } => commands::build::execute(Some(&project))?,
     }
 
     Ok(())

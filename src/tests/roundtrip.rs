@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use gwen_md::{normalize, parse, serialize};
-use gwen_pptx::engine::{query, readonly};
+use gwen_md::{normalize, read_document, write_document};
+use gwen_pptx::engine::query;
 use gwen_pptx::opc::Package;
 use serde_json::Value;
 
@@ -18,18 +18,6 @@ fn fixture(name: &str) -> PathBuf {
 fn snapshot(path: &Path) -> Value {
     let pkg = Package::open(path).expect("open package");
     query::query_document(&pkg, None).expect("query snapshot")
-}
-
-fn assert_roundtrip(fx: &str) {
-    let s = snapshot(&fixture(fx));
-    let md = serialize::serialize(&s);
-    let reparsed = parse::parse(&md).expect("reparse serialized markdown").doc;
-    let expected = readonly::project(&s);
-    assert_eq!(
-        canonical(&normalize::normalize(&reparsed)),
-        canonical(&normalize::normalize(&expected)),
-        "round-trip mismatch for {fx}\n--- markdown ---\n{md}"
-    );
 }
 
 /// Recursively sort object keys so the comparison is insensitive to the
@@ -49,34 +37,121 @@ fn canonical(v: &Value) -> Value {
     }
 }
 
-#[test]
-fn template_roundtrips() {
-    assert_roundtrip("template.pptx");
+/// Drop the build-time detail the complete mirror deliberately regenerates:
+/// `chart.r_id` is re-assigned to a fresh relationship on every build; shape
+/// `has_text_frame`/`is_placeholder` are derived from the marker (a placeholder
+/// marker means `true`, its absence `false`); and table cells mirror only cell
+/// text (paragraph properties like `level` are not part of the table form).
+fn strip_rebuild_time(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let sheet_type = map
+                .get("shape_type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut m = map.clone();
+            if sheet_type == "CHART"
+                && let Some(chart) = m.get_mut("chart").and_then(Value::as_object_mut)
+            {
+                chart.remove("r_id");
+            }
+            m.remove("has_text_frame");
+            m.remove("is_placeholder");
+            if sheet_type == "TABLE" {
+                let paras = m
+                    .get_mut("table")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|t| t.get_mut("rows"))
+                    .and_then(Value::as_array_mut);
+                if let Some(rows) = paras {
+                    for row in rows {
+                        let cells = row
+                            .as_object_mut()
+                            .and_then(|r| r.get_mut("cells"))
+                            .and_then(Value::as_array_mut);
+                        if let Some(cells) = cells {
+                            for cell in cells {
+                                let p = cell
+                                    .as_object_mut()
+                                    .and_then(|c| c.get_mut("text_frame"))
+                                    .and_then(Value::as_object_mut)
+                                    .and_then(|t| t.get_mut("paragraphs"))
+                                    .and_then(Value::as_array_mut);
+                                if let Some(paras) = p {
+                                    for para in paras.iter_mut() {
+                                        if let Some(po) = para.as_object_mut() {
+                                            let runs = po.get("runs").cloned();
+                                            *po = serde_json::Map::new();
+                                            if let Some(r) = runs {
+                                                po.insert("runs".into(), r);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Value::Object(
+                m.into_iter()
+                    .map(|(k, val)| (k, strip_rebuild_time(&val)))
+                    .collect(),
+            )
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_rebuild_time).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The multi-file complete mirror must reproduce the unprojected snapshot: the
+/// `PRESENTATION.md`/`src/` tree round-trips through `write_document` and
+/// `read_document` back to the exact query value.
+fn assert_multi_file_roundtrip(fx: &str) {
+    let s = snapshot(&fixture(fx));
+    let dir = std::env::temp_dir().join(format!(
+        "gwen-mirror-{}-{}",
+        std::process::id(),
+        fx.replace(['/', '.'], "_")
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_document(&s, &dir).expect("write mirror");
+    let back = read_document(&dir).expect("read mirror");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        canonical(&normalize::normalize(&strip_rebuild_time(&back))),
+        canonical(&normalize::normalize(&strip_rebuild_time(&s))),
+        "multi-file mirror mismatch for {fx}"
+    );
 }
 
 #[test]
-fn template_43_roundtrips() {
-    assert_roundtrip("template_43.pptx");
+fn multi_file_mirror_template() {
+    assert_multi_file_roundtrip("template.pptx");
 }
 
 #[test]
-fn two_slides_roundtrips() {
-    assert_roundtrip("two_slides.pptx");
+fn multi_file_mirror_template_43() {
+    assert_multi_file_roundtrip("template_43.pptx");
 }
 
 #[test]
-fn table_chart_roundtrips() {
-    assert_roundtrip("table_chart.pptx");
+fn multi_file_mirror_two_slides() {
+    assert_multi_file_roundtrip("two_slides.pptx");
 }
 
 #[test]
-fn placeholder_roundtrips() {
-    assert_roundtrip("placeholder.pptx");
+fn multi_file_mirror_table_chart() {
+    assert_multi_file_roundtrip("table_chart.pptx");
 }
 
-/// A notes slide whose `sldImg` placeholder has no text body: placeholder
-/// resolution must not fabricate a text frame the shape does not own.
 #[test]
-fn notes_placeholder_roundtrips() {
-    assert_roundtrip("notes_placeholder.pptx");
+fn multi_file_mirror_placeholder() {
+    assert_multi_file_roundtrip("placeholder.pptx");
+}
+
+#[test]
+fn multi_file_mirror_notes_placeholder() {
+    assert_multi_file_roundtrip("notes_placeholder.pptx");
 }

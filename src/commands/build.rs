@@ -1,77 +1,51 @@
 use std::path::Path;
 
-use gwen_md::normalize;
-use gwen_pptx::engine::{apply, query, readonly, update_diff};
+use gwen_pptx::engine::build;
 use gwen_pptx::opc::Package;
-use gwen_pptx::path::PathSegment;
-use miette::Report;
 
-use crate::diag::{Diag, advice, describe_path, plain};
+use crate::diag::plain;
 
-fn edit_path(path: &[PathSegment]) -> String {
-    let mut out = String::new();
-    for (i, seg) in path.iter().enumerate() {
-        match seg {
-            PathSegment::Field(f) => {
-                if i > 0 {
-                    out.push('.');
-                }
-                out.push_str(f);
-            }
-            PathSegment::Index(idx) => out.push_str(&format!("[{idx}]")),
-        }
+fn presentation_name(dir: &Path) -> miette::Result<String> {
+    let cfg = dir.join("config.toml");
+    let raw = std::fs::read_to_string(&cfg).map_err(plain)?;
+    let value: toml::Value = toml::from_str(&raw).map_err(plain)?;
+    let name = value
+        .get("presentation")
+        .and_then(|p| p.get("name"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    match name {
+        Some(n) => Ok(n.to_string()),
+        None => Err(miette::miette!(
+            "`config.toml` must define `[presentation] name`"
+        )),
     }
-    out
 }
 
-/// Whether an edit path falls inside the span key (a dot-separated prefix
-/// boundary), so `slides[0].shapes[1]` never matches `slides[0].shapes[10]`.
-fn span_matches(key: &str, path: &str) -> bool {
-    if !path.starts_with(key) {
-        return false;
-    }
-    path[key.len()..].chars().next().is_none_or(|c| c == '.')
-}
-
-pub fn execute(input: &str, md_path: &str, output: &str) -> miette::Result<()> {
-    let mut pkg = Package::open(Path::new(input)).map_err(plain)?;
-    let pres = query::load_presentation(&pkg).map_err(plain)?;
-
-    let md = std::fs::read_to_string(md_path).map_err(plain)?;
-    let parsed =
-        gwen_md::parse(&md).map_err(|e| Report::new(Diag::at(&md, e.message, &e.span, None)))?;
-    let new = normalize::normalize(&parsed.doc);
-    let current = query::query_document(&pkg, None).map_err(plain)?;
-    let edits = update_diff::diff(&normalize::normalize(&readonly::project(&current)), &new);
-
-    for edit in update_diff::order_edits(edits) {
-        if let Err(e) = apply::apply_edit(&mut pkg, &pres, &edit) {
-            let path_str = edit_path(&edit.path);
-            let span = parsed
-                .spans
-                .iter()
-                .filter(|(k, _)| span_matches(k, &path_str))
-                .max_by_key(|(k, _)| k.len())
-                .map(|(_, s)| s);
-            let mut help = Vec::new();
-            let loc = describe_path(&parsed.doc, &path_str);
-            if !loc.is_empty() {
-                help.push(format!("at {loc}"));
-            }
-            if let Some(suggestion) = advice(&e.to_string()) {
-                help.push(suggestion);
-            }
-            let help = (!help.is_empty()).then(|| help.join("\n"));
-            return match span {
-                Some(s) => Err(Report::new(Diag::at(&md, e.to_string(), s, help))),
-                None => Err(Report::new(Diag::plain(match help {
-                    Some(h) => format!("{e} at '{path_str}' ({h})"),
-                    None => format!("{e} at '{path_str}'"),
-                }))),
-            };
-        }
+/// Compile the project directory into `target/<name>.pptx`.
+pub fn execute(project: Option<&str>) -> miette::Result<()> {
+    let dir = Path::new(project.unwrap_or("."));
+    if !dir.join("PRESENTATION.md").exists() {
+        return Err(miette::miette!(
+            "`{}` is not a gwen project (no PRESENTATION.md)",
+            dir.display()
+        ));
     }
 
-    pkg.save(Path::new(output)).map_err(plain)?;
+    let doc = gwen_md::read_document(dir).map_err(plain)?;
+    let project = build::Project {
+        doc: &doc,
+        parts_dir: Some(&dir.join("src").join("parts")),
+        media_dir: Some(&dir.join("src").join("media")),
+    };
+    let pkg: Package = build::compile_package(&project).map_err(plain)?;
+
+    let name = presentation_name(dir)?;
+    let out_dir = dir.join("target");
+    std::fs::create_dir_all(&out_dir).map_err(plain)?;
+    let out = out_dir.join(format!("{name}.pptx"));
+    pkg.save(&out).map_err(plain)?;
+    eprintln!("built {}", out.display());
     Ok(())
 }
