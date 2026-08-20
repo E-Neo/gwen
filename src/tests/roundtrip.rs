@@ -155,3 +155,8 @@ fn multi_file_mirror_placeholder() {
 fn multi_file_mirror_notes_placeholder() {
     assert_multi_file_roundtrip("notes_placeholder.pptx");
 }
+
+#[test]
+fn multi_file_mirror_effects() {
+    assert_multi_file_roundtrip("effects.pptx");
+}

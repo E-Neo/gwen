@@ -71,6 +71,14 @@ pub struct ColorFormatDto {
 pub enum FillType {
     Solid,
     NoFill,
+    Gradient,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradientStopDto {
+    /// Position as a percentage 0..=100.
+    pub pos: i64,
+    pub color: ColorFormatDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +87,14 @@ pub struct FillDto {
     pub fill_type: Option<FillType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorFormatDto>,
+    /// Linear gradient stops, in order; `angle` is in degrees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stops: Option<Vec<GradientStopDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub angle: Option<i64>,
+    /// Path (radial) gradient.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radial: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +129,68 @@ pub enum LineDash {
     SysDot,
     SysDashDot,
     SysDashDotDot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowType {
+    Outer,
+    Inner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowDto {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub shadow_type: Option<ShadowType>,
+    /// Shadow blur radius in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blur: Option<i64>,
+    /// Shadow distance in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dist: Option<i64>,
+    /// Shadow direction in degrees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir_deg: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorFormatDto>,
+    /// Shadow opacity as a percentage 0..=100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlowDto {
+    /// Glow radius in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorFormatDto>,
+    /// Glow opacity as a percentage 0..=100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoftEdgeDto {
+    /// Soft edge radius in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReflectionDto {
+    /// Reflection blur radius in EMU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blur: Option<i64>,
+    /// Start/end position and opacity, all percentages 0..=100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_pos: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_pos: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_alpha: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_alpha: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +414,15 @@ pub struct ShapeDto {
     pub fill: Option<FillDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outline: Option<OutlineDto>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glow: Option<GlowDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_edge: Option<SoftEdgeDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflection: Option<ReflectionDto>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder_format: Option<PlaceholderFormatDto>,

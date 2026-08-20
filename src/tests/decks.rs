@@ -48,6 +48,7 @@ pub const DECKS: &[&str] = &[
     "placeholder",
     "table_chart",
     "notes_placeholder",
+    "effects",
 ];
 
 /// Path to a generated deck, materialized once per test process. Accepts the
@@ -92,6 +93,7 @@ fn parts(name: &str) -> Vec<(String, Vec<u8>)> {
         "placeholder" => (vec![placeholder_slide()], (9_144_000, 6_858_000), false),
         "table_chart" => (vec![table_chart_slide()], (9_144_000, 6_858_000), false),
         "notes_placeholder" => (vec![empty_slide()], (9_144_000, 6_858_000), true),
+        "effects" => (vec![effects_slide()], (9_144_000, 6_858_000), false),
         _ => panic!("unknown deck: {name}"),
     };
     let chart = matches!(name, "table_chart");
@@ -339,6 +341,13 @@ fn notes_master_xml() -> String {
 fn notes_slide_xml() -> String {
     let body = r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="685800" y="1143000"/><a:ext cx="5486400" cy="3086100"/></a:xfrm></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US" dirty="0"/></a:p></p:txBody></p:sp>"#;
     slide("", body, "")
+}
+
+/// A slide exercising the full effects pipeline: gradient fills (linear and
+/// radial), outer/inner shadows, glow, soft edge and reflection.
+fn effects_slide() -> String {
+    let body = r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Gradient Box 1"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst><a:lin ang="8100000" scaled="1"/></a:gradFill><a:effectLst><a:outerShdw blurRad="63500" dist="38100" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr></a:outerShdw></a:effectLst></p:spPr><p:txBody><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:r><a:t>Gradient</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Glow Box 2"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="2743200"/><a:ext cx="1828800" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFF00"/></a:gs><a:gs pos="100000"><a:srgbClr val="00FF00"/></a:gs></a:gsLst><a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path></a:gradFill><a:effectLst><a:glow rad="127000"><a:srgbClr val="FFFF00"><a:alpha val="50000"/></a:srgbClr></a:glow><a:softEdge rad="50800"/><a:reflection blurRad="63500" stA="100000" endA="0" stPos="0" endPos="100000" dir="5400000" fadeDir="5400000" rotWithShape="0"/></a:effectLst></p:spPr><p:txBody><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:r><a:t>Radial</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="Inner Box 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="3657600" y="2743200"/><a:ext cx="1828800" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="C0504D"/></a:solidFill><a:effectLst><a:innerShdw blurRad="63500" dist="38100" dir="2700000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="60000"/></a:srgbClr></a:innerShdw></a:effectLst></p:spPr><p:txBody><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:r><a:t>Inner</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    slide("", body, "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>")
 }
 
 #[cfg(test)]

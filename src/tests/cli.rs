@@ -16,18 +16,10 @@ fn fixture(name: &str) -> PathBuf {
 #[test]
 fn new_creates_project_structure() {
     let project = new_project(&fixture("two_slides.pptx"), "deck");
-    assert!(project.join("PRESENTATION.md").exists());
-    for sub in ["masters", "layouts", "slides", "parts", "media"] {
+    assert!(project.join("src").join("PRESENTATION.md").exists());
+    for sub in ["masters", "layouts", "slides", "media"] {
         assert!(project.join("src").join(sub).exists(), "src/{sub} created");
     }
-    assert!(project.join("src").join("parts").join("_rels").exists());
-    assert!(
-        project
-            .join("src")
-            .join("parts")
-            .join("_fragments")
-            .exists()
-    );
     let md = project_md(&project);
     assert!(md.contains("slide_width: 9144000"));
     assert!(md.contains("src=\"slides/slide1.md\""));
@@ -192,7 +184,7 @@ fn editing_chart_data_roundtrips() {
     let project = new_project(&fixture("table_chart.pptx"), "deck");
     let slide = project.join("src").join("slides").join("slide1.md");
     let body = std::fs::read_to_string(&slide).unwrap();
-    std::fs::write(&slide, body.replace("\n| 10 | 20 |", "\n| 99 | 20 |")).unwrap();
+    std::fs::write(&slide, body.replace("| S1 | 10 | 20 |", "| S1 | 99 | 20 |")).unwrap();
 
     let out = build_project(&project);
     let chart = read_zip_entry(&out, "ppt/charts/chart1.xml");
@@ -210,9 +202,9 @@ fn editing_chart_data_roundtrips() {
 #[test]
 fn editing_theme_color_roundtrips() {
     let project = new_project(&fixture("two_slides.pptx"), "deck");
-    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
+    let md = std::fs::read_to_string(project.join("src").join("PRESENTATION.md")).unwrap();
     std::fs::write(
-        project.join("PRESENTATION.md"),
+        project.join("src").join("PRESENTATION.md"),
         md.replace("accent1: \"4F81BD\"", "accent1: \"FF0000\""),
     )
     .unwrap();
@@ -226,9 +218,9 @@ fn editing_theme_color_roundtrips() {
 #[test]
 fn editing_core_props_roundtrips() {
     let project = new_project(&fixture("two_slides.pptx"), "deck");
-    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
+    let md = std::fs::read_to_string(project.join("src").join("PRESENTATION.md")).unwrap();
     std::fs::write(
-        project.join("PRESENTATION.md"),
+        project.join("src").join("PRESENTATION.md"),
         md.replace(
             "comments: \"generated using python-pptx\"",
             "comments: \"My Deck\"",

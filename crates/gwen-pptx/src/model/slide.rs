@@ -55,6 +55,10 @@ fn fresh_shape(shape_type: ShapeType) -> ShapeDto {
         has_text_frame: false,
         fill: None,
         outline: None,
+        shadow: None,
+        glow: None,
+        soft_edge: None,
+        reflection: None,
         placeholder_format: None,
         auto_shape_type: None,
         text_frame: None,
@@ -200,6 +204,27 @@ pub fn parse_slide_shapes(
     let mut ln_dash: Option<LineDash> = None;
     let mut ln_fill_type: Option<FillType> = None;
     let mut ln_fill_color: Option<ColorFormatDto> = None;
+
+    // Gradient fill state (a:gradFill under a:spPr).
+    let mut in_grad_fill = false;
+    let mut grad_fill: Option<FillDto> = None;
+    let mut grad_stops: Vec<GradientStopDto> = Vec::new();
+    let mut grad_stop_pos: Option<i64> = None;
+    let mut grad_stop_color: Option<ColorFormatDto> = None;
+    let mut grad_angle: Option<i64> = None;
+    let mut grad_radial = false;
+
+    // Effect state (a:effectLst under a:spPr).
+    let mut in_effect_lst = false;
+    let mut effect_shadow: Option<ShadowDto> = None;
+    let mut in_shadow = false;
+    let mut effect_shadow_color: Option<ColorFormatDto> = None;
+    let mut effect_glow: Option<GlowDto> = None;
+    let mut in_glow = false;
+    let mut effect_glow_color: Option<ColorFormatDto> = None;
+    let mut effect_soft_edge: Option<SoftEdgeDto> = None;
+    let mut effect_reflection: Option<ReflectionDto> = None;
+    let mut in_reflection = false;
 
     let mut run = fresh_run();
     let mut para = fresh_para();
@@ -402,6 +427,155 @@ pub fn parse_slide_shapes(
                                     "sysDashDotDot" => Some(LineDash::SysDashDotDot),
                                     _ => None,
                                 };
+                            }
+                        }
+                    }
+                    b"a:gradFill" if in_sp_pr && !in_shape_ln => {
+                        in_grad_fill = true;
+                        grad_stops.clear();
+                        grad_angle = None;
+                        grad_radial = false;
+                    }
+                    b"a:gs" if in_grad_fill => {
+                        grad_stop_pos = None;
+                        grad_stop_color = None;
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"pos" {
+                                grad_stop_pos = String::from_utf8_lossy(&a.value).parse().ok();
+                            }
+                        }
+                    }
+                    b"a:effectLst" if in_sp_pr => {
+                        in_effect_lst = true;
+                    }
+                    b"a:outerShdw" | b"a:innerShdw" if in_effect_lst => {
+                        in_shadow = true;
+                        effect_shadow_color = None;
+                        let is_outer = tag == b"a:outerShdw";
+                        effect_shadow = Some(ShadowDto {
+                            shadow_type: Some(if is_outer {
+                                ShadowType::Outer
+                            } else {
+                                ShadowType::Inner
+                            }),
+                            blur: None,
+                            dist: None,
+                            dir_deg: None,
+                            color: None,
+                            alpha: None,
+                        });
+                        if let Some(s) = effect_shadow.as_mut() {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"blurRad" => {
+                                        s.blur = String::from_utf8_lossy(&a.value).parse().ok();
+                                    }
+                                    b"dist" => {
+                                        s.dist = String::from_utf8_lossy(&a.value).parse().ok();
+                                    }
+                                    b"dir" => {
+                                        s.dir_deg = String::from_utf8_lossy(&a.value)
+                                            .parse::<i64>()
+                                            .ok()
+                                            .map(|v| v / 60000);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    b"a:glow" if in_effect_lst => {
+                        in_glow = true;
+                        effect_glow_color = None;
+                        effect_glow = Some(GlowDto {
+                            radius: None,
+                            color: None,
+                            alpha: None,
+                        });
+                        if let Some(g) = effect_glow.as_mut() {
+                            for a in e.attributes().flatten() {
+                                if a.key.as_ref() == b"rad" {
+                                    g.radius = String::from_utf8_lossy(&a.value).parse().ok();
+                                }
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                grad_stop_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                grad_stop_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_shadow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_shadow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_shadow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_shadow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_glow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_glow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_glow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_glow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:path" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"path" && a.value.as_ref() == b"circle" {
+                                grad_radial = true;
                             }
                         }
                     }
@@ -1208,6 +1382,168 @@ pub fn parse_slide_shapes(
                             }
                         }
                     }
+                    b"a:srgbClr" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                grad_stop_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                grad_stop_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:lin" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"ang"
+                                && let Ok(v) = String::from_utf8_lossy(&a.value).parse::<i64>()
+                            {
+                                grad_angle = Some(v / 60000);
+                            }
+                        }
+                    }
+                    b"a:path" if in_grad_fill => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"path" && a.value.as_ref() == b"circle" {
+                                grad_radial = true;
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_shadow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_shadow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_shadow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_shadow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:srgbClr" if in_glow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_glow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Rgb),
+                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    theme_color: None,
+                                });
+                            }
+                        }
+                    }
+                    b"a:schemeClr" if in_glow => {
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"val" {
+                                effect_glow_color = Some(ColorFormatDto {
+                                    color_type: Some(ColorType::Scheme),
+                                    rgb: None,
+                                    theme_color: Some(
+                                        String::from_utf8_lossy(&a.value).to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    b"a:alpha" if in_shadow => {
+                        if let Some(s) = effect_shadow.as_mut()
+                            && let Some(v) = e.attributes().flatten().find_map(|a| {
+                                (a.key.as_ref() == b"val")
+                                    .then(|| String::from_utf8_lossy(&a.value).to_string())
+                            })
+                            && let Ok(v) = v.parse::<i64>()
+                        {
+                            s.alpha = Some(v / 1000);
+                        }
+                    }
+                    b"a:alpha" if in_glow => {
+                        if let Some(g) = effect_glow.as_mut()
+                            && let Some(v) = e.attributes().flatten().find_map(|a| {
+                                (a.key.as_ref() == b"val")
+                                    .then(|| String::from_utf8_lossy(&a.value).to_string())
+                            })
+                            && let Ok(v) = v.parse::<i64>()
+                        {
+                            g.alpha = Some(v / 1000);
+                        }
+                    }
+                    b"a:softEdge" if in_effect_lst => {
+                        let mut radius = None;
+                        for a in e.attributes().flatten() {
+                            if a.key.as_ref() == b"rad" {
+                                radius = String::from_utf8_lossy(&a.value).parse().ok();
+                            }
+                        }
+                        effect_soft_edge = Some(SoftEdgeDto { radius });
+                    }
+                    b"a:reflection" if in_effect_lst => {
+                        effect_reflection = Some(ReflectionDto {
+                            blur: None,
+                            start_pos: None,
+                            end_pos: None,
+                            start_alpha: None,
+                            end_alpha: None,
+                        });
+                        if let Some(r) = effect_reflection.as_mut() {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref() {
+                                    b"blurRad" => {
+                                        r.blur = String::from_utf8_lossy(&a.value).parse().ok();
+                                    }
+                                    b"stA" => {
+                                        r.start_alpha = String::from_utf8_lossy(&a.value)
+                                            .parse::<i64>()
+                                            .ok()
+                                            .map(|v| v / 1000);
+                                    }
+                                    b"endA" => {
+                                        r.end_alpha = String::from_utf8_lossy(&a.value)
+                                            .parse::<i64>()
+                                            .ok()
+                                            .map(|v| v / 1000);
+                                    }
+                                    b"stPos" => {
+                                        r.start_pos = String::from_utf8_lossy(&a.value)
+                                            .parse::<i64>()
+                                            .ok()
+                                            .map(|v| v / 1000);
+                                    }
+                                    b"endPos" => {
+                                        r.end_pos = String::from_utf8_lossy(&a.value)
+                                            .parse::<i64>()
+                                            .ok()
+                                            .map(|v| v / 1000);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     b"a:srgbClr" if in_ln_fill => {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"val" {
@@ -1647,15 +1983,23 @@ pub fn parse_slide_shapes(
                     }
                     b"p:spPr" => {
                         if let Some(ref mut shape) = current_shape {
-                            if let Some(ft) = shape_fill_type.take() {
+                            if let Some(grad) = grad_fill.take() {
+                                shape.fill = Some(grad);
+                            } else if let Some(ft) = shape_fill_type.take() {
                                 shape.fill = Some(FillDto {
                                     fill_type: Some(ft),
                                     color: shape_fill_color.take(),
+                                    stops: None,
+                                    angle: None,
+                                    radial: None,
                                 });
                             } else if let Some(color) = shape_fill_color.take() {
                                 shape.fill = Some(FillDto {
                                     fill_type: Some(FillType::Solid),
                                     color: Some(color),
+                                    stops: None,
+                                    angle: None,
+                                    radial: None,
                                 });
                             }
                             let ln_fill = ln_fill_type
@@ -1676,14 +2020,40 @@ pub fn parse_slide_shapes(
                                     fill: ln_fill.map(|ft| FillDto {
                                         fill_type: Some(ft),
                                         color: ln_fill_color.take(),
+                                        stops: None,
+                                        angle: None,
+                                        radial: None,
                                     }),
                                 });
+                            }
+                            if let Some(mut shadow) = effect_shadow.take() {
+                                if shadow.color.is_none() {
+                                    shadow.color = effect_shadow_color.take();
+                                }
+                                shape.shadow = Some(shadow);
+                            }
+                            if let Some(mut glow) = effect_glow.take() {
+                                if glow.color.is_none() {
+                                    glow.color = effect_glow_color.take();
+                                }
+                                shape.glow = Some(glow);
+                            }
+                            if let Some(se) = effect_soft_edge.take() {
+                                shape.soft_edge = Some(se);
+                            }
+                            if let Some(r) = effect_reflection.take() {
+                                shape.reflection = Some(r);
                             }
                         }
                         in_sp_pr = false;
                         in_shape_ln = false;
                         in_shape_fill = false;
                         in_ln_fill = false;
+                        in_grad_fill = false;
+                        in_effect_lst = false;
+                        in_shadow = false;
+                        in_glow = false;
+                        in_reflection = false;
                         shape_fill_type = None;
                         shape_fill_color = None;
                         ln_width = None;
@@ -1692,6 +2062,58 @@ pub fn parse_slide_shapes(
                         ln_dash = None;
                         ln_fill_type = None;
                         ln_fill_color = None;
+                        grad_stops.clear();
+                        grad_angle = None;
+                        grad_radial = false;
+                        effect_shadow = None;
+                        effect_shadow_color = None;
+                        effect_glow = None;
+                        effect_glow_color = None;
+                        effect_soft_edge = None;
+                        effect_reflection = None;
+                    }
+                    b"a:gs" if in_grad_fill => {
+                        if let Some(pos) = grad_stop_pos
+                            && let Some(color) = grad_stop_color.take()
+                        {
+                            grad_stops.push(GradientStopDto { pos, color });
+                        }
+                        grad_stop_pos = None;
+                        grad_stop_color = None;
+                    }
+                    b"a:gradFill" if in_grad_fill => {
+                        if let Some(stops) =
+                            (!grad_stops.is_empty()).then_some(std::mem::take(&mut grad_stops))
+                        {
+                            grad_fill = Some(FillDto {
+                                fill_type: Some(FillType::Gradient),
+                                color: None,
+                                stops: Some(stops),
+                                angle: grad_angle,
+                                radial: grad_radial.then_some(true),
+                            });
+                        }
+                        in_grad_fill = false;
+                        grad_angle = None;
+                        grad_radial = false;
+                    }
+                    b"a:outerShdw" | b"a:innerShdw" if in_shadow => {
+                        if let Some(s) = effect_shadow.as_mut() {
+                            s.color = effect_shadow_color.take();
+                        }
+                        in_shadow = false;
+                    }
+                    b"a:glow" if in_glow => {
+                        if let Some(g) = effect_glow.as_mut() {
+                            g.color = effect_glow_color.take();
+                        }
+                        in_glow = false;
+                    }
+                    b"a:reflection" if in_reflection => {
+                        in_reflection = false;
+                    }
+                    b"a:effectLst" if in_effect_lst => {
+                        in_effect_lst = false;
                     }
                     b"a:ln" if in_shape_ln => {
                         in_shape_ln = false;

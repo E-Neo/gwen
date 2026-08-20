@@ -70,15 +70,14 @@ pub struct ListEntry {
 }
 
 /// Generate a `p:presentation` part from the slide/master wiring and geometry.
-/// `tail` carries the unmodeled trailing children (`p:defaultTextStyle`,
-/// `p:extLst`) verbatim.
+/// Unmodeled structural children (`p:defaultTextStyle`, `p:extLst`) are
+/// regenerated from standard Office defaults.
 pub fn presentation_xml(
     masters: &[ListEntry],
     notes_master_r_id: Option<&str>,
     slides: &[ListEntry],
     width: i64,
     height: i64,
-    tail: &[u8],
 ) -> Vec<u8> {
     let mut w = writer();
     w.write_event(Event::Decl(BytesDecl::new(
@@ -135,9 +134,30 @@ pub fn presentation_xml(
     );
     empty(&mut w, "p:notesSz", &[("cx", "6858000"), ("cy", "9144000")]);
 
-    w.get_mut().write_all(tail).unwrap();
+    w.get_mut()
+        .write_all(default_text_style_xml().as_bytes())
+        .unwrap();
     end(&mut w, "p:presentation");
     w.into_inner().into_inner()
+}
+
+/// Standard Office default text style (`p:defaultTextStyle`) with no explicit
+/// paragraph properties.
+fn default_text_style_xml() -> String {
+    let mut w = writer();
+    start(&mut w, "p:defaultTextStyle", &[]);
+    start(&mut w, "a:defPPr", &[]);
+    start(&mut w, "a:defRPr", &[("lang", "en-US")]);
+    start(&mut w, "a:solidFill", &[]);
+    empty(&mut w, "a:schemeClr", &[("val", "tx1")]);
+    end(&mut w, "a:solidFill");
+    empty(&mut w, "a:latin", &[("typeface", "+mj-lt")]);
+    empty(&mut w, "a:ea", &[("typeface", "+mj-ea")]);
+    empty(&mut w, "a:cs", &[("typeface", "+mj-cs")]);
+    end(&mut w, "a:defRPr");
+    end(&mut w, "a:defPPr");
+    end(&mut w, "p:defaultTextStyle");
+    String::from_utf8(w.into_inner().into_inner()).expect("valid UTF-8")
 }
 
 /// The ordered theme color names used by `a:clrScheme`.
@@ -146,9 +166,9 @@ pub const THEME_COLOR_NAMES: [&str; 12] = [
     "hlink", "folHlink",
 ];
 
-/// Generate a `a:theme` part. `tail` carries the unmodeled trailing children
-/// (`a:fmtScheme`, `a:objectDefaults`, ...) verbatim.
-pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>, tail: &[u8]) -> Vec<u8> {
+/// Generate a `a:theme` part. The `fmtScheme` and `objectDefaults` children are
+/// regenerated from standard Office defaults.
+pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>) -> Vec<u8> {
     let mut w = writer();
     w.write_event(Event::Decl(BytesDecl::new(
         "1.0",
@@ -187,10 +207,152 @@ pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>, tail: 
     }
     end(&mut w, "a:fontScheme");
 
-    w.get_mut().write_all(tail).unwrap();
+    w.get_mut().write_all(fmt_scheme_xml().as_bytes()).unwrap();
     end(&mut w, "a:themeElements");
     end(&mut w, "a:theme");
     w.into_inner().into_inner()
+}
+
+/// Standard Office format scheme (`a:fmtScheme`): neutral solid lines, a single
+/// gradient + solid fill style, a shadow effect style, and a solid background
+/// fill style.
+fn fmt_scheme_xml() -> String {
+    let mut w = writer();
+    start(&mut w, "a:fmtScheme", &[("name", "Office")]);
+
+    start(&mut w, "a:fillStyleLst", &[]);
+    start(&mut w, "a:solidFill", &[]);
+    empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    end(&mut w, "a:solidFill");
+    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
+    start(&mut w, "a:gsLst", &[]);
+    start(&mut w, "a:gs", &[("pos", "0")]);
+    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    empty(&mut w, "a:lumMod", &[("val", "30000")]);
+    empty(&mut w, "a:lumOff", &[("val", "70000")]);
+    end(&mut w, "a:schemeClr");
+    end(&mut w, "a:gs");
+    start(&mut w, "a:gs", &[("pos", "100000")]);
+    empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    end(&mut w, "a:gs");
+    end(&mut w, "a:gsLst");
+    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
+    end(&mut w, "a:gradFill");
+    end(&mut w, "a:fillStyleLst");
+
+    start(&mut w, "a:lnStyleLst", &[]);
+    for wd in ["6350", "12700", "19050"] {
+        start(
+            &mut w,
+            "a:ln",
+            &[("w", wd), ("cap", "flat"), ("cmpd", "sng"), ("algn", "ctr")],
+        );
+        start(&mut w, "a:solidFill", &[]);
+        empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
+        end(&mut w, "a:solidFill");
+        start(&mut w, "a:prstDash", &[]);
+        empty(&mut w, "a:prstDash", &[("val", "solid")]);
+        end(&mut w, "a:prstDash");
+        end(&mut w, "a:ln");
+    }
+    end(&mut w, "a:lnStyleLst");
+
+    start(&mut w, "a:effectStyleLst", &[]);
+    start(&mut w, "a:effectStyle", &[]);
+    start(&mut w, "a:effectLst", &[]);
+    start(
+        &mut w,
+        "a:outerShdw",
+        &[
+            ("blurRad", "63500"),
+            ("dist", "38100"),
+            ("dir", "5400000"),
+            ("rotWithShape", "0"),
+        ],
+    );
+    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
+    empty(&mut w, "a:alpha", &[("val", "40000")]);
+    end(&mut w, "a:outerShdw");
+    end(&mut w, "a:effectLst");
+    end(&mut w, "a:effectStyle");
+    start(&mut w, "a:effectStyle", &[]);
+    start(&mut w, "a:effectLst", &[]);
+    start(
+        &mut w,
+        "a:outerShdw",
+        &[
+            ("blurRad", "50800"),
+            ("dist", "38100"),
+            ("dir", "5400000"),
+            ("rotWithShape", "0"),
+        ],
+    );
+    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
+    empty(&mut w, "a:alpha", &[("val", "40000")]);
+    end(&mut w, "a:outerShdw");
+    end(&mut w, "a:effectLst");
+    end(&mut w, "a:effectStyle");
+    start(&mut w, "a:effectStyle", &[]);
+    start(&mut w, "a:effectLst", &[]);
+    start(
+        &mut w,
+        "a:outerShdw",
+        &[
+            ("blurRad", "50800"),
+            ("dist", "38100"),
+            ("dir", "5400000"),
+            ("rotWithShape", "0"),
+        ],
+    );
+    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
+    empty(&mut w, "a:alpha", &[("val", "40000")]);
+    end(&mut w, "a:outerShdw");
+    end(&mut w, "a:effectLst");
+    end(&mut w, "a:effectStyle");
+    end(&mut w, "a:effectStyleLst");
+
+    start(&mut w, "a:bgFillStyleLst", &[]);
+    start(&mut w, "a:solidFill", &[]);
+    empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    end(&mut w, "a:solidFill");
+    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
+    start(&mut w, "a:gsLst", &[]);
+    start(&mut w, "a:gs", &[("pos", "0")]);
+    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    empty(&mut w, "a:lumMod", &[("val", "102000")]);
+    empty(&mut w, "a:lumOff", &[("val", "0")]);
+    end(&mut w, "a:schemeClr");
+    end(&mut w, "a:gs");
+    start(&mut w, "a:gs", &[("pos", "100000")]);
+    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    empty(&mut w, "a:lumMod", &[("val", "100000")]);
+    empty(&mut w, "a:lumOff", &[("val", "0")]);
+    end(&mut w, "a:schemeClr");
+    end(&mut w, "a:gs");
+    end(&mut w, "a:gsLst");
+    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
+    end(&mut w, "a:gradFill");
+    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
+    start(&mut w, "a:gsLst", &[]);
+    start(&mut w, "a:gs", &[("pos", "0")]);
+    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    empty(&mut w, "a:lumMod", &[("val", "102000")]);
+    empty(&mut w, "a:lumOff", &[("val", "0")]);
+    end(&mut w, "a:schemeClr");
+    end(&mut w, "a:gs");
+    start(&mut w, "a:gs", &[("pos", "100000")]);
+    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
+    empty(&mut w, "a:lumMod", &[("val", "100000")]);
+    empty(&mut w, "a:lumOff", &[("val", "0")]);
+    end(&mut w, "a:schemeClr");
+    end(&mut w, "a:gs");
+    end(&mut w, "a:gsLst");
+    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
+    end(&mut w, "a:gradFill");
+    end(&mut w, "a:bgFillStyleLst");
+
+    end(&mut w, "a:fmtScheme");
+    String::from_utf8(w.into_inner().into_inner()).expect("valid UTF-8")
 }
 
 /// Generate the `p:bg` element for a solid-fill slide background. Returns `None`

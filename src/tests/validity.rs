@@ -107,17 +107,14 @@ fn adding_a_slide_produces_a_valid_package() {
     let slides = project.join("src").join("slides");
 
     // Append a slide ref to the index and drop in a fresh slide file.
-    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
-    let ref_marker = "<!-- slide uri=\"ppt/slides/slide2.xml\" src=\"slides/slide2.md\" -->\n";
+    let md = std::fs::read_to_string(project.join("src").join("PRESENTATION.md")).unwrap();
     let md = md.replace(
-        ref_marker,
-        &format!(
-            "{ref_marker}<!-- slide uri=\"ppt/slides/slide3.xml\" src=\"slides/slide3.md\" -->\n"
-        ),
+        "<!-- slide src=\"slides/slide2.md\" -->",
+        "<!-- slide src=\"slides/slide2.md\" -->\n<!-- slide src=\"slides/slide3.md\" -->",
     );
-    std::fs::write(project.join("PRESENTATION.md"), md).unwrap();
+    std::fs::write(project.join("src").join("PRESENTATION.md"), md).unwrap();
 
-    let slide = "---\nuri: \"ppt/slides/slide3.xml\"\nname: \"\"\nmaster: \"0\"\nlayout: \"0\"\n---\n\n<!-- shape type=\"textbox\" name=\"Brand New\" id=\"9\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nFresh\n";
+    let slide = "---\nname: \"\"\nlayout: \"layouts/layout1.md\"\n---\n\n<!-- shape type=\"textbox\" name=\"Brand New\" id=\"9\" left=\"100000\" top=\"100000\" width=\"5000000\" height=\"500000\" -->\nFresh\n";
     std::fs::write(slides.join("slide3.md"), slide).unwrap();
 
     let out = build_project(&project);
@@ -130,12 +127,9 @@ fn adding_a_slide_produces_a_valid_package() {
 #[test]
 fn deleting_a_slide_produces_a_valid_package() {
     let project = new_project(&fixture("two_slides.pptx"), "deck");
-    let md = std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap();
-    let md = md.replace(
-        "<!-- slide uri=\"ppt/slides/slide2.xml\" src=\"slides/slide2.md\" -->\n",
-        "",
-    );
-    std::fs::write(project.join("PRESENTATION.md"), md).unwrap();
+    let md = std::fs::read_to_string(project.join("src").join("PRESENTATION.md")).unwrap();
+    let md = md.replace("<!-- slide src=\"slides/slide2.md\" -->\n", "");
+    std::fs::write(project.join("src").join("PRESENTATION.md"), md).unwrap();
     std::fs::remove_file(project.join("src").join("slides").join("slide2.md")).unwrap();
 
     let out = build_project(&project);
@@ -178,4 +172,38 @@ fn read_zip_entry(path: &Path, name: &str) -> String {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut buf).unwrap();
     buf
+}
+
+/// The effects deck rebuilds into a package whose slide carries gradient fills
+/// and the full effect list (shadow, glow, soft edge, reflection).
+#[test]
+fn effects_deck_rebuilds_valid() {
+    let project = new_project(&fixture("effects.pptx"), "deck");
+    let out = build_project(&project);
+    assert_valid(&out);
+    let slide = read_zip_entry(&out, "ppt/slides/slide1.xml");
+    assert!(slide.contains("a:gradFill"), "linear gradient present");
+    assert!(
+        slide.contains("<a:path path=\"circle\""),
+        "radial gradient present"
+    );
+    assert!(slide.contains("a:outerShdw"), "outer shadow present");
+    assert!(slide.contains("a:innerShdw"), "inner shadow present");
+    assert!(slide.contains("a:glow"), "glow present");
+    assert!(slide.contains("a:softEdge"), "soft edge present");
+    assert!(slide.contains("a:reflection"), "reflection present");
+}
+
+/// The effects deck's mirror must express gradients and effects as CSS.
+#[test]
+fn effects_mirror_uses_css_grammar() {
+    let project = new_project(&fixture("effects.pptx"), "deck");
+    let slide =
+        std::fs::read_to_string(project.join("src").join("slides").join("slide1.md")).unwrap();
+    assert!(slide.contains("linear-gradient("), "linear gradient CSS");
+    assert!(slide.contains("radial-gradient("), "radial gradient CSS");
+    assert!(slide.contains("box-shadow:"), "shadow CSS");
+    assert!(slide.contains("--pptx-glow:"), "glow CSS");
+    assert!(slide.contains("--pptx-soft-edge:"), "soft edge CSS");
+    assert!(slide.contains("--pptx-reflection:"), "reflection CSS");
 }

@@ -112,7 +112,7 @@ fn every_help_example_runs() {
                 "new" => {
                     let _ = std::fs::remove_dir_all(&deck);
                 }
-                "build" if !deck.join("PRESENTATION.md").exists() => {
+                "build" if !deck.join("src").join("PRESENTATION.md").exists() => {
                     let seed = Command::new(bin())
                         .args([
                             "new",

@@ -127,7 +127,79 @@ pub fn shape_decls(shape: &Map<String, Value>) -> Vec<Decl> {
     if let Some(outline) = val(shape, "outline").and_then(Value::as_object) {
         push_outline_decls(&mut out, outline);
     }
+    if let Some(shadow) = val(shape, "shadow").and_then(Value::as_object) {
+        push_shadow_decl(&mut out, shadow);
+    }
+    if let Some(glow) = val(shape, "glow").and_then(Value::as_object) {
+        let radius = glow.get("radius").and_then(Value::as_i64).unwrap_or(0);
+        let color = glow.get("color").and_then(Value::as_object);
+        let alpha = glow.get("alpha").and_then(Value::as_i64);
+        let mut parts = vec![radius.to_string()];
+        if let Some(c) = color {
+            parts.push(color_token(c));
+        }
+        if let Some(a) = alpha {
+            parts.push(format!("{a}%"));
+        }
+        out.push(Decl::new("--pptx-glow", parts.join(" ")));
+    }
+    if let Some(se) = val(shape, "soft_edge").and_then(Value::as_object)
+        && let Some(radius) = se.get("radius").and_then(Value::as_i64)
+    {
+        out.push(Decl::new("--pptx-soft-edge", radius.to_string()));
+    }
+    if let Some(r) = val(shape, "reflection").and_then(Value::as_object) {
+        let part = |k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0).to_string();
+        out.push(Decl::new(
+            "--pptx-reflection",
+            format!(
+                "{} {} {} {} {}",
+                part("blur"),
+                part("start_pos"),
+                part("end_pos"),
+                part("start_alpha"),
+                part("end_alpha")
+            ),
+        ));
+    }
     out
+}
+
+fn push_shadow_decl(out: &mut Vec<Decl>, shadow: &Map<String, Value>) {
+    let mut parts = Vec::new();
+    if shadow
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|t| t.eq_ignore_ascii_case("inner"))
+        .unwrap_or(false)
+    {
+        parts.push("inset".to_string());
+    }
+    parts.push(
+        shadow
+            .get("blur")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    parts.push(
+        shadow
+            .get("dist")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    parts.push(format!(
+        "{}deg",
+        shadow.get("dir_deg").and_then(Value::as_i64).unwrap_or(0)
+    ));
+    if let Some(color) = shadow.get("color").and_then(Value::as_object) {
+        parts.push(color_token(color));
+    }
+    if let Some(alpha) = shadow.get("alpha").and_then(Value::as_i64) {
+        parts.push(format!("{alpha}%"));
+    }
+    out.push(Decl::new("box-shadow", parts.join(" ")));
 }
 
 fn push_fill_decl(out: &mut Vec<Decl>, prop: &str, fill: &Map<String, Value>) {
@@ -141,11 +213,39 @@ fn push_fill_decl(out: &mut Vec<Decl>, prop: &str, fill: &Map<String, Value>) {
                 out.push(Decl::new(prop, "solid"));
             }
         }
+        "gradient" => out.push(Decl::new(prop, gradient_token(fill))),
         _ => {
             if let Some(color) = fill.get("color").and_then(Value::as_object) {
                 out.push(Decl::new(prop, color_token(color)));
             }
         }
+    }
+}
+
+/// `linear-gradient(135deg, RGB(FF0000) 0%, RGB(0000FF) 100%)` /
+/// `radial-gradient(RGB(FF0000) 0%, RGB(0000FF) 100%)` from a gradient fill.
+fn gradient_token(fill: &Map<String, Value>) -> String {
+    let radial = fill.get("radial").and_then(Value::as_bool).unwrap_or(false);
+    let angle = fill.get("angle").and_then(Value::as_i64);
+    let stops: Vec<String> = fill
+        .get("stops")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| {
+                    let pos = s.get("pos").and_then(Value::as_i64)?;
+                    let color = s.get("color").and_then(Value::as_object)?;
+                    Some(format!("{} {pos}%", color_token(color)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if radial {
+        format!("radial-gradient({})", stops.join(", "))
+    } else if let Some(a) = angle {
+        format!("linear-gradient({a}deg, {})", stops.join(", "))
+    } else {
+        format!("linear-gradient(0deg, {})", stops.join(", "))
     }
 }
 
@@ -329,7 +429,86 @@ pub fn shape_from_decls(decls: &[Decl]) -> Map<String, Value> {
     if let Some(outline) = outline_from_decls(decls) {
         shape.insert("outline".into(), outline);
     }
+    if let Some(shadow) = shadow_from_decl(decl_str(decls, "box-shadow")) {
+        shape.insert("shadow".into(), shadow);
+    }
+    if let Some(glow) = glow_from_decl(decl_str(decls, "--pptx-glow")) {
+        shape.insert("glow".into(), glow);
+    }
+    if let Some(radius) = decl_i64(decls, "--pptx-soft-edge") {
+        shape.insert("soft_edge".into(), json!({ "radius": radius }));
+    }
+    if let Some(r) = decl_str(decls, "--pptx-reflection") {
+        let parts: Vec<&str> = r.split_whitespace().collect();
+        if parts.len() == 5 {
+            let num = |i: usize| parts[i].parse::<i64>().ok();
+            shape.insert(
+                "reflection".into(),
+                json!({
+                    "blur": num(0),
+                    "start_pos": num(1),
+                    "end_pos": num(2),
+                    "start_alpha": num(3),
+                    "end_alpha": num(4),
+                }),
+            );
+        }
+    }
     shape
+}
+
+/// Parse `box-shadow: [inset ]<blur> <dist> <dir>deg <COLOR> <alpha>%`.
+fn shadow_from_decl(value: Option<&str>) -> Option<Value> {
+    let v = value?;
+    let mut toks = v.split_whitespace();
+    let mut inner = false;
+    let first = toks.next()?;
+    let first = if first == "inset" {
+        inner = true;
+        toks.next()?
+    } else {
+        first
+    };
+    let blur = first.parse::<i64>().ok()?;
+    let dist = toks.next()?.parse::<i64>().ok()?;
+    let dir_deg = toks.next()?.strip_suffix("deg")?.parse::<i64>().ok()?;
+    let color_tok = toks.next()?;
+    let alpha = toks
+        .next()
+        .and_then(|t| t.strip_suffix('%')?.parse::<i64>().ok());
+    let (ty, inner_tok) = parse_color_token(color_tok);
+    let mut m = Map::new();
+    m.insert(
+        "type".into(),
+        Value::String(if inner { "inner" } else { "outer" }.into()),
+    );
+    m.insert("blur".into(), Value::from(blur));
+    m.insert("dist".into(), Value::from(dist));
+    m.insert("dir_deg".into(), Value::from(dir_deg));
+    m.insert("color".into(), color_value(&ty, &inner_tok));
+    if let Some(a) = alpha {
+        m.insert("alpha".into(), Value::from(a));
+    }
+    Some(Value::Object(m))
+}
+
+/// Parse `--pptx-glow: <radius> <COLOR> <alpha>%`.
+fn glow_from_decl(value: Option<&str>) -> Option<Value> {
+    let v = value?;
+    let mut toks = v.split_whitespace();
+    let radius = toks.next()?.parse::<i64>().ok()?;
+    let color_tok = toks.next()?;
+    let alpha = toks
+        .next()
+        .and_then(|t| t.strip_suffix('%')?.parse::<i64>().ok());
+    let (ty, inner) = parse_color_token(color_tok);
+    let mut m = Map::new();
+    m.insert("radius".into(), Value::from(radius));
+    m.insert("color".into(), color_value(&ty, &inner));
+    if let Some(a) = alpha {
+        m.insert("alpha".into(), Value::from(a));
+    }
+    Some(Value::Object(m))
 }
 
 /// Apply the `name`, `left/top/width/height`, `rotation`, `grid` and
@@ -420,6 +599,9 @@ fn fill_from_decl(value: Option<&str>) -> Option<Value> {
         "none" => Some(json_fill("no_fill", None)),
         "solid" => Some(json_fill("solid", None)),
         _ => {
+            if let Some(g) = gradient_from_token(v) {
+                return Some(g);
+            }
             let (ty, inner) = parse_color_token(v);
             match ty.as_str() {
                 "RGB" | "SCHEME" => Some(json_fill("solid", Some(color_value(&ty, &inner)))),
@@ -430,6 +612,53 @@ fn fill_from_decl(value: Option<&str>) -> Option<Value> {
             }
         }
     }
+}
+
+/// Parse a `linear-gradient(...)` / `radial-gradient(...)` token into a
+/// gradient fill value.
+fn gradient_from_token(v: &str) -> Option<Value> {
+    let (kind, inner) = if let Some(rest) = v.strip_prefix("linear-gradient(") {
+        ("linear", rest)
+    } else {
+        let rest = v.strip_prefix("radial-gradient(")?;
+        ("radial", rest)
+    };
+    let inner = inner.strip_suffix(')')?;
+    let mut parts = inner.split(',').map(str::trim);
+    let mut angle = None;
+    if kind == "linear"
+        && let Some(first) = parts.next()
+        && let Some(deg) = first.strip_suffix("deg")
+    {
+        angle = deg.trim().parse::<i64>().ok();
+    }
+    let mut stops: Vec<Value> = Vec::new();
+    for p in parts {
+        let (color_tok, pos_tok) = match p.find(char::is_whitespace) {
+            Some(i) => (p[..i].trim(), p[i..].trim()),
+            None => (p.trim(), "100%"),
+        };
+        let (ty, inner) = parse_color_token(color_tok);
+        let pos = pos_tok
+            .strip_suffix('%')
+            .and_then(|n| n.trim().parse::<i64>().ok())?;
+        stops.push(json!({
+            "pos": pos,
+            "color": color_value(&ty, &inner),
+        }));
+    }
+    if stops.is_empty() {
+        return None;
+    }
+    let mut m = Map::new();
+    m.insert("type".into(), Value::String("gradient".into()));
+    m.insert("stops".into(), Value::Array(stops));
+    if kind == "radial" {
+        m.insert("radial".into(), Value::Bool(true));
+    } else if let Some(a) = angle {
+        m.insert("angle".into(), Value::from(a));
+    }
+    Some(Value::Object(m))
 }
 
 fn json_fill(ty: &str, color: Option<Value>) -> Value {
@@ -721,7 +950,14 @@ fn strip_style_tags(html: &str) -> String {
 pub fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                let s = f.to_string();
+                s.strip_suffix(".0").unwrap_or(&s).to_string()
+            } else {
+                n.to_string()
+            }
+        }
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
         other => other.to_string(),

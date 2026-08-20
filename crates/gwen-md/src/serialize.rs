@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -6,7 +7,7 @@ use super::error::MdResult;
 use super::markers::{
     ATTR_CH_EXT_CX, ATTR_CH_EXT_CY, ATTR_CH_OFF_X, ATTR_CH_OFF_Y, ATTR_CHART_TYPE, ATTR_GRID,
     ATTR_ID, ATTR_IMAGE, ATTR_MERGE, ATTR_NAME, ATTR_PH_IDX, ATTR_PH_SZ, ATTR_PH_TYPE,
-    ATTR_PLACEHOLDER, ATTR_ROTATION, ATTR_ROW_HEIGHTS, ATTR_SRC, ATTR_TYPE, ATTR_URI, ATTR_WIDTH,
+    ATTR_PLACEHOLDER, ATTR_ROTATION, ATTR_ROW_HEIGHTS, ATTR_SRC, ATTR_TYPE, ATTR_WIDTH,
     LENGTH_ATTRS, MARKER_BACKGROUND, MARKER_END_GROUP, MARKER_LAYOUT, MARKER_MASTER, MARKER_SLIDE,
     legend, shape_type_token,
 };
@@ -770,10 +771,12 @@ fn escape_text(s: &str) -> String {
 // Multi-file project mirror
 // ---------------------------------------------------------------------------
 
-/// Write the full project mirror for `snapshot` under `dir`: `PRESENTATION.md`
-/// plus `src/masters/`, `src/layouts/` and `src/slides/`. The snapshot must be
-/// the complete query output (including `uri` fields); binary parts and media
-/// are captured separately by the `gwen new` command.
+/// Write the full project mirror for `snapshot` under `dir`:
+/// `src/PRESENTATION.md` plus `src/masters/`, `src/layouts/` and
+/// `src/slides/`. The snapshot must be the complete query output; the pptx
+/// URIs and numeric layout indices it carries are internal and are not written
+/// into the mirror — slides reference their layout by the layout's markdown
+/// path instead.
 pub fn write_document(snapshot: &Value, dir: &Path) -> MdResult<()> {
     let doc = normalize::normalize(snapshot);
     let obj = doc.as_object().ok_or_else(|| {
@@ -795,6 +798,21 @@ pub fn write_document(snapshot: &Value, dir: &Path) -> MdResult<()> {
         std::fs::create_dir_all(d)?;
     }
 
+    // (master index, layout index) -> layout file path, mirroring the running
+    // counter used while writing the master files below.
+    let mut layout_paths: HashMap<(usize, usize), String> = HashMap::new();
+    if let Some(masters) = obj.get("slide_masters").and_then(Value::as_array) {
+        let mut counter = 0usize;
+        for (i, master) in masters.iter().enumerate() {
+            if let Some(layouts) = master.get("slide_layouts").and_then(Value::as_array) {
+                for (j, _) in layouts.iter().enumerate() {
+                    counter += 1;
+                    layout_paths.insert((i, j), format!("layouts/layout{counter}.md"));
+                }
+            }
+        }
+    }
+
     let mut pres = String::new();
     write_front_matter(&mut pres, obj);
     pres.push('\n');
@@ -805,12 +823,11 @@ pub fn write_document(snapshot: &Value, dir: &Path) -> MdResult<()> {
     if let Some(masters) = obj.get("slide_masters").and_then(Value::as_array) {
         for (i, master) in masters.iter().enumerate() {
             let src_ref = format!("masters/master{}.md", i + 1);
-            let uri = master.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
             let name = master.get("name").and_then(Value::as_str).unwrap_or("");
             write_ref(
                 &mut pres,
                 MARKER_MASTER,
-                &[("name", name), (ATTR_URI, uri), (ATTR_SRC, &src_ref)],
+                &[("name", name), (ATTR_SRC, &src_ref)],
             );
             write_master_file(&masters_dir, &layouts_dir, &mut layout_file, i + 1, master)?;
         }
@@ -818,21 +835,21 @@ pub fn write_document(snapshot: &Value, dir: &Path) -> MdResult<()> {
     if let Some(slides) = obj.get("slides").and_then(Value::as_array) {
         for (i, slide) in slides.iter().enumerate() {
             let src_ref = format!("slides/slide{}.md", i + 1);
-            let uri = slide.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
+            let name = slide.get("name").and_then(Value::as_str).unwrap_or("");
             write_ref(
                 &mut pres,
                 MARKER_SLIDE,
-                &[("name", ""), (ATTR_URI, uri), (ATTR_SRC, &src_ref)],
+                &[("name", name), (ATTR_SRC, &src_ref)],
             );
-            write_slide_file(&slides_dir, i + 1, slide)?;
+            write_slide_file(&slides_dir, i + 1, slide, &layout_paths)?;
         }
     }
 
-    std::fs::write(dir.join("PRESENTATION.md"), pres)?;
+    std::fs::write(src.join("PRESENTATION.md"), pres)?;
     Ok(())
 }
 
-/// A `<!-- key name="..." uri="..." src="..." -->` reference line. Attributes
+/// A `<!-- key name="..." src="..." -->` reference line. Attributes
 /// with empty values are omitted.
 fn write_ref(out: &mut String, key: &str, attrs: &[(&str, &str)]) {
     let mut parts = Vec::new();
@@ -842,15 +859,6 @@ fn write_ref(out: &mut String, key: &str, attrs: &[(&str, &str)]) {
         }
     }
     out.push_str(&format!("<!-- {key} {} -->\n", parts.join(" ")));
-}
-
-/// A string view of a scalar value (numbers and strings).
-fn scalar_str(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
 }
 
 /// A per-file YAML front matter from key/value pairs, all values quoted.
@@ -870,11 +878,10 @@ fn write_master_file(
     master: &Value,
 ) -> MdResult<()> {
     let obj = master.as_object().cloned().unwrap_or_default();
-    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
 
     let mut out = String::new();
-    write_file_front(&mut out, &[(ATTR_URI, uri), ("name", name)]);
+    write_file_front(&mut out, &[("name", name)]);
     out.push('\n');
     out.push_str(&format!(
         "<!-- Gwen mirror part: masters/master{n}.md -->\n\n"
@@ -900,12 +907,11 @@ fn write_master_file(
         for layout in layouts {
             *layout_file += 1;
             let lsrc = format!("layouts/layout{layout_file}.md");
-            let luri = layout.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
             let lname = layout.get("name").and_then(Value::as_str).unwrap_or("");
             write_ref(
                 &mut out,
                 MARKER_LAYOUT,
-                &[("name", lname), (ATTR_URI, luri), (ATTR_SRC, &lsrc)],
+                &[("name", lname), (ATTR_SRC, &lsrc)],
             );
             write_layout_file(layouts_dir, *layout_file, layout)?;
         }
@@ -917,11 +923,10 @@ fn write_master_file(
 
 fn write_layout_file(layouts_dir: &Path, n: usize, layout: &Value) -> MdResult<()> {
     let obj = layout.as_object().cloned().unwrap_or_default();
-    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
 
     let mut out = String::new();
-    write_file_front(&mut out, &[(ATTR_URI, uri), ("name", name)]);
+    write_file_front(&mut out, &[("name", name)]);
     out.push('\n');
     out.push_str(&format!(
         "<!-- Gwen mirror part: layouts/layout{n}.md -->\n\n"
@@ -945,35 +950,37 @@ fn write_layout_file(layouts_dir: &Path, n: usize, layout: &Value) -> MdResult<(
     Ok(())
 }
 
-fn write_slide_file(slides_dir: &Path, n: usize, slide: &Value) -> MdResult<()> {
+fn write_slide_file(
+    slides_dir: &Path,
+    n: usize,
+    slide: &Value,
+    layout_paths: &HashMap<(usize, usize), String>,
+) -> MdResult<()> {
     let obj = slide.as_object().cloned().unwrap_or_default();
-    let uri = obj.get(ATTR_URI).and_then(Value::as_str).unwrap_or("");
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
-    let layout = obj
+    let layout_path = obj
         .get("slide_layout")
         .and_then(Value::as_object)
-        .map(|l| {
-            let m = l
-                .get("master")
-                .and_then(scalar_str)
-                .unwrap_or_else(|| "".to_string());
-            let l = l
-                .get("layout")
-                .and_then(scalar_str)
-                .unwrap_or_else(|| "".to_string());
-            (m, l)
-        })
-        .unwrap_or_default();
+        .and_then(|l| {
+            let m = l.get("master").and_then(Value::as_i64)? as usize;
+            let l = l.get("layout").and_then(Value::as_i64)? as usize;
+            layout_paths.get(&(m, l)).cloned()
+        });
 
     let mut out = String::new();
+    let mut front: Vec<(&str, String)> = Vec::new();
+    if !name.is_empty() {
+        front.push(("name", name.to_string()));
+    }
+    if let Some(path) = layout_path {
+        front.push(("layout", path));
+    }
     write_file_front(
         &mut out,
-        &[
-            (ATTR_URI, uri),
-            ("name", name),
-            ("master", &layout.0),
-            ("layout", &layout.1),
-        ],
+        &front
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect::<Vec<_>>(),
     );
     out.push('\n');
     out.push_str(&format!(

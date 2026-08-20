@@ -481,34 +481,191 @@ fn write_xfrm(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>, tag: &str) {
     writer.write_event(Event::End(BytesEnd::new(tag))).ok();
 }
 
+fn write_fill(fill: &FillDto, writer: &mut Writer<Vec<u8>>) {
+    match fill.fill_type {
+        Some(FillType::NoFill) => {
+            writer
+                .write_event(Event::Empty(BytesStart::new("a:noFill")))
+                .ok();
+        }
+        Some(FillType::Gradient) => {
+            writer
+                .write_event(Event::Start(BytesStart::new("a:gradFill")))
+                .ok();
+            writer
+                .write_event(Event::Start(BytesStart::new("a:gsLst")))
+                .ok();
+            if let Some(ref stops) = fill.stops {
+                for stop in stops {
+                    let mut gs = BytesStart::new("a:gs");
+                    gs.push_attribute(("pos", stop.pos.to_string().as_str()));
+                    writer.write_event(Event::Start(gs)).ok();
+                    write_color(&stop.color, writer);
+                    writer.write_event(Event::End(BytesEnd::new("a:gs"))).ok();
+                }
+            }
+            writer
+                .write_event(Event::End(BytesEnd::new("a:gsLst")))
+                .ok();
+            if fill.radial.unwrap_or(false) {
+                let mut path = BytesStart::new("a:path");
+                path.push_attribute(("path", "circle"));
+                writer.write_event(Event::Start(path)).ok();
+                let mut ftr = BytesStart::new("a:fillToRect");
+                ftr.push_attribute(("l", "50000"));
+                ftr.push_attribute(("t", "50000"));
+                ftr.push_attribute(("r", "50000"));
+                ftr.push_attribute(("b", "50000"));
+                writer.write_event(Event::Empty(ftr)).ok();
+                writer.write_event(Event::End(BytesEnd::new("a:path"))).ok();
+            } else if let Some(angle) = fill.angle {
+                let mut lin = BytesStart::new("a:lin");
+                lin.push_attribute(("ang", (angle * 60000).to_string().as_str()));
+                lin.push_attribute(("scaled", "1"));
+                writer.write_event(Event::Empty(lin)).ok();
+            } else {
+                let mut lin = BytesStart::new("a:lin");
+                lin.push_attribute(("ang", "5400000"));
+                lin.push_attribute(("scaled", "1"));
+                writer.write_event(Event::Empty(lin)).ok();
+            }
+            writer
+                .write_event(Event::End(BytesEnd::new("a:gradFill")))
+                .ok();
+        }
+        _ => {
+            writer
+                .write_event(Event::Start(BytesStart::new("a:solidFill")))
+                .ok();
+            if let Some(ref color) = fill.color {
+                if let Some(ref rgb) = color.rgb {
+                    let mut clr = BytesStart::new("a:srgbClr");
+                    clr.push_attribute(("val", rgb.as_str()));
+                    writer.write_event(Event::Empty(clr)).ok();
+                } else if let Some(ref tc) = color.theme_color {
+                    let mut clr = BytesStart::new("a:schemeClr");
+                    clr.push_attribute(("val", tc.as_str()));
+                    writer.write_event(Event::Empty(clr)).ok();
+                }
+            }
+            writer
+                .write_event(Event::End(BytesEnd::new("a:solidFill")))
+                .ok();
+        }
+    }
+}
+
+/// Write the `a:effectLst` for a shape's shadow/glow/soft-edge/reflection.
+fn write_shape_effects(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
+    let has_effects = shape.shadow.is_some()
+        || shape.glow.is_some()
+        || shape.soft_edge.is_some()
+        || shape.reflection.is_some();
+    if !has_effects {
+        return;
+    }
+    writer
+        .write_event(Event::Start(BytesStart::new("a:effectLst")))
+        .ok();
+    if let Some(ref shadow) = shape.shadow {
+        let (tag, is_outer) = match shadow.shadow_type {
+            Some(ShadowType::Inner) => ("a:innerShdw", false),
+            _ => ("a:outerShdw", true),
+        };
+        let mut elem = BytesStart::new(tag);
+        if let Some(blur) = shadow.blur {
+            elem.push_attribute(("blurRad", blur.to_string().as_str()));
+        }
+        if let Some(dist) = shadow.dist {
+            elem.push_attribute(("dist", dist.to_string().as_str()));
+        }
+        if let Some(dir) = shadow.dir_deg {
+            elem.push_attribute(("dir", (dir * 60000).to_string().as_str()));
+        }
+        elem.push_attribute(("rotWithShape", "0"));
+        writer.write_event(Event::Start(elem)).ok();
+        write_color_effect(shadow.color.as_ref(), shadow.alpha, writer);
+        writer.write_event(Event::End(BytesEnd::new(tag))).ok();
+        let _ = is_outer;
+    }
+    if let Some(ref glow) = shape.glow {
+        let mut elem = BytesStart::new("a:glow");
+        if let Some(radius) = glow.radius {
+            elem.push_attribute(("rad", radius.to_string().as_str()));
+        }
+        writer.write_event(Event::Start(elem)).ok();
+        write_color_effect(glow.color.as_ref(), glow.alpha, writer);
+        writer.write_event(Event::End(BytesEnd::new("a:glow"))).ok();
+    }
+    if let Some(ref se) = shape.soft_edge {
+        let mut elem = BytesStart::new("a:softEdge");
+        if let Some(radius) = se.radius {
+            elem.push_attribute(("rad", radius.to_string().as_str()));
+        }
+        writer.write_event(Event::Empty(elem)).ok();
+    }
+    if let Some(ref r) = shape.reflection {
+        let mut elem = BytesStart::new("a:reflection");
+        if let Some(blur) = r.blur {
+            elem.push_attribute(("blurRad", blur.to_string().as_str()));
+        }
+        if let Some(v) = r.start_alpha {
+            elem.push_attribute(("stA", (v * 1000).to_string().as_str()));
+        }
+        if let Some(v) = r.end_alpha {
+            elem.push_attribute(("endA", (v * 1000).to_string().as_str()));
+        }
+        if let Some(v) = r.start_pos {
+            elem.push_attribute(("stPos", (v * 1000).to_string().as_str()));
+        }
+        if let Some(v) = r.end_pos {
+            elem.push_attribute(("endPos", (v * 1000).to_string().as_str()));
+        }
+        elem.push_attribute(("dir", "5400000"));
+        elem.push_attribute(("fadeDir", "5400000"));
+        elem.push_attribute(("rotWithShape", "0"));
+        writer.write_event(Event::Empty(elem)).ok();
+    }
+    writer
+        .write_event(Event::End(BytesEnd::new("a:effectLst")))
+        .ok();
+}
+
+/// Write a color plus an optional `a:alpha` child for shadow/glow effects.
+fn write_color_effect(
+    color: Option<&ColorFormatDto>,
+    alpha: Option<i64>,
+    writer: &mut Writer<Vec<u8>>,
+) {
+    if let Some(c) = color {
+        let clr = if c.rgb.is_some() {
+            let mut e = BytesStart::new("a:srgbClr");
+            e.push_attribute(("val", c.rgb.as_deref().unwrap_or("")));
+            e
+        } else {
+            let mut e = BytesStart::new("a:schemeClr");
+            e.push_attribute(("val", c.theme_color.as_deref().unwrap_or("tx1")));
+            e
+        };
+        writer.write_event(Event::Start(clr)).ok();
+        if let Some(a) = alpha {
+            let mut al = BytesStart::new("a:alpha");
+            al.push_attribute(("val", (a * 1000).to_string().as_str()));
+            writer.write_event(Event::Empty(al)).ok();
+        }
+        writer
+            .write_event(Event::End(BytesEnd::new(if c.rgb.is_some() {
+                "a:srgbClr"
+            } else {
+                "a:schemeClr"
+            })))
+            .ok();
+    }
+}
+
 fn write_shape_fill_outline(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
     if let Some(ref fill) = shape.fill {
-        match fill.fill_type {
-            Some(FillType::NoFill) => {
-                writer
-                    .write_event(Event::Empty(BytesStart::new("a:noFill")))
-                    .ok();
-            }
-            _ => {
-                writer
-                    .write_event(Event::Start(BytesStart::new("a:solidFill")))
-                    .ok();
-                if let Some(ref color) = fill.color {
-                    if let Some(ref rgb) = color.rgb {
-                        let mut clr = BytesStart::new("a:srgbClr");
-                        clr.push_attribute(("val", rgb.as_str()));
-                        writer.write_event(Event::Empty(clr)).ok();
-                    } else if let Some(ref tc) = color.theme_color {
-                        let mut clr = BytesStart::new("a:schemeClr");
-                        clr.push_attribute(("val", tc.as_str()));
-                        writer.write_event(Event::Empty(clr)).ok();
-                    }
-                }
-                writer
-                    .write_event(Event::End(BytesEnd::new("a:solidFill")))
-                    .ok();
-            }
-        }
+        write_fill(fill, writer);
     }
     if let Some(ref outline) = shape.outline {
         let w_str = outline.width.map(|w| w.to_string());
@@ -566,36 +723,12 @@ fn write_shape_fill_outline(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
                 writer.write_event(Event::Empty(pd)).ok();
             }
             if let Some(ref fill) = outline.fill {
-                match fill.fill_type {
-                    Some(FillType::NoFill) => {
-                        writer
-                            .write_event(Event::Empty(BytesStart::new("a:noFill")))
-                            .ok();
-                    }
-                    _ => {
-                        writer
-                            .write_event(Event::Start(BytesStart::new("a:solidFill")))
-                            .ok();
-                        if let Some(ref color) = fill.color {
-                            if let Some(ref rgb) = color.rgb {
-                                let mut clr = BytesStart::new("a:srgbClr");
-                                clr.push_attribute(("val", rgb.as_str()));
-                                writer.write_event(Event::Empty(clr)).ok();
-                            } else if let Some(ref tc) = color.theme_color {
-                                let mut clr = BytesStart::new("a:schemeClr");
-                                clr.push_attribute(("val", tc.as_str()));
-                                writer.write_event(Event::Empty(clr)).ok();
-                            }
-                        }
-                        writer
-                            .write_event(Event::End(BytesEnd::new("a:solidFill")))
-                            .ok();
-                    }
-                }
+                write_fill(fill, writer);
             }
             writer.write_event(Event::End(BytesEnd::new("a:ln"))).ok();
         }
     }
+    write_shape_effects(shape, writer);
 }
 
 fn write_sp_elem(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {

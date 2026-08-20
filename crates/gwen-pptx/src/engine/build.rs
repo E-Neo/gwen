@@ -38,98 +38,14 @@ const MASTER_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
 const NOTES_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
-const NOTES_MASTER_REL: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
 const THEME_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const CHART_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
 
 /// Everything the compiler needs from a project directory.
 pub struct Project<'a> {
     pub doc: &'a Value,
-    /// `src/parts`: preserved parts, `_rels/`, `_fragments/`, `_content-types.toml`.
-    pub parts_dir: Option<&'a Path>,
     /// `src/media`: extracted image files keyed by basename.
     pub media_dir: Option<&'a Path>,
-}
-
-/// Preserved resources loaded from `src/parts`.
-struct Resources {
-    parts: HashMap<String, Vec<u8>>,
-    rels: HashMap<String, HashMap<String, Relationship>>,
-    fragments: HashMap<String, Vec<u8>>,
-    content_types: HashMap<String, String>,
-}
-
-impl Resources {
-    fn load(dir: &Path) -> AppResult<Resources> {
-        let mut parts = HashMap::new();
-        let mut rels = HashMap::new();
-        let mut fragments = HashMap::new();
-        let mut content_types = HashMap::new();
-
-        let content_types_path = dir.join("_content-types.toml");
-        if content_types_path.exists() {
-            let raw = std::fs::read_to_string(content_types_path)?;
-            if let Ok(v) = toml::from_str::<toml::Value>(&raw)
-                && let Some(table) = v.get("parts").and_then(toml::Value::as_table)
-            {
-                for (k, val) in table {
-                    if let Some(ct) = val.as_str() {
-                        content_types.insert(k.clone(), ct.to_string());
-                    }
-                }
-            }
-        }
-
-        for path in walk_dir(dir)? {
-            let rel = path.strip_prefix(dir).unwrap_or(&path);
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            if let Some(rest) = rel_str.strip_prefix("_fragments/") {
-                if let Some((key, suffix)) = split_fragment(rest) {
-                    fragments.insert(fragment_key(&key, suffix), std::fs::read(&path)?);
-                }
-                continue;
-            }
-            if let Some(rest) = rel_str.strip_prefix("_rels/") {
-                if let Some(key) = rest.strip_suffix(".rels") {
-                    let data = std::fs::read(&path)?;
-                    let parsed = crate::opc::package::parse_rels_xml(&data)?;
-                    rels.insert(key.to_string(), parsed);
-                }
-                continue;
-            }
-            if rel_str == "_content-types.toml" {
-                continue;
-            }
-            parts.insert(rel_str.clone(), std::fs::read(&path)?);
-        }
-
-        Ok(Resources {
-            parts,
-            rels,
-            fragments,
-            content_types,
-        })
-    }
-
-    fn fragment(&self, uri: &str, suffix: &str) -> Option<&[u8]> {
-        self.fragments
-            .get(&fragment_key(uri, suffix))
-            .map(Vec::as_slice)
-    }
-}
-
-fn split_fragment(name: &str) -> Option<(String, &'static str)> {
-    for suffix in [".head", ".mid", ".sp", ".post", ".tail"] {
-        if let Some(rest) = name.strip_suffix(suffix) {
-            return Some((rest.to_string(), suffix));
-        }
-    }
-    None
-}
-
-fn fragment_key(uri: &str, suffix: &str) -> String {
-    format!("{uri}{suffix}")
 }
 
 fn walk_dir(dir: &Path) -> AppResult<Vec<std::path::PathBuf>> {
@@ -148,37 +64,9 @@ fn walk_dir(dir: &Path) -> AppResult<Vec<std::path::PathBuf>> {
     Ok(out)
 }
 
-/// Compile a `.pptx` package from a parsed project document plus its preserved
-/// resources.
+/// Compile a `.pptx` package from the parsed project document and its media.
 pub fn compile_package(project: &Project<'_>) -> AppResult<Package> {
     let mut pkg = Package::empty();
-    let resources = match project.parts_dir {
-        Some(dir) if dir.is_dir() => Resources::load(dir)?,
-        _ => Resources {
-            parts: HashMap::new(),
-            rels: HashMap::new(),
-            fragments: HashMap::new(),
-            content_types: HashMap::new(),
-        },
-    };
-
-    for (uri, data) in &resources.parts {
-        pkg.set_part(uri, data.clone());
-    }
-    for (source, rels) in &resources.rels {
-        for rel in rels.values() {
-            pkg.add_relationship(source, rel.clone());
-        }
-    }
-
-    // Media extracted by the mirror (`src/media`) become `ppt/media/<name>`.
-    if let Some(media_dir) = project.media_dir.filter(|d| d.is_dir()) {
-        for path in walk_dir(media_dir)? {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                pkg.set_part(&format!("ppt/media/{name}"), std::fs::read(&path)?);
-            }
-        }
-    }
 
     let obj = project
         .doc
@@ -193,23 +81,32 @@ pub fn compile_package(project: &Project<'_>) -> AppResult<Package> {
     let mut chart_counter = next_chart_number(&pkg);
 
     for master in &masters {
-        compile_master(&mut pkg, &resources, master)?;
+        compile_master(&mut pkg, master)?;
     }
     for master in &masters {
         for layout in &master.layouts {
-            compile_layout(&mut pkg, &resources, layout)?;
+            compile_layout(&mut pkg, layout)?;
         }
     }
 
     for slide in &slides {
-        compile_slide(&mut pkg, &resources, slide, &masters, &mut chart_counter)?;
+        compile_slide(&mut pkg, slide, &masters, &mut chart_counter)?;
     }
 
-    compile_presentation(&mut pkg, &resources, obj, &masters, &slides)?;
-    compile_theme(&mut pkg, &resources, obj)?;
+    // Media extracted by the mirror (`src/media`) become `ppt/media/<name>`.
+    if let Some(media_dir) = project.media_dir.filter(|d| d.is_dir()) {
+        for path in walk_dir(media_dir)? {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                pkg.set_part(&format!("ppt/media/{name}"), std::fs::read(&path)?);
+            }
+        }
+    }
+
+    compile_presentation(&mut pkg, obj, &masters, &slides)?;
+    compile_theme(&mut pkg, obj)?;
     compile_core_props(&mut pkg, obj)?;
     compile_package_rels(&mut pkg)?;
-    compile_content_types(&mut pkg, &resources)?;
+    compile_content_types(&mut pkg)?;
 
     prune_dangling_relationships(&mut pkg);
 
@@ -427,6 +324,8 @@ fn assign_shape_ids(shape: &mut ShapeDto, next: &mut u32) {
 /// The default head/sp/post used for regenerated parts that have no captured
 /// fragment (i.e. brand-new slides, masters, layouts, notes).
 const DEFAULT_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
+const MASTER_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldMaster xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
+const LAYOUT_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldLayout xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" preserve=\"1\"><p:cSld>";
 const DEFAULT_SP: &str = "<p:spTree>";
 const DEFAULT_POST: &str = "</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
 
@@ -441,62 +340,38 @@ fn assemble(head: &[u8], mid: &[u8], sp: &[u8], inner: &[u8], post: &[u8]) -> Ve
     out
 }
 
-fn compile_master(pkg: &mut Package, resources: &Resources, master: &DocMaster) -> AppResult<()> {
+fn compile_master(pkg: &mut Package, master: &DocMaster) -> AppResult<()> {
     let shapes = as_shapes(&master.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
-    let head = resources
-        .fragment(&master.uri, ".head")
-        .unwrap_or(DEFAULT_HEAD.as_bytes());
-    let mid = resources.fragment(&master.uri, ".mid").unwrap_or(b"");
-    let sp = resources
-        .fragment(&master.uri, ".sp")
-        .unwrap_or(DEFAULT_SP.as_bytes());
-    let post = resources
-        .fragment(&master.uri, ".post")
-        .unwrap_or(b"</p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:sldMaster>");
+    let head = MASTER_HEAD.as_bytes();
+    let mid = b"";
+    let sp = DEFAULT_SP.as_bytes();
+    let post = b"</p:cSld><a:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:sldMaster>";
     pkg.set_part(&master.uri, assemble(head, mid, sp, &inner, post));
     Ok(())
 }
 
-fn compile_layout(pkg: &mut Package, resources: &Resources, layout: &DocLayout) -> AppResult<()> {
+fn compile_layout(pkg: &mut Package, layout: &DocLayout) -> AppResult<()> {
     let shapes = as_shapes(&layout.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
-    let head = resources
-        .fragment(&layout.uri, ".head")
-        .unwrap_or(DEFAULT_HEAD.as_bytes());
-    let mid = resources.fragment(&layout.uri, ".mid").unwrap_or(b"");
-    let sp = resources
-        .fragment(&layout.uri, ".sp")
-        .unwrap_or(DEFAULT_SP.as_bytes());
-    let post = resources
-        .fragment(&layout.uri, ".post")
-        .unwrap_or(DEFAULT_POST.as_bytes());
+    let head = LAYOUT_HEAD.as_bytes();
+    let mid = b"";
+    let sp = DEFAULT_SP.as_bytes();
+    let post = b"</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>";
     pkg.set_part(&layout.uri, assemble(head, mid, sp, &inner, post));
     Ok(())
 }
 
 fn compile_slide(
     pkg: &mut Package,
-    resources: &Resources,
     slide: &DocSlide,
     masters: &[DocMaster],
     chart_counter: &mut usize,
 ) -> AppResult<()> {
     let uri = &slide.uri;
 
-    // Preserved rels give us the rIds already referenced by the fragment (e.g.
-    // a background picture or an existing notes slide).
-    let preserved = resources.rels.get(uri).cloned().unwrap_or_default();
-    let mut image_rids: HashMap<String, String> = HashMap::new();
-    for rel in preserved.values() {
-        if rel.rel_type.contains("image")
-            && let Some(name) = rel.target.rsplit('/').next()
-        {
-            image_rids.insert(name.to_string(), rel.id.clone());
-        }
-    }
-
     // Pictures: ensure a rel exists for every image filename.
+    let mut image_rids: HashMap<String, String> = HashMap::new();
     let mut shapes = as_shapes(&slide.shapes)?;
     collect_image_files(&mut shapes, &mut |fname| {
         if !image_rids.contains_key(fname) {
@@ -522,17 +397,9 @@ fn compile_slide(
 
     // Notes slide.
     if let Some(notes_shapes) = &slide.notes {
-        let notes_uri = match preserved
-            .values()
-            .find(|r| r.rel_type == NOTES_REL)
-            .and_then(|r| resolve_rel_target(uri, r))
-            .filter(|t| pkg.part_exists(t))
-        {
-            Some(target) => target,
-            None => format!("ppt/notesSlides/notesSlide{}.xml", pkg.get_next_notes_num()),
-        };
+        let notes_uri = format!("ppt/notesSlides/notesSlide{}.xml", pkg.get_next_notes_num());
         add_rel(pkg, uri, &notes_uri, NOTES_REL);
-        compile_notes(pkg, resources, &notes_uri, notes_shapes)?;
+        compile_notes(pkg, &notes_uri, notes_shapes)?;
     }
 
     // Slide layout relationship.
@@ -540,30 +407,19 @@ fn compile_slide(
         && let Some(master) = masters.get(m)
         && let Some(layout) = master.layouts.get(l)
     {
-        let has_layout_rel = preserved.values().any(|r| r.rel_type == LAYOUT_REL);
-        if !has_layout_rel {
-            add_rel(pkg, uri, &layout.uri, LAYOUT_REL);
-        }
+        add_rel(pkg, uri, &layout.uri, LAYOUT_REL);
     }
 
     let inner = generate::sp_tree_body(&shapes).into_bytes();
 
-    let head = resources
-        .fragment(uri, ".head")
-        .unwrap_or(DEFAULT_HEAD.as_bytes());
-    let sp = resources
-        .fragment(uri, ".sp")
-        .unwrap_or(DEFAULT_SP.as_bytes());
-    let post = resources
-        .fragment(uri, ".post")
-        .unwrap_or(DEFAULT_POST.as_bytes());
+    let head = DEFAULT_HEAD.as_bytes();
+    let sp = DEFAULT_SP.as_bytes();
+    let post = DEFAULT_POST.as_bytes();
 
     // Background: a solid fill in the mirror regenerates `p:bg`; anything else
-    // keeps the fragment's captured background.
+    // is left without an explicit background (inherited from the layout).
     let generated_bg = generate::slide_background_xml(&slide.background);
-    let mid = generated_bg
-        .as_deref()
-        .unwrap_or_else(|| resources.fragment(uri, ".mid").unwrap_or(b""));
+    let mid = generated_bg.as_deref().unwrap_or(b"");
 
     let mut bytes = assemble(head, mid, sp, &inner, post);
 
@@ -580,24 +436,13 @@ fn compile_slide(
     Ok(())
 }
 
-fn compile_notes(
-    pkg: &mut Package,
-    resources: &Resources,
-    notes_uri: &str,
-    shapes: &[Value],
-) -> AppResult<()> {
+fn compile_notes(pkg: &mut Package, notes_uri: &str, shapes: &[Value]) -> AppResult<()> {
     let shapes = as_shapes(shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
-    let head = resources
-        .fragment(notes_uri, ".head")
-        .unwrap_or(DEFAULT_HEAD.as_bytes());
-    let mid = resources.fragment(notes_uri, ".mid").unwrap_or(b"");
-    let sp = resources
-        .fragment(notes_uri, ".sp")
-        .unwrap_or(DEFAULT_SP.as_bytes());
-    let post = resources
-        .fragment(notes_uri, ".post")
-        .unwrap_or(DEFAULT_POST.as_bytes());
+    let head = DEFAULT_HEAD.as_bytes();
+    let mid = b"";
+    let sp = DEFAULT_SP.as_bytes();
+    let post = DEFAULT_POST.as_bytes();
     pkg.set_part(notes_uri, assemble(head, mid, sp, &inner, post));
     Ok(())
 }
@@ -605,106 +450,55 @@ fn compile_notes(
 #[allow(clippy::too_many_arguments)]
 fn compile_presentation(
     pkg: &mut Package,
-    resources: &Resources,
     obj: &Map<String, Value>,
     masters: &[DocMaster],
     slides: &[DocSlide],
 ) -> AppResult<()> {
     let pres_uri = "ppt/presentation.xml";
-    let rels = resources.rels.get(pres_uri).cloned().unwrap_or_default();
 
     let mut master_entries = Vec::new();
     for (i, m) in masters.iter().enumerate() {
-        let r_id = rels
-            .values()
-            .find(|r| {
-                r.rel_type == MASTER_REL
-                    && pkg.resolve_relationship_target(pres_uri, r) == Some(m.uri.clone())
-            })
-            .map(|r| r.id.clone())
-            .unwrap_or_else(|| add_rel(pkg, pres_uri, &m.uri, MASTER_REL));
+        let r_id = add_rel(pkg, pres_uri, &m.uri, MASTER_REL);
         master_entries.push(generate::ListEntry {
             id: (2147483648u32 + i as u32),
             r_id,
         });
     }
 
-    let notes_master_r_id = rels
-        .values()
-        .find(|r| r.rel_type == NOTES_MASTER_REL)
-        .map(|r| r.id.clone());
-
     let mut slide_entries = Vec::new();
     for (i, s) in slides.iter().enumerate() {
-        let r_id = rels
-            .values()
-            .find(|r| {
-                r.rel_type == SLIDE_REL
-                    && pkg.resolve_relationship_target(pres_uri, r) == Some(s.uri.clone())
-            })
-            .map(|r| r.id.clone())
-            .unwrap_or_else(|| add_rel(pkg, pres_uri, &s.uri, SLIDE_REL));
+        let r_id = add_rel(pkg, pres_uri, &s.uri, SLIDE_REL);
         slide_entries.push(generate::ListEntry {
             id: 256 + i as u32,
             r_id,
         });
     }
 
-    // Add a theme rel when none is preserved.
-    if !rels.values().any(|r| r.rel_type == THEME_REL) {
-        add_rel(pkg, pres_uri, "ppt/theme/theme1.xml", THEME_REL);
-    }
+    add_rel(pkg, pres_uri, "ppt/theme/theme1.xml", THEME_REL);
 
     let width = obj.get("slide_width").and_then(Value::as_i64).unwrap_or(0);
     let height = obj.get("slide_height").and_then(Value::as_i64).unwrap_or(0);
-    let tail = resources.fragment(pres_uri, ".tail").unwrap_or(b"");
 
-    let xml = generate::presentation_xml(
-        &master_entries,
-        notes_master_r_id.as_deref(),
-        &slide_entries,
-        width,
-        height,
-        tail,
-    );
+    let xml = generate::presentation_xml(&master_entries, None, &slide_entries, width, height);
     pkg.set_part(pres_uri, xml);
 
-    // Ensure master → theme and master → layout rels exist.
+    // Master → theme and master → layout rels.
     for m in masters {
-        if !pkg
-            .get_rels(&m.uri)
-            .is_some_and(|r| r.values().any(|x| x.rel_type == THEME_REL))
-        {
-            add_rel(pkg, &m.uri, "ppt/theme/theme1.xml", THEME_REL);
-        }
+        add_rel(pkg, &m.uri, "ppt/theme/theme1.xml", THEME_REL);
         for l in &m.layouts {
-            if !pkg
-                .get_rels(&m.uri)
-                .is_some_and(|r| r.values().any(|x| x.rel_type == LAYOUT_REL))
-            {
-                add_rel(pkg, &m.uri, &l.uri, LAYOUT_REL);
-            }
+            add_rel(pkg, &m.uri, &l.uri, LAYOUT_REL);
         }
     }
-    // Ensure every layout → master rel exists.
+    // Layout → master rels.
     for m in masters {
         for l in &m.layouts {
-            if !pkg
-                .get_rels(&l.uri)
-                .is_some_and(|r| r.values().any(|x| x.rel_type == MASTER_REL))
-            {
-                add_rel(pkg, &l.uri, &m.uri, MASTER_REL);
-            }
+            add_rel(pkg, &l.uri, &m.uri, MASTER_REL);
         }
     }
     Ok(())
 }
 
-fn compile_theme(
-    pkg: &mut Package,
-    resources: &Resources,
-    obj: &Map<String, Value>,
-) -> AppResult<()> {
+fn compile_theme(pkg: &mut Package, obj: &Map<String, Value>) -> AppResult<()> {
     let uri = "ppt/theme/theme1.xml";
     let theme = obj
         .get("theme")
@@ -721,8 +515,7 @@ fn compile_theme(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let tail = resources.fragment(uri, ".tail").unwrap_or(b"");
-    let xml = generate::theme_xml(&colors, &fonts, tail);
+    let xml = generate::theme_xml(&colors, &fonts);
     pkg.set_part(uri, xml);
     Ok(())
 }
@@ -746,18 +539,14 @@ fn compile_package_rels(pkg: &mut Package) -> AppResult<()> {
     Ok(())
 }
 
-fn compile_content_types(pkg: &mut Package, resources: &Resources) -> AppResult<()> {
+fn compile_content_types(pkg: &mut Package) -> AppResult<()> {
     let mut entries = Vec::new();
     let mut defaults: Vec<(&str, &str)> = Vec::new();
     let mut media_exts: Vec<String> = Vec::new();
     let mut uris: Vec<&String> = pkg.part_uris().collect();
     uris.sort();
     for uri in uris {
-        let ct = resources
-            .content_types
-            .get(uri)
-            .cloned()
-            .or_else(|| known_content_type(uri));
+        let ct = known_content_type(uri);
         entries.push(generate::PartEntry {
             uri: uri.clone(),
             content_type: ct,

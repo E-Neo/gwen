@@ -26,9 +26,9 @@ fn presentation_name(dir: &Path) -> miette::Result<String> {
 /// Compile the project directory into `target/<name>.pptx`.
 pub fn execute(project: Option<&str>) -> miette::Result<()> {
     let dir = Path::new(project.unwrap_or("."));
-    if !dir.join("PRESENTATION.md").exists() {
+    if !dir.join("src").join("PRESENTATION.md").exists() {
         return Err(miette::miette!(
-            "`{}` is not a gwen project (no PRESENTATION.md)",
+            "`{}` is not a gwen project (no src/PRESENTATION.md)",
             dir.display()
         ));
     }
@@ -36,7 +36,6 @@ pub fn execute(project: Option<&str>) -> miette::Result<()> {
     let doc = gwen_md::read_document(dir).map_err(plain)?;
     let project = build::Project {
         doc: &doc,
-        parts_dir: Some(&dir.join("src").join("parts")),
         media_dir: Some(&dir.join("src").join("media")),
     };
     let pkg: Package = build::compile_package(&project).map_err(plain)?;

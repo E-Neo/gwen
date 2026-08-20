@@ -62,9 +62,9 @@ pub fn project_name(project: &Path) -> String {
     v["presentation"]["name"].as_str().unwrap().to_string()
 }
 
-/// The text of the project's PRESENTATION.md mirror.
+/// The text of the project's src/PRESENTATION.md mirror.
 pub fn project_md(project: &Path) -> String {
-    std::fs::read_to_string(project.join("PRESENTATION.md")).unwrap()
+    std::fs::read_to_string(project.join("src").join("PRESENTATION.md")).unwrap()
 }
 
 /// The raw text of a zip entry inside a deck.

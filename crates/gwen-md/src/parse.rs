@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use pulldown_cmark::{Event, Options, Parser as MdParser, Tag, TagEnd};
 use serde_json::{Map, Value, json};
 
@@ -1335,8 +1337,11 @@ fn ref_attr(attrs: &[(String, String)], key: &str) -> String {
 
 /// Read the full project mirror under `dir` (written by
 /// `serialize::write_document`) back into the query-shaped document value.
+/// The mirror carries no pptx URIs or numeric layout indices; URIs are
+/// re-assigned deterministically by position and each slide's layout is
+/// resolved from its markdown path against the masters' layout lists.
 pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
-    let pres_md = std::fs::read_to_string(dir.join("PRESENTATION.md"))?;
+    let pres_md = std::fs::read_to_string(dir.join("src").join("PRESENTATION.md"))?;
     let parsed = parse(&pres_md)?;
     let mut root = parsed.doc;
     let root_obj = root.as_object_mut().expect("document is an object");
@@ -1345,32 +1350,40 @@ pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
     let mut slide_masters: Vec<Value> = Vec::new();
     let mut slides: Vec<Value> = Vec::new();
 
+    // Layout file path -> (master index, layout index) within this document.
+    let mut layout_index: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut layout_counter = 0usize;
+
     for r in refs {
         match r.key.as_str() {
             super::markers::MARKER_MASTER => {
                 let src = ref_attr(&r.attrs, super::markers::ATTR_SRC);
-                let uri = ref_attr(&r.attrs, super::markers::ATTR_URI);
                 let body = std::fs::read_to_string(dir.join("src").join(&src))?;
                 let doc = parse_file(&body, FileKind::Master)?;
                 let name = front_str(&doc.front, "name");
+                let master_uri = format!(
+                    "ppt/slideMasters/slideMaster{}.xml",
+                    slide_masters.len() + 1
+                );
                 let mut layouts: Vec<Value> = Vec::new();
                 for lref in scan_refs(&body) {
                     if lref.key != super::markers::MARKER_LAYOUT {
                         continue;
                     }
                     let lsrc = ref_attr(&lref.attrs, super::markers::ATTR_SRC);
-                    let luri = ref_attr(&lref.attrs, super::markers::ATTR_URI);
                     let lbody = std::fs::read_to_string(dir.join("src").join(&lsrc))?;
                     let ldoc = parse_file(&lbody, FileKind::Layout)?;
                     let lname = front_str(&ldoc.front, "name");
+                    layout_counter += 1;
+                    layout_index.insert(lsrc.clone(), (slide_masters.len(), layouts.len()));
                     layouts.push(json!({
-                        "uri": luri,
+                        "uri": format!("ppt/slideLayouts/slideLayout{layout_counter}.xml"),
                         "name": if lname.is_empty() { Value::Null } else { json!(lname) },
                         "shapes": ldoc.shapes,
                     }));
                 }
                 slide_masters.push(json!({
-                    "uri": uri,
+                    "uri": master_uri,
                     "name": if name.is_empty() { Value::Null } else { json!(name) },
                     "shapes": doc.shapes,
                     "slide_layouts": layouts,
@@ -1378,12 +1391,11 @@ pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
             }
             super::markers::MARKER_SLIDE => {
                 let src = ref_attr(&r.attrs, super::markers::ATTR_SRC);
-                let uri = ref_attr(&r.attrs, super::markers::ATTR_URI);
                 let body = std::fs::read_to_string(dir.join("src").join(&src))?;
                 let doc = parse_file(&body, FileKind::Slide)?;
                 let name = front_str(&doc.front, "name");
-                let m_idx = front_index(&doc.front, "master");
-                let l_idx = front_index(&doc.front, "layout");
+                let layout_src = front_str(&doc.front, "layout");
+                let (m_idx, l_idx) = layout_index.get(&layout_src).copied().unwrap_or((0, 0));
                 let layout_name = slide_masters
                     .get(m_idx)
                     .and_then(|m| m.get("slide_layouts"))
@@ -1394,7 +1406,7 @@ pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
                     .unwrap_or("")
                     .to_string();
                 let mut slide_obj = json!({
-                    "uri": uri,
+                    "uri": format!("ppt/slides/slide{}.xml", slides.len() + 1),
                     "shapes": doc.shapes,
                     "background": doc.background,
                     "notes": doc.notes,
@@ -1428,16 +1440,6 @@ fn front_str(front: &Option<Value>, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-/// An integer front-matter value (YAML may store it as a number).
-fn front_index(front: &Option<Value>, key: &str) -> usize {
-    front
-        .as_ref()
-        .and_then(|f| f.get(key))
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-        .max(0) as usize
 }
 
 #[cfg(test)]

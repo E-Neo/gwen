@@ -16,13 +16,13 @@ pub const MARKER_BACKGROUND: &str = "background";
 /// `<!-- shape type="group" ... -->` marker and this marker are its children.
 pub const MARKER_END_GROUP: &str = "end-group";
 /// The marker comment keyword for a master reference in `PRESENTATION.md`:
-/// `<!-- master name="..." uri="..." src="masters/master1.md" -->`.
+/// `<!-- master name="..." src="masters/master1.md" -->`.
 pub const MARKER_MASTER: &str = "master";
 /// The marker comment keyword for a layout reference inside a master file:
-/// `<!-- layout name="..." uri="..." src="layouts/layout1.md" -->`.
+/// `<!-- layout name="..." src="layouts/layout1.md" -->`.
 pub const MARKER_LAYOUT: &str = "layout";
 /// The marker comment keyword for a slide reference in `PRESENTATION.md`:
-/// `<!-- slide uri="..." src="slides/slide1.md" -->`.
+/// `<!-- slide src="slides/slide1.md" -->`.
 pub const MARKER_SLIDE: &str = "slide";
 
 /// Marker attribute keys. `class` references a rule in the `<style>` block;
@@ -66,8 +66,6 @@ pub const ATTR_ROW_HEIGHTS: &str = "row-heights";
 /// `merge="r,c,gridSpan,rowSpan,hMerge,vMerge;..."`: merged cells of the
 /// shape's table (semicolon-separated; 0 disables a property).
 pub const ATTR_MERGE: &str = "merge";
-/// `uri="ppt/slides/slide1.xml"`: a master/layout/slide reference's part URI.
-pub const ATTR_URI: &str = "uri";
 /// `src="slides/slide1.md"`: a reference's project-relative markdown file.
 pub const ATTR_SRC: &str = "src";
 
@@ -147,15 +145,17 @@ pub fn legend() -> &'static str {
     r#"<!--
   Gwen markdown mirror
 
-  Project layout (multi-file form, `PRESENTATION.md` is the index)
+  Project layout (multi-file form, `src/PRESENTATION.md` is the index)
     src/masters/master1.md   one slide master per file; its `# Layouts`
                              markers reference its layout files
     src/layouts/layout1.md   one slide layout per file
     src/slides/slide1.md     one slide per file; `### Notes` holds its notes
-    src/parts/               every part the mirror cannot express, preserved
-                             byte-for-byte (plus _rels/, _fragments/,
-                             _content-types.toml)
     src/media/               picture/chart image files, keyed by filename
+
+  A slide's front matter names its layout by path, e.g.
+    ---
+    layout: "layouts/layout1.md"
+    ---
 
   Shapes: one marker per shape
     shape type="textbox" class="textbox-1" id="4" name="TextBox 4"
@@ -196,6 +196,15 @@ pub fn legend() -> &'static str {
     A paragraph whose own style deviates from the shape's default carries
       paragraph class="para-3"
     (an HTML comment) directly above it.
+
+  Fills and effects (CSS in the style block)
+    fill: linear-gradient(135deg, RGB(FF0000) 0%, RGB(0000FF) 100%)
+          radial-gradient(RGB(FFFF00) 0%, RGB(00FF00) 100%)
+          or a solid color: RGB(FF0000) / SCHEME(tx1) / none
+    box-shadow: [inset ]blur dist dirDeg COLOR alpha%  (outer or inner shadow)
+    --pptx-glow: radius COLOR alpha%
+    --pptx-soft-edge: radius
+    --pptx-reflection: blur startPos endPos startAlpha endAlpha
 
   Background
     background fill="SOLID:FF0000"
