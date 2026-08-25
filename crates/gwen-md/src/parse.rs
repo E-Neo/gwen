@@ -1395,7 +1395,19 @@ pub fn read_document(dir: &std::path::Path) -> MdResult<Value> {
                 let doc = parse_file(&body, FileKind::Slide)?;
                 let name = front_str(&doc.front, "name");
                 let layout_src = front_str(&doc.front, "layout");
-                let (m_idx, l_idx) = layout_index.get(&layout_src).copied().unwrap_or((0, 0));
+                let Some(&(m_idx, l_idx)) = layout_index.get(&layout_src) else {
+                    return Err(MdError::at(
+                        format!(
+                            "slide `src/{src}` references layout `{layout_src}`, which no master defines"
+                        ),
+                        MdSpan {
+                            line: 0,
+                            col: 0,
+                            offset: 0,
+                            len: 0,
+                        },
+                    ));
+                };
                 let layout_name = slide_masters
                     .get(m_idx)
                     .and_then(|m| m.get("slide_layouts"))

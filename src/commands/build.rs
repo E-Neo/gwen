@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gwen_pptx::engine::build;
+use gwen_pptx::engine::{build, validate};
 use gwen_pptx::opc::Package;
 
 use crate::diag::plain;
@@ -23,7 +23,9 @@ fn presentation_name(dir: &Path) -> miette::Result<String> {
     }
 }
 
-/// Compile the project directory into `target/<name>.pptx`.
+/// Compile the project directory into `target/<name>.pptx`. The compiled
+/// package is validated before it is written: a structurally invalid deck
+/// never reaches disk.
 pub fn execute(project: Option<&str>) -> miette::Result<()> {
     let dir = Path::new(project.unwrap_or("."));
     if !dir.join("src").join("PRESENTATION.md").exists() {
@@ -40,6 +42,8 @@ pub fn execute(project: Option<&str>) -> miette::Result<()> {
     };
     let pkg: Package = build::compile_package(&project).map_err(plain)?;
 
+    validate_or_report(&pkg)?;
+
     let name = presentation_name(dir)?;
     let out_dir = dir.join("target");
     std::fs::create_dir_all(&out_dir).map_err(plain)?;
@@ -47,4 +51,21 @@ pub fn execute(project: Option<&str>) -> miette::Result<()> {
     pkg.save(&out).map_err(plain)?;
     eprintln!("built {}", out.display());
     Ok(())
+}
+
+/// Run the structural validator; report every violation and refuse to write
+/// the output when any is found.
+fn validate_or_report(pkg: &Package) -> miette::Result<()> {
+    let violations = validate::validate_package(pkg);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    for v in &violations {
+        eprintln!("  × {}: {}", v.part, v.message);
+    }
+    Err(miette::miette!(
+        "{} invalid package part{} (the deck was not written)",
+        violations.len(),
+        if violations.len() == 1 { "" } else { "s" }
+    ))
 }

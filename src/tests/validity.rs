@@ -1,9 +1,11 @@
 //! Output-validity harness: reopen every rebuilt deck and check that the
-//! package is structurally sound — all XML parts parse, all internal
-//! relationships resolve, and every part has a content type.
+//! package is structurally sound. The checks live in
+//! `gwen_pptx::engine::validate` so production builds and this harness share
+//! one implementation.
 
 use std::path::{Path, PathBuf};
 
+use gwen_pptx::engine::validate;
 use gwen_pptx::opc::Package;
 
 #[path = "decks.rs"]
@@ -12,91 +14,23 @@ mod decks;
 #[path = "support.rs"]
 mod support;
 
-use support::{build_project, new_project};
+use support::{build_project, new_project, run_fail};
 
 fn fixture(name: &str) -> PathBuf {
     decks::deck(name)
 }
 
-/// Structural checks on a rebuilt deck.
+/// Structural checks on a rebuilt deck: XML well-formedness, content-type
+/// coverage, relationship resolution, root/content-type agreement,
+/// theme/master/chart structure and notes wiring.
 fn assert_valid(path: &Path) {
     let pkg = Package::open(path).expect("reopen rebuilt deck");
-
-    // 1. Every XML part is well-formed.
-    let xml_uris: Vec<String> = pkg
-        .part_uris()
-        .filter(|u| u.ends_with(".xml"))
-        .cloned()
-        .collect();
-    for uri in &xml_uris {
-        let data = pkg.get_part(uri).expect("part present");
-        crate_xml::assert_well_formed(uri, data);
-    }
-
-    // 2. Every internal relationship resolves to an existing part.
-    for (source, rels) in pkg.rels_uris() {
-        for rel in rels.values() {
-            if rel.target_mode.as_deref() == Some("External") {
-                continue;
-            }
-            if let Some(target) = pkg.resolve_relationship_target(source, rel) {
-                assert!(
-                    pkg.part_exists(&target),
-                    "{source} -> {target}: relationship target missing"
-                );
-            }
-        }
-    }
-
-    // 3. Every part has a content type (default or override).
-    let ct = pkg
-        .get_part("[Content_Types].xml")
-        .expect("[Content_Types].xml present")
-        .to_vec();
-    let ct = String::from_utf8(ct).expect("content types utf-8");
-    for uri in pkg.part_uris() {
-        if uri.starts_with('[') && uri.ends_with("].xml") {
-            continue;
-        }
-        let ext = uri.rsplit('.').next().unwrap_or("");
-        let covered = ct.contains(&format!("Default Extension=\"{ext}\""))
-            || ct.contains(&format!("PartName=\"/{uri}\""));
-        assert!(covered, "part {uri} has no content type");
-    }
-
-    // 4. Every presentation slide reference resolves to a slide part.
-    let pres_rels = pkg
-        .get_rels("ppt/presentation.xml")
-        .expect("presentation rels");
-    let slide_rels = pres_rels.values().filter(|r| {
-        r.rel_type == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
-    });
-    for rel in slide_rels {
-        let target = pkg
-            .resolve_relationship_target("ppt/presentation.xml", rel)
-            .expect("presentation rel resolves");
-        assert!(
-            target.contains("/slides/slide"),
-            "presentation rel points at a slide: {target}"
-        );
-    }
-}
-
-mod crate_xml {
-    use quick_xml::Reader;
-
-    pub fn assert_well_formed(uri: &str, data: &[u8]) {
-        let mut reader = Reader::from_reader(data);
-        reader.config_mut().trim_text(true);
-        let mut buf = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(quick_xml::events::Event::Eof) => break,
-                Ok(_) => {}
-                Err(e) => panic!("{uri} is not well-formed: {e}"),
-            }
-        }
-    }
+    let violations = validate::validate_package(&pkg);
+    assert!(
+        violations.is_empty(),
+        "invalid package {}: {violations:#?}",
+        path.display()
+    );
 }
 
 /// Add a slide to a project by editing the slide list and writing a new slide
@@ -154,14 +88,18 @@ fn table_chart_deck_rebuilds_valid() {
 }
 
 /// The notes slide fixture (a placeholder with no text body) rebuilds into a
-/// valid package.
+/// valid package whose notes wiring is complete: notes master part, master
+/// rel on every notes slide and the presentation-level reference.
 #[test]
 fn notes_deck_rebuilds_valid() {
     let project = new_project(&fixture("notes_placeholder.pptx"), "deck");
     let out = build_project(&project);
     assert_valid(&out);
+    let notes = read_zip_entry(&out, "ppt/notesSlides/notesSlide1.xml");
+    assert!(notes.contains("Slide Image Placeholder"));
     assert!(
-        read_zip_entry(&out, "ppt/notesSlides/notesSlide1.xml").contains("Slide Image Placeholder")
+        read_zip_entry(&out, "ppt/notesMasters/notesMaster1.xml").contains("p:notesMaster"),
+        "notes master part generated"
     );
 }
 
@@ -172,6 +110,54 @@ fn read_zip_entry(path: &Path, name: &str) -> String {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut buf).unwrap();
     buf
+}
+
+/// A picture shape referencing a media file that does not exist fails the
+/// build with a diagnostic naming the missing file; no deck is written.
+#[test]
+fn missing_media_file_fails_the_build() {
+    let project = new_project(&fixture("two_slides.pptx"), "deck");
+    let slide = project.join("src").join("slides").join("slide1.md");
+    let md = std::fs::read_to_string(&slide).unwrap();
+    let marker = "<!-- shape type=\"picture\" name=\"Ghost\" image=\"ghost.png\" left=\"914400\" top=\"914400\" width=\"3657600\" height=\"2743200\" -->\n![](media/ghost.png)\n";
+    std::fs::write(&slide, format!("{md}{marker}")).unwrap();
+
+    let stderr = run_fail(&["build", project.to_str().unwrap()]);
+    assert!(
+        stderr.contains("src/media/ghost.png"),
+        "diagnostic names the missing file: {stderr}"
+    );
+    assert!(
+        !project.join("target").exists() || read_zip_optional(&project).is_none(),
+        "no output written for an invalid project"
+    );
+}
+
+/// A slide whose front matter references an undefined layout path fails the
+/// build instead of silently falling back to another layout.
+#[test]
+fn unknown_layout_path_fails_the_build() {
+    let project = new_project(&fixture("two_slides.pptx"), "deck");
+    let slide = project.join("src").join("slides").join("slide2.md");
+    let md = std::fs::read_to_string(&slide).unwrap();
+    std::fs::write(&slide, md.replace("layouts/layout1.md", "layouts/nope.md")).unwrap();
+
+    let stderr = run_fail(&["build", project.to_str().unwrap()]);
+    assert!(
+        stderr.contains("layouts/nope.md"),
+        "diagnostic names the bad layout path: {stderr}"
+    );
+}
+
+/// The output pptx exists only when validation passed.
+fn read_zip_optional(project: &Path) -> Option<()> {
+    let name = std::fs::read_dir(project.join("target"))
+        .ok()?
+        .next()?
+        .ok()?;
+    let file = std::fs::File::open(project.join("target").join(name.path())).ok()?;
+    zip::ZipArchive::new(file).ok()?;
+    Some(())
 }
 
 /// The effects deck rebuilds into a package whose slide carries gradient fills

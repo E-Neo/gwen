@@ -21,7 +21,7 @@ fn read_cache_values(
     let mut i = cache_start + 1;
     while i < cache_end {
         match &events[i] {
-            quick_xml::events::Event::Start(e) if e.name().as_ref() == b"c:pt" => {
+            quick_xml::events::Event::Start(e) if e.name().as_ref().as_bytes() == b"c:pt" => {
                 if let Some((vs, ve)) =
                     find_elem_range(events, b"c:v", i).filter(|r| r.0 <= cache_end)
                 {
@@ -30,7 +30,7 @@ fn read_cache_values(
                             quick_xml::events::Event::Text(t) => Some(t),
                             _ => None,
                         })
-                        .map(|t| String::from_utf8_lossy(t.as_ref()).to_string())
+                        .map(|t| t.as_ref().to_string())
                         .collect::<String>();
                     out.push(text);
                 }
@@ -74,9 +74,9 @@ pub fn parse_chart(xml: &[u8]) -> serde_json::Value {
         let mut i = plot_start + 1;
         while i < plot_end {
             if let quick_xml::events::Event::Start(e) = &events[i]
-                && is_chart_type_tag(e.name().as_ref())
+                && is_chart_type_tag(e.name().as_ref().as_bytes())
             {
-                name = Some(String::from_utf8_lossy(e.name().as_ref()).to_string());
+                name = Some(String::from_utf8_lossy(e.name().as_ref().as_bytes()).to_string());
                 break;
             }
             i += 1;
@@ -89,7 +89,7 @@ pub fn parse_chart(xml: &[u8]) -> serde_json::Value {
     let mut i = plot_start + 1;
     while i < plot_end {
         if let quick_xml::events::Event::Start(e) = &events[i]
-            && e.name().as_ref() == b"c:ser"
+            && e.name().as_ref().as_bytes() == b"c:ser"
         {
             let (ser_start, ser_end) = find_elem_range(&events, b"c:ser", i).unwrap();
             let name = read_series_name(&events, ser_start, ser_end).unwrap_or_default();

@@ -250,7 +250,7 @@ pub fn parse_slide_shapes(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let ename = e.name();
-                let tag = ename.as_ref();
+                let tag = ename.as_ref().as_bytes();
                 match tag {
                     b"p:grpSp" => {
                         group_stack.push(fresh_shape(ShapeType::Group));
@@ -308,19 +308,16 @@ pub fn parse_slide_shapes(
                             let mut ph_type = None;
                             let mut sz = None;
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"idx" => {
-                                        idx = String::from_utf8_lossy(&a.value).parse().unwrap_or(0)
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"idx" => idx = a.value.parse().unwrap_or(0),
                                     b"type" => {
-                                        ph_type = String::from_utf8_lossy(&a.value)
+                                        ph_type = a
+                                            .value
                                             .parse::<String>()
                                             .ok()
                                             .and_then(|s| parse_placeholder_type(&s));
                                     }
-                                    b"sz" => {
-                                        sz = Some(String::from_utf8_lossy(&a.value).to_string())
-                                    }
+                                    b"sz" => sz = Some(a.value.to_string()),
                                     _ => {}
                                 }
                             }
@@ -335,14 +332,12 @@ pub fn parse_slide_shapes(
                             shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
+                                match a.key.as_ref().as_bytes() {
                                     b"id" => {
-                                        shape.shape_id =
-                                            String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                                        shape.shape_id = a.value.parse().unwrap_or(0);
                                     }
                                     b"name" => {
-                                        shape.name =
-                                            Some(String::from_utf8_lossy(&a.value).to_string());
+                                        shape.name = Some(a.value.to_string());
                                     }
                                     _ => {}
                                 }
@@ -351,7 +346,7 @@ pub fn parse_slide_shapes(
                     }
                     b"p:cNvSpPr" => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"txBox" && a.value.as_ref() == b"1" {
+                            if a.key.as_ref().as_bytes() == b"txBox" && a.value.as_ref() == "1" {
                                 is_textbox = true;
                             }
                         }
@@ -359,9 +354,8 @@ pub fn parse_slide_shapes(
                     b"a:prstGeom" => {
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"prst" {
-                                    shape.auto_shape_type =
-                                        Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"prst" {
+                                    shape.auto_shape_type = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -384,12 +378,12 @@ pub fn parse_slide_shapes(
                     b"a:ln" if in_sp_pr => {
                         in_shape_ln = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"w" => {
-                                    ln_width = String::from_utf8_lossy(&a.value).parse().ok();
+                                    ln_width = a.value.parse().ok();
                                 }
                                 b"cap" => {
-                                    ln_cap = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    ln_cap = match a.value.as_ref() {
                                         "rnd" => Some(LineCap::Rnd),
                                         "sq" => Some(LineCap::Sq),
                                         "flat" => Some(LineCap::Flat),
@@ -397,7 +391,7 @@ pub fn parse_slide_shapes(
                                     };
                                 }
                                 b"cmpd" => {
-                                    ln_compound = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    ln_compound = match a.value.as_ref() {
                                         "sng" => Some(CompoundLine::Sng),
                                         "dbl" => Some(CompoundLine::Dbl),
                                         "thickThin" => Some(CompoundLine::ThickThin),
@@ -412,8 +406,8 @@ pub fn parse_slide_shapes(
                     }
                     b"a:prstDash" if in_shape_ln => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                ln_dash = match String::from_utf8_lossy(&a.value).as_ref() {
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                ln_dash = match a.value.as_ref() {
                                     "solid" => Some(LineDash::Solid),
                                     "dot" => Some(LineDash::Dot),
                                     "dash" => Some(LineDash::Dash),
@@ -440,8 +434,8 @@ pub fn parse_slide_shapes(
                         grad_stop_pos = None;
                         grad_stop_color = None;
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"pos" {
-                                grad_stop_pos = String::from_utf8_lossy(&a.value).parse().ok();
+                            if a.key.as_ref().as_bytes() == b"pos" {
+                                grad_stop_pos = a.value.parse().ok();
                             }
                         }
                     }
@@ -466,18 +460,15 @@ pub fn parse_slide_shapes(
                         });
                         if let Some(s) = effect_shadow.as_mut() {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
+                                match a.key.as_ref().as_bytes() {
                                     b"blurRad" => {
-                                        s.blur = String::from_utf8_lossy(&a.value).parse().ok();
+                                        s.blur = a.value.parse().ok();
                                     }
                                     b"dist" => {
-                                        s.dist = String::from_utf8_lossy(&a.value).parse().ok();
+                                        s.dist = a.value.parse().ok();
                                     }
                                     b"dir" => {
-                                        s.dir_deg = String::from_utf8_lossy(&a.value)
-                                            .parse::<i64>()
-                                            .ok()
-                                            .map(|v| v / 60000);
+                                        s.dir_deg = a.value.parse::<i64>().ok().map(|v| v / 60000);
                                     }
                                     _ => {}
                                 }
@@ -494,18 +485,18 @@ pub fn parse_slide_shapes(
                         });
                         if let Some(g) = effect_glow.as_mut() {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"rad" {
-                                    g.radius = String::from_utf8_lossy(&a.value).parse().ok();
+                                if a.key.as_ref().as_bytes() == b"rad" {
+                                    g.radius = a.value.parse().ok();
                                 }
                             }
                         }
                     }
                     b"a:srgbClr" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 grad_stop_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -513,23 +504,21 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 grad_stop_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:srgbClr" if in_shadow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_shadow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -537,23 +526,21 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_shadow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_shadow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:srgbClr" if in_glow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_glow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -561,20 +548,19 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_glow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_glow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:path" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"path" && a.value.as_ref() == b"circle" {
+                            if a.key.as_ref().as_bytes() == b"path" && a.value.as_ref() == "circle"
+                            {
                                 grad_radial = true;
                             }
                         }
@@ -585,8 +571,8 @@ pub fn parse_slide_shapes(
                             shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"rot" {
-                                    let raw = String::from_utf8_lossy(&a.value);
+                                if a.key.as_ref().as_bytes() == b"rot" {
+                                    let raw = a.value;
                                     if let Ok(v) = raw.parse::<f64>() {
                                         shape.rotation = Some(v / 60000.0);
                                     }
@@ -600,13 +586,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"x" => {
-                                        shape.left = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"y" => {
-                                        shape.top = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"x" => shape.left = a.value.parse().ok(),
+                                    b"y" => shape.top = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -618,14 +600,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"cx" => {
-                                        shape.width = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"cy" => {
-                                        shape.height =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"cx" => shape.width = a.value.parse().ok(),
+                                    b"cy" => shape.height = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -637,15 +614,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"x" => {
-                                        shape.ch_off_x =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"y" => {
-                                        shape.ch_off_y =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"x" => shape.ch_off_x = a.value.parse().ok(),
+                                    b"y" => shape.ch_off_y = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -657,15 +628,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"cx" => {
-                                        shape.ch_ext_cx =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"cy" => {
-                                        shape.ch_ext_cy =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"cx" => shape.ch_ext_cx = a.value.parse().ok(),
+                                    b"cy" => shape.ch_ext_cy = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -675,10 +640,10 @@ pub fn parse_slide_shapes(
                         in_blip = true;
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"r:embed"
-                                    || a.key.as_ref().ends_with(b"embed")
+                                if a.key.as_ref().as_bytes() == b"r:embed"
+                                    || a.key.as_ref().as_bytes().ends_with(b"embed")
                                 {
-                                    let r_id = String::from_utf8_lossy(&a.value).to_string();
+                                    let r_id = a.value.to_string();
                                     shape.image = image_map.get(&r_id).cloned();
                                 }
                             }
@@ -686,10 +651,10 @@ pub fn parse_slide_shapes(
                     }
                     b"a:srgbClr" if in_shape_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 shape_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -697,23 +662,21 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_shape_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 shape_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:srgbClr" if in_ln_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 ln_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -721,13 +684,11 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_ln_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 ln_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
@@ -745,36 +706,30 @@ pub fn parse_slide_shapes(
                     b"a:bodyPr" if in_text_frame => {
                         in_body_pr = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"wrap" => {
                                     body_pr_word_wrap = Some(
-                                        String::from_utf8_lossy(&a.value) == "1"
-                                            || String::from_utf8_lossy(&a.value)
-                                                .to_lowercase()
-                                                .contains("sq"),
+                                        a.value == "1" || a.value.to_lowercase().contains("sq"),
                                     );
                                 }
                                 b"anchor" => {
-                                    body_pr_anchor = String::from_utf8_lossy(&a.value)
+                                    body_pr_anchor = a
+                                        .value
                                         .parse::<String>()
                                         .ok()
                                         .and_then(|s| parse_anchor(&s));
                                 }
                                 b"lIns" => {
-                                    body_pr_margin_l =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_l = a.value.parse().ok();
                                 }
                                 b"rIns" => {
-                                    body_pr_margin_r =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_r = a.value.parse().ok();
                                 }
                                 b"tIns" => {
-                                    body_pr_margin_t =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_t = a.value.parse().ok();
                                 }
                                 b"bIns" => {
-                                    body_pr_margin_b =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_b = a.value.parse().ok();
                                 }
                                 _ => {}
                             }
@@ -798,8 +753,9 @@ pub fn parse_slide_shapes(
                         in_para_props = true;
                         para = fresh_para();
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"algn" {
-                                para.alignment = String::from_utf8_lossy(&a.value)
+                            if a.key.as_ref().as_bytes() == b"algn" {
+                                para.alignment = a
+                                    .value
                                     .parse::<String>()
                                     .ok()
                                     .and_then(|s| parse_alignment(&s));
@@ -811,16 +767,16 @@ pub fn parse_slide_shapes(
                         in_run_props = true;
                         in_def_rpr = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"sz" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.size = String::from_utf8_lossy(&a.value).parse().ok();
+                                        font.size = a.value.parse().ok();
                                     }
                                 }
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    let v = a.value == "1";
                                     if let Some(ref mut font) = run_font {
-                                        if a.key.as_ref() == b"b" {
+                                        if a.key.as_ref().as_bytes() == b"b" {
                                             font.bold = Some(v);
                                         } else {
                                             font.italic = Some(v);
@@ -829,8 +785,7 @@ pub fn parse_slide_shapes(
                                 }
                                 b"u" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.underline =
-                                            Some(String::from_utf8_lossy(&a.value) != "none");
+                                        font.underline = Some(a.value != "none");
                                     }
                                 }
                                 _ => {}
@@ -844,12 +799,11 @@ pub fn parse_slide_shapes(
                     b"a:pPr" if in_paragraph => {
                         in_para_props = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"lvl" => {
-                                    para.level = String::from_utf8_lossy(&a.value).parse().ok()
-                                }
+                            match a.key.as_ref().as_bytes() {
+                                b"lvl" => para.level = a.value.parse().ok(),
                                 b"algn" => {
-                                    para.alignment = String::from_utf8_lossy(&a.value)
+                                    para.alignment = a
+                                        .value
                                         .parse::<String>()
                                         .ok()
                                         .and_then(|s| parse_alignment(&s));
@@ -876,12 +830,12 @@ pub fn parse_slide_shapes(
                         let mut tooltip: Option<String> = None;
                         let mut r_id: Option<String> = None;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"r:id" => {
-                                    r_id = Some(String::from_utf8_lossy(&a.value).to_string());
+                                    r_id = Some(a.value.to_string());
                                 }
                                 b"tooltip" => {
-                                    tooltip = Some(String::from_utf8_lossy(&a.value).to_string());
+                                    tooltip = Some(a.value.to_string());
                                 }
                                 _ => {}
                             }
@@ -896,16 +850,16 @@ pub fn parse_slide_shapes(
                         run_font = Some(fresh_font());
                         in_run_props = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"sz" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.size = String::from_utf8_lossy(&a.value).parse().ok();
+                                        font.size = a.value.parse().ok();
                                     }
                                 }
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    let v = a.value == "1";
                                     if let Some(ref mut font) = run_font {
-                                        if a.key.as_ref() == b"b" {
+                                        if a.key.as_ref().as_bytes() == b"b" {
                                             font.bold = Some(v);
                                         } else {
                                             font.italic = Some(v);
@@ -914,8 +868,7 @@ pub fn parse_slide_shapes(
                                 }
                                 b"u" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.underline =
-                                            Some(String::from_utf8_lossy(&a.value) != "none");
+                                        font.underline = Some(a.value != "none");
                                     }
                                 }
                                 _ => {}
@@ -927,16 +880,16 @@ pub fn parse_slide_shapes(
                         in_run_props = true;
                         in_end_para_rpr = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"sz" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.size = String::from_utf8_lossy(&a.value).parse().ok();
+                                        font.size = a.value.parse().ok();
                                     }
                                 }
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
+                                    let v = a.value == "1";
                                     if let Some(ref mut font) = run_font {
-                                        if a.key.as_ref() == b"b" {
+                                        if a.key.as_ref().as_bytes() == b"b" {
                                             font.bold = Some(v);
                                         } else {
                                             font.italic = Some(v);
@@ -945,8 +898,7 @@ pub fn parse_slide_shapes(
                                 }
                                 b"u" => {
                                     if let Some(ref mut font) = run_font {
-                                        font.underline =
-                                            Some(String::from_utf8_lossy(&a.value) != "none");
+                                        font.underline = Some(a.value != "none");
                                     }
                                 }
                                 _ => {}
@@ -959,8 +911,8 @@ pub fn parse_slide_shapes(
                     b"a:latin" if in_run_props => {
                         if let Some(ref mut font) = run_font {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -970,8 +922,8 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -981,8 +933,8 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -992,8 +944,8 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -1001,8 +953,8 @@ pub fn parse_slide_shapes(
                     b"a:graphicData" if current_shape.is_some() => {
                         in_graphic_data = true;
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"uri" {
-                                let uri = String::from_utf8_lossy(&a.value);
+                            if a.key.as_ref().as_bytes() == b"uri" {
+                                let uri = a.value;
                                 if uri.contains("table") {
                                     in_table = true;
                                     if let Some(ref mut shape) = current_shape {
@@ -1023,8 +975,8 @@ pub fn parse_slide_shapes(
                     b"a:tblGrid" if in_table => {}
                     b"a:gridCol" if in_table => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"w" {
-                                let w: i64 = String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                            if a.key.as_ref().as_bytes() == b"w" {
+                                let w: i64 = a.value.parse().unwrap_or(0);
                                 table_grid.push(GridColDto { width: w });
                             }
                         }
@@ -1034,8 +986,8 @@ pub fn parse_slide_shapes(
                         current_cells.clear();
                         current_row_height = None;
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"h" {
-                                current_row_height = String::from_utf8_lossy(&a.value).parse().ok();
+                            if a.key.as_ref().as_bytes() == b"h" {
+                                current_row_height = a.value.parse().ok();
                             }
                         }
                     }
@@ -1047,19 +999,11 @@ pub fn parse_slide_shapes(
                         tc_v_merge = None;
                         cell_paragraphs.clear();
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"rowSpan" => {
-                                    tc_row_span = String::from_utf8_lossy(&a.value).parse().ok()
-                                }
-                                b"gridSpan" => {
-                                    tc_grid_span = String::from_utf8_lossy(&a.value).parse().ok()
-                                }
-                                b"hMerge" => {
-                                    tc_h_merge = Some(String::from_utf8_lossy(&a.value) == "1")
-                                }
-                                b"vMerge" => {
-                                    tc_v_merge = Some(String::from_utf8_lossy(&a.value) == "1")
-                                }
+                            match a.key.as_ref().as_bytes() {
+                                b"rowSpan" => tc_row_span = a.value.parse().ok(),
+                                b"gridSpan" => tc_grid_span = a.value.parse().ok(),
+                                b"hMerge" => tc_h_merge = Some(a.value == "1"),
+                                b"vMerge" => tc_v_merge = Some(a.value == "1"),
                                 _ => {}
                             }
                         }
@@ -1075,27 +1019,25 @@ pub fn parse_slide_shapes(
                 }
             }
             Ok(Event::Text(ref e)) => {
-                if in_run && let Ok(t) = String::from_utf8(e.to_vec()) {
+                if in_run && let t = e.as_ref().to_string() {
                     text_buf.push_str(&t);
                 }
             }
             Ok(Event::Empty(ref e)) => {
                 let ename = e.name();
-                let tag = ename.as_ref();
+                let tag = ename.as_ref().as_bytes();
                 match tag {
                     b"p:cNvPr" => {
                         if let Some(ref mut shape) =
                             shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
+                                match a.key.as_ref().as_bytes() {
                                     b"id" => {
-                                        shape.shape_id =
-                                            String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                                        shape.shape_id = a.value.parse().unwrap_or(0);
                                     }
                                     b"name" => {
-                                        shape.name =
-                                            Some(String::from_utf8_lossy(&a.value).to_string());
+                                        shape.name = Some(a.value.to_string());
                                     }
                                     _ => {}
                                 }
@@ -1108,19 +1050,16 @@ pub fn parse_slide_shapes(
                             let mut ph_type = None;
                             let mut sz = None;
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"idx" => {
-                                        idx = String::from_utf8_lossy(&a.value).parse().unwrap_or(0)
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"idx" => idx = a.value.parse().unwrap_or(0),
                                     b"type" => {
-                                        ph_type = String::from_utf8_lossy(&a.value)
+                                        ph_type = a
+                                            .value
                                             .parse::<String>()
                                             .ok()
                                             .and_then(|s| parse_placeholder_type(&s));
                                     }
-                                    b"sz" => {
-                                        sz = Some(String::from_utf8_lossy(&a.value).to_string())
-                                    }
+                                    b"sz" => sz = Some(a.value.to_string()),
                                     _ => {}
                                 }
                             }
@@ -1133,19 +1072,18 @@ pub fn parse_slide_shapes(
                     b"a:rPr" if in_run => {
                         let mut font = fresh_font();
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"sz" => font.size = String::from_utf8_lossy(&a.value).parse().ok(),
+                            match a.key.as_ref().as_bytes() {
+                                b"sz" => font.size = a.value.parse().ok(),
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
-                                    if a.key.as_ref() == b"b" {
+                                    let v = a.value == "1";
+                                    if a.key.as_ref().as_bytes() == b"b" {
                                         font.bold = Some(v);
                                     } else {
                                         font.italic = Some(v);
                                     }
                                 }
                                 b"u" => {
-                                    font.underline =
-                                        Some(String::from_utf8_lossy(&a.value) != "none");
+                                    font.underline = Some(a.value != "none");
                                 }
                                 _ => {}
                             }
@@ -1166,8 +1104,8 @@ pub fn parse_slide_shapes(
                             shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"rot" {
-                                    let raw = String::from_utf8_lossy(&a.value);
+                                if a.key.as_ref().as_bytes() == b"rot" {
+                                    let raw = a.value;
                                     if let Ok(v) = raw.parse::<f64>() {
                                         shape.rotation = Some(v / 60000.0);
                                     }
@@ -1181,13 +1119,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"x" => {
-                                        shape.left = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"y" => {
-                                        shape.top = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"x" => shape.left = a.value.parse().ok(),
+                                    b"y" => shape.top = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -1199,14 +1133,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"cx" => {
-                                        shape.width = String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"cy" => {
-                                        shape.height =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"cx" => shape.width = a.value.parse().ok(),
+                                    b"cy" => shape.height = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -1218,15 +1147,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"x" => {
-                                        shape.ch_off_x =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"y" => {
-                                        shape.ch_off_y =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"x" => shape.ch_off_x = a.value.parse().ok(),
+                                    b"y" => shape.ch_off_y = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -1238,15 +1161,9 @@ pub fn parse_slide_shapes(
                                 shape_target(&mut current_shape, &mut group_stack)
                         {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
-                                    b"cx" => {
-                                        shape.ch_ext_cx =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
-                                    b"cy" => {
-                                        shape.ch_ext_cy =
-                                            String::from_utf8_lossy(&a.value).parse().ok()
-                                    }
+                                match a.key.as_ref().as_bytes() {
+                                    b"cx" => shape.ch_ext_cx = a.value.parse().ok(),
+                                    b"cy" => shape.ch_ext_cy = a.value.parse().ok(),
                                     _ => {}
                                 }
                             }
@@ -1255,10 +1172,10 @@ pub fn parse_slide_shapes(
                     b"a:blip" => {
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"r:embed"
-                                    || a.key.as_ref().ends_with(b"embed")
+                                if a.key.as_ref().as_bytes() == b"r:embed"
+                                    || a.key.as_ref().as_bytes().ends_with(b"embed")
                                 {
-                                    let r_id = String::from_utf8_lossy(&a.value).to_string();
+                                    let r_id = a.value.to_string();
                                     shape.image = image_map.get(&r_id).cloned();
                                 }
                             }
@@ -1268,9 +1185,9 @@ pub fn parse_slide_shapes(
                         if let Some(ref mut shape) = current_shape {
                             let mut crop = CropDto::default();
                             for a in e.attributes().flatten() {
-                                let raw = String::from_utf8_lossy(&a.value).to_string();
+                                let raw = a.value.to_string();
                                 let v = raw.parse::<f64>().ok().map(|n| n / 100000.0);
-                                match a.key.as_ref() {
+                                match a.key.as_ref().as_bytes() {
                                     b"l" => crop.left = v,
                                     b"t" => crop.top = v,
                                     b"r" => crop.right = v,
@@ -1290,9 +1207,8 @@ pub fn parse_slide_shapes(
                     b"a:prstGeom" => {
                         if let Some(ref mut shape) = current_shape {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"prst" {
-                                    shape.auto_shape_type =
-                                        Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"prst" {
+                                    shape.auto_shape_type = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -1312,12 +1228,12 @@ pub fn parse_slide_shapes(
                     b"a:ln" if in_sp_pr => {
                         in_shape_ln = true;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"w" => {
-                                    ln_width = String::from_utf8_lossy(&a.value).parse().ok();
+                                    ln_width = a.value.parse().ok();
                                 }
                                 b"cap" => {
-                                    ln_cap = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    ln_cap = match a.value.as_ref() {
                                         "rnd" => Some(LineCap::Rnd),
                                         "sq" => Some(LineCap::Sq),
                                         "flat" => Some(LineCap::Flat),
@@ -1325,7 +1241,7 @@ pub fn parse_slide_shapes(
                                     };
                                 }
                                 b"cmpd" => {
-                                    ln_compound = match String::from_utf8_lossy(&a.value).as_ref() {
+                                    ln_compound = match a.value.as_ref() {
                                         "sng" => Some(CompoundLine::Sng),
                                         "dbl" => Some(CompoundLine::Dbl),
                                         "thickThin" => Some(CompoundLine::ThickThin),
@@ -1340,8 +1256,8 @@ pub fn parse_slide_shapes(
                     }
                     b"a:prstDash" if in_shape_ln => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                ln_dash = match String::from_utf8_lossy(&a.value).as_ref() {
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                ln_dash = match a.value.as_ref() {
                                     "solid" => Some(LineDash::Solid),
                                     "dot" => Some(LineDash::Dot),
                                     "dash" => Some(LineDash::Dash),
@@ -1360,10 +1276,10 @@ pub fn parse_slide_shapes(
                     }
                     b"a:srgbClr" if in_shape_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 shape_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -1371,23 +1287,21 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_shape_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 shape_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:srgbClr" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 grad_stop_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -1395,21 +1309,19 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 grad_stop_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:lin" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"ang"
-                                && let Ok(v) = String::from_utf8_lossy(&a.value).parse::<i64>()
+                            if a.key.as_ref().as_bytes() == b"ang"
+                                && let Ok(v) = a.value.parse::<i64>()
                             {
                                 grad_angle = Some(v / 60000);
                             }
@@ -1417,17 +1329,18 @@ pub fn parse_slide_shapes(
                     }
                     b"a:path" if in_grad_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"path" && a.value.as_ref() == b"circle" {
+                            if a.key.as_ref().as_bytes() == b"path" && a.value.as_ref() == "circle"
+                            {
                                 grad_radial = true;
                             }
                         }
                     }
                     b"a:srgbClr" if in_shadow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_shadow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -1435,23 +1348,21 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_shadow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_shadow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"a:srgbClr" if in_glow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_glow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -1459,13 +1370,11 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_glow => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 effect_glow_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
@@ -1473,8 +1382,7 @@ pub fn parse_slide_shapes(
                     b"a:alpha" if in_shadow => {
                         if let Some(s) = effect_shadow.as_mut()
                             && let Some(v) = e.attributes().flatten().find_map(|a| {
-                                (a.key.as_ref() == b"val")
-                                    .then(|| String::from_utf8_lossy(&a.value).to_string())
+                                (a.key.as_ref().as_bytes() == b"val").then(|| a.value.to_string())
                             })
                             && let Ok(v) = v.parse::<i64>()
                         {
@@ -1484,8 +1392,7 @@ pub fn parse_slide_shapes(
                     b"a:alpha" if in_glow => {
                         if let Some(g) = effect_glow.as_mut()
                             && let Some(v) = e.attributes().flatten().find_map(|a| {
-                                (a.key.as_ref() == b"val")
-                                    .then(|| String::from_utf8_lossy(&a.value).to_string())
+                                (a.key.as_ref().as_bytes() == b"val").then(|| a.value.to_string())
                             })
                             && let Ok(v) = v.parse::<i64>()
                         {
@@ -1495,8 +1402,8 @@ pub fn parse_slide_shapes(
                     b"a:softEdge" if in_effect_lst => {
                         let mut radius = None;
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"rad" {
-                                radius = String::from_utf8_lossy(&a.value).parse().ok();
+                            if a.key.as_ref().as_bytes() == b"rad" {
+                                radius = a.value.parse().ok();
                             }
                         }
                         effect_soft_edge = Some(SoftEdgeDto { radius });
@@ -1511,33 +1418,22 @@ pub fn parse_slide_shapes(
                         });
                         if let Some(r) = effect_reflection.as_mut() {
                             for a in e.attributes().flatten() {
-                                match a.key.as_ref() {
+                                match a.key.as_ref().as_bytes() {
                                     b"blurRad" => {
-                                        r.blur = String::from_utf8_lossy(&a.value).parse().ok();
+                                        r.blur = a.value.parse().ok();
                                     }
                                     b"stA" => {
-                                        r.start_alpha = String::from_utf8_lossy(&a.value)
-                                            .parse::<i64>()
-                                            .ok()
-                                            .map(|v| v / 1000);
+                                        r.start_alpha =
+                                            a.value.parse::<i64>().ok().map(|v| v / 1000);
                                     }
                                     b"endA" => {
-                                        r.end_alpha = String::from_utf8_lossy(&a.value)
-                                            .parse::<i64>()
-                                            .ok()
-                                            .map(|v| v / 1000);
+                                        r.end_alpha = a.value.parse::<i64>().ok().map(|v| v / 1000);
                                     }
                                     b"stPos" => {
-                                        r.start_pos = String::from_utf8_lossy(&a.value)
-                                            .parse::<i64>()
-                                            .ok()
-                                            .map(|v| v / 1000);
+                                        r.start_pos = a.value.parse::<i64>().ok().map(|v| v / 1000);
                                     }
                                     b"endPos" => {
-                                        r.end_pos = String::from_utf8_lossy(&a.value)
-                                            .parse::<i64>()
-                                            .ok()
-                                            .map(|v| v / 1000);
+                                        r.end_pos = a.value.parse::<i64>().ok().map(|v| v / 1000);
                                     }
                                     _ => {}
                                 }
@@ -1546,10 +1442,10 @@ pub fn parse_slide_shapes(
                     }
                     b"a:srgbClr" if in_ln_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 ln_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Rgb),
-                                    rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                    rgb: Some(a.value.to_string()),
                                     theme_color: None,
                                 });
                             }
@@ -1557,20 +1453,18 @@ pub fn parse_slide_shapes(
                     }
                     b"a:schemeClr" if in_ln_fill => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
+                            if a.key.as_ref().as_bytes() == b"val" {
                                 ln_fill_color = Some(ColorFormatDto {
                                     color_type: Some(ColorType::Scheme),
                                     rgb: None,
-                                    theme_color: Some(
-                                        String::from_utf8_lossy(&a.value).to_string(),
-                                    ),
+                                    theme_color: Some(a.value.to_string()),
                                 });
                             }
                         }
                     }
                     b"p:cNvSpPr" => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"txBox" && a.value.as_ref() == b"1" {
+                            if a.key.as_ref().as_bytes() == b"txBox" && a.value.as_ref() == "1" {
                                 is_textbox = true;
                             }
                         }
@@ -1580,12 +1474,12 @@ pub fn parse_slide_shapes(
                         let mut tooltip: Option<String> = None;
                         let mut r_id: Option<String> = None;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"r:id" => {
-                                    r_id = Some(String::from_utf8_lossy(&a.value).to_string());
+                                    r_id = Some(a.value.to_string());
                                 }
                                 b"tooltip" => {
-                                    tooltip = Some(String::from_utf8_lossy(&a.value).to_string());
+                                    tooltip = Some(a.value.to_string());
                                 }
                                 _ => {}
                             }
@@ -1599,19 +1493,18 @@ pub fn parse_slide_shapes(
                     b"a:endParaRPr" if in_paragraph => {
                         let mut font = fresh_font();
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"sz" => font.size = String::from_utf8_lossy(&a.value).parse().ok(),
+                            match a.key.as_ref().as_bytes() {
+                                b"sz" => font.size = a.value.parse().ok(),
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
-                                    if a.key.as_ref() == b"b" {
+                                    let v = a.value == "1";
+                                    if a.key.as_ref().as_bytes() == b"b" {
                                         font.bold = Some(v);
                                     } else {
                                         font.italic = Some(v);
                                     }
                                 }
                                 b"u" => {
-                                    font.underline =
-                                        Some(String::from_utf8_lossy(&a.value) != "none");
+                                    font.underline = Some(a.value != "none");
                                 }
                                 _ => {}
                             }
@@ -1629,8 +1522,9 @@ pub fn parse_slide_shapes(
                     b"a:lvl1pPr" if in_lst_style => {
                         let mut p = fresh_para();
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"algn" {
-                                p.alignment = String::from_utf8_lossy(&a.value)
+                            if a.key.as_ref().as_bytes() == b"algn" {
+                                p.alignment = a
+                                    .value
                                     .parse::<String>()
                                     .ok()
                                     .and_then(|s| parse_alignment(&s));
@@ -1644,19 +1538,18 @@ pub fn parse_slide_shapes(
                     b"a:defRPr" if in_lvl1 => {
                         let mut font = fresh_font();
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"sz" => font.size = String::from_utf8_lossy(&a.value).parse().ok(),
+                            match a.key.as_ref().as_bytes() {
+                                b"sz" => font.size = a.value.parse().ok(),
                                 b"b" | b"i" => {
-                                    let v = String::from_utf8_lossy(&a.value) == "1";
-                                    if a.key.as_ref() == b"b" {
+                                    let v = a.value == "1";
+                                    if a.key.as_ref().as_bytes() == b"b" {
                                         font.bold = Some(v);
                                     } else {
                                         font.italic = Some(v);
                                     }
                                 }
                                 b"u" => {
-                                    font.underline =
-                                        Some(String::from_utf8_lossy(&a.value) != "none");
+                                    font.underline = Some(a.value != "none");
                                 }
                                 _ => {}
                             }
@@ -1681,8 +1574,8 @@ pub fn parse_slide_shapes(
                     b"a:latin" if in_run_props => {
                         if let Some(ref mut font) = run_font {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -1692,8 +1585,8 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -1703,8 +1596,8 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
@@ -1714,24 +1607,26 @@ pub fn parse_slide_shapes(
                             && font.name.is_none()
                         {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"typeface" {
-                                    font.name = Some(String::from_utf8_lossy(&a.value).to_string());
+                                if a.key.as_ref().as_bytes() == b"typeface" {
+                                    font.name = Some(a.value.to_string());
                                 }
                             }
                         }
                     }
                     b"a:gridCol" if in_table => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"w" {
-                                let w: i64 = String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                            if a.key.as_ref().as_bytes() == b"w" {
+                                let w: i64 = a.value.parse().unwrap_or(0);
                                 table_grid.push(GridColDto { width: w });
                             }
                         }
                     }
                     b"c:chart" if in_graphic_data => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"r:id" || a.key.as_ref().ends_with(b":id") {
-                                let r_id = String::from_utf8_lossy(&a.value).to_string();
+                            if a.key.as_ref().as_bytes() == b"r:id"
+                                || a.key.as_ref().as_bytes().ends_with(b":id")
+                            {
+                                let r_id = a.value.to_string();
                                 if let Some(ref mut shape) = current_shape {
                                     shape.chart = Some(ChartDto {
                                         chart_type: None,
@@ -1745,13 +1640,11 @@ pub fn parse_slide_shapes(
                     b"a:schemeClr" if in_solid_fill => {
                         if let Some(ref mut font) = run_font {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"val" {
+                                if a.key.as_ref().as_bytes() == b"val" {
                                     font.color = Some(ColorFormatDto {
                                         color_type: Some(ColorType::Scheme),
                                         rgb: None,
-                                        theme_color: Some(
-                                            String::from_utf8_lossy(&a.value).to_string(),
-                                        ),
+                                        theme_color: Some(a.value.to_string()),
                                     });
                                 }
                             }
@@ -1760,10 +1653,10 @@ pub fn parse_slide_shapes(
                     b"a:srgbClr" if in_solid_fill => {
                         if let Some(ref mut font) = run_font {
                             for a in e.attributes().flatten() {
-                                if a.key.as_ref() == b"val" {
+                                if a.key.as_ref().as_bytes() == b"val" {
                                     font.color = Some(ColorFormatDto {
                                         color_type: Some(ColorType::Rgb),
-                                        rgb: Some(String::from_utf8_lossy(&a.value).to_string()),
+                                        rgb: Some(a.value.to_string()),
                                         theme_color: None,
                                     });
                                 }
@@ -1772,33 +1665,31 @@ pub fn parse_slide_shapes(
                     }
                     b"a:spcPts" if in_ln_spc => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                let raw: f64 =
-                                    String::from_utf8_lossy(&a.value).parse().unwrap_or(0.0);
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                let raw: f64 = a.value.parse().unwrap_or(0.0);
                                 para.line_spacing = Some(raw / 100.0);
                             }
                         }
                     }
                     b"a:spcPct" if in_ln_spc => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                let raw: f64 =
-                                    String::from_utf8_lossy(&a.value).parse().unwrap_or(0.0);
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                let raw: f64 = a.value.parse().unwrap_or(0.0);
                                 para.line_spacing = Some(raw / 100000.0);
                             }
                         }
                     }
                     b"a:spcPts" if in_spc_bef => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                para.space_before = String::from_utf8_lossy(&a.value).parse().ok();
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                para.space_before = a.value.parse().ok();
                             }
                         }
                     }
                     b"a:spcPts" if in_spc_aft => {
                         for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"val" {
-                                para.space_after = String::from_utf8_lossy(&a.value).parse().ok();
+                            if a.key.as_ref().as_bytes() == b"val" {
+                                para.space_after = a.value.parse().ok();
                             }
                         }
                     }
@@ -1815,36 +1706,30 @@ pub fn parse_slide_shapes(
                     }
                     b"a:bodyPr" if in_text_frame => {
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
+                            match a.key.as_ref().as_bytes() {
                                 b"wrap" => {
                                     body_pr_word_wrap = Some(
-                                        String::from_utf8_lossy(&a.value) == "1"
-                                            || String::from_utf8_lossy(&a.value)
-                                                .to_lowercase()
-                                                .contains("sq"),
+                                        a.value == "1" || a.value.to_lowercase().contains("sq"),
                                     );
                                 }
                                 b"anchor" => {
-                                    body_pr_anchor = String::from_utf8_lossy(&a.value)
+                                    body_pr_anchor = a
+                                        .value
                                         .parse::<String>()
                                         .ok()
                                         .and_then(|s| parse_anchor(&s));
                                 }
                                 b"lIns" => {
-                                    body_pr_margin_l =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_l = a.value.parse().ok();
                                 }
                                 b"rIns" => {
-                                    body_pr_margin_r =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_r = a.value.parse().ok();
                                 }
                                 b"tIns" => {
-                                    body_pr_margin_t =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_t = a.value.parse().ok();
                                 }
                                 b"bIns" => {
-                                    body_pr_margin_b =
-                                        String::from_utf8_lossy(&a.value).parse().ok();
+                                    body_pr_margin_b = a.value.parse().ok();
                                 }
                                 _ => {}
                             }
@@ -1855,7 +1740,7 @@ pub fn parse_slide_shapes(
             }
             Ok(Event::End(ref e)) => {
                 let ename = e.name();
-                let tag = ename.as_ref();
+                let tag = ename.as_ref().as_bytes();
                 match tag {
                     b"p:sp" | b"p:pic" | b"p:cxnSp" | b"p:grpSp" | b"p:graphicFrame" => {
                         if tag == b"p:grpSp" {

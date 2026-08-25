@@ -9,8 +9,8 @@ fn read_attr(events: &[quick_xml::events::Event<'_>], i: usize, key: &[u8]) -> O
     };
     e.attributes()
         .flatten()
-        .find(|a| a.key.as_ref() == key)
-        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+        .find(|a| a.key.as_ref().as_bytes() == key)
+        .map(|a| a.value.to_string())
 }
 
 /// Query a theme part: `{ "colors": {...}, "fonts": { "major": ..., "minor": ... } }`.

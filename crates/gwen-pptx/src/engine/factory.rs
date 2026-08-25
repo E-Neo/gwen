@@ -320,11 +320,11 @@ pub fn find_max_shape_id(xml_bytes: &[u8]) -> u32 {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"p:cNvPr" {
+                if e.name().as_ref().as_bytes() == b"p:cNvPr" {
                     for attr in e.attributes() {
                         if let Ok(a) = attr
-                            && a.key.as_ref() == b"id"
-                            && let Ok(v) = String::from_utf8_lossy(&a.value).parse::<u32>()
+                            && a.key.as_ref().as_bytes() == b"id"
+                            && let Ok(v) = a.value.parse::<u32>()
                             && v > max_id
                         {
                             max_id = v;
@@ -353,11 +353,11 @@ pub fn find_max_slide_id(xml_bytes: &[u8]) -> u32 {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"p:sldId" {
+                if e.name().as_ref().as_bytes() == b"p:sldId" {
                     for attr in e.attributes() {
                         if let Ok(a) = attr
-                            && a.key.as_ref() == b"id"
-                            && let Ok(v) = String::from_utf8_lossy(&a.value).parse::<u32>()
+                            && a.key.as_ref().as_bytes() == b"id"
+                            && let Ok(v) = a.value.parse::<u32>()
                             && v > max_id
                         {
                             max_id = v;

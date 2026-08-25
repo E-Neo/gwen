@@ -16,17 +16,18 @@ pub fn parse_core_properties(data: &[u8]) -> AppResult<serde_json::Value> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                current_tag = Some(String::from_utf8_lossy(e.name().as_ref()).to_string());
+                current_tag =
+                    Some(String::from_utf8_lossy(e.name().as_ref().as_bytes()).to_string());
                 current_text.clear();
             }
             Ok(Event::Text(t)) => {
-                let s = String::from_utf8_lossy(t.as_ref()).into_owned();
+                let s = t.as_ref().to_string();
                 if !s.trim().is_empty() {
                     current_text.push_str(s.trim());
                 }
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = String::from_utf8_lossy(e.name().as_ref().as_bytes()).to_string();
                 if let Some(tag) = &current_tag
                     && *tag == name
                     && let Some(key) = core_prop_key(&name)

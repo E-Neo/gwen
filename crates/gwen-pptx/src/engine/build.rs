@@ -20,6 +20,8 @@ const LAYOUT_CT: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml";
 const THEME_CT: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 const CHART_CT: &str = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+const NOTES_MASTER_CT: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml";
 const CORE_CT: &str = "application/vnd.openxmlformats-package.core-properties+xml";
 const APP_CT: &str = "application/vnd.openxmlformats-officedocument.extended-properties+xml";
 const OFFICE_REL: &str =
@@ -38,6 +40,8 @@ const MASTER_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster";
 const NOTES_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
+const NOTES_MASTER_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
 const THEME_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const CHART_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
 
@@ -86,20 +90,30 @@ pub fn compile_package(project: &Project<'_>) -> AppResult<Package> {
     for master in &masters {
         for layout in &master.layouts {
             compile_layout(&mut pkg, layout)?;
+            add_rel(&mut pkg, &layout.uri, &master.uri, MASTER_REL);
+        }
+    }
+
+    // Media extracted by the mirror (`src/media`) become `ppt/media/<name>`.
+    // Picture shapes may only reference files that exist here.
+    let mut media_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(media_dir) = project.media_dir.filter(|d| d.is_dir()) {
+        for path in walk_dir(media_dir)? {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                media_files.insert(name.to_string());
+                pkg.set_part(&format!("ppt/media/{name}"), std::fs::read(&path)?);
+            }
         }
     }
 
     for slide in &slides {
-        compile_slide(&mut pkg, slide, &masters, &mut chart_counter)?;
+        compile_slide(&mut pkg, slide, &masters, &media_files, &mut chart_counter)?;
     }
 
-    // Media extracted by the mirror (`src/media`) become `ppt/media/<name>`.
-    if let Some(media_dir) = project.media_dir.filter(|d| d.is_dir()) {
-        for path in walk_dir(media_dir)? {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                pkg.set_part(&format!("ppt/media/{name}"), std::fs::read(&path)?);
-            }
-        }
+    // Notes slides need their master; create it once before relationship
+    // pruning so the notesSlide -> notesMaster rels resolve.
+    if slides.iter().any(|s| s.notes.is_some()) {
+        compile_notes_master(&mut pkg)?;
     }
 
     compile_presentation(&mut pkg, obj, &masters, &slides)?;
@@ -153,6 +167,9 @@ struct DocMaster {
 
 struct DocLayout {
     uri: String,
+    /// Package-unique `p:sldLayoutId` value (>= 2147483648, distinct from the
+    /// master ids).
+    id: u32,
     shapes: Vec<Value>,
 }
 
@@ -199,6 +216,7 @@ fn doc_masters(obj: &Map<String, Value>) -> Vec<DocMaster> {
                         .unwrap_or_default();
                     layouts.push(DocLayout {
                         uri: luri,
+                        id: 0,
                         shapes: lshapes,
                     });
                 }
@@ -208,6 +226,15 @@ fn doc_masters(obj: &Map<String, Value>) -> Vec<DocMaster> {
                 layouts,
                 shapes,
             });
+        }
+    }
+    // Layout ids live in the same 2147483648+ range as master ids; offset past
+    // every master so the two lists never collide.
+    let mut next_id = 2147483648u32 + out.len() as u32;
+    for master in &mut out {
+        for layout in &mut master.layouts {
+            layout.id = next_id;
+            next_id += 1;
         }
     }
     out
@@ -326,6 +353,11 @@ fn assign_shape_ids(shape: &mut ShapeDto, next: &mut u32) {
 const DEFAULT_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
 const MASTER_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldMaster xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
 const LAYOUT_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldLayout xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" preserve=\"1\"><p:cSld>";
+const NOTES_HEAD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:notesSlide xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
+const NOTES_MASTER_URI: &str = "ppt/notesMasters/notesMaster1.xml";
+/// The two placeholders every notes master owns: the slide image and the body.
+const NOTES_MASTER_BODY: &str = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Slide Image Placeholder 1\"/><p:cNvSpPr><a:spLocks noGrp=\"1\" noRot=\"1\" noChangeAspect=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"sldImg\"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp><p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Notes Placeholder 2\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>";
+const CLR_MAP: &str = "<a:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>";
 const DEFAULT_SP: &str = "<p:spTree>";
 const DEFAULT_POST: &str = "</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
 
@@ -344,10 +376,25 @@ fn compile_master(pkg: &mut Package, master: &DocMaster) -> AppResult<()> {
     let shapes = as_shapes(&master.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
     let head = MASTER_HEAD.as_bytes();
-    let mid = b"";
     let sp = DEFAULT_SP.as_bytes();
-    let post = b"</p:cSld><a:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:sldMaster>";
-    pkg.set_part(&master.uri, assemble(head, mid, sp, &inner, post));
+
+    add_rel(pkg, &master.uri, "ppt/theme/theme1.xml", THEME_REL);
+    // The master must list every layout it owns; ids come from the
+    // package-unique allocation in `doc_masters`.
+    let mut entries = String::new();
+    for layout in &master.layouts {
+        let rid = add_rel(pkg, &master.uri, &layout.uri, LAYOUT_REL);
+        entries.push_str(&format!(
+            "<p:sldLayoutId id=\"{}\" r:id=\"{rid}\"/>",
+            layout.id
+        ));
+    }
+    let post =
+        format!("</p:cSld>{CLR_MAP}<p:sldLayoutIdLst>{entries}</p:sldLayoutIdLst></p:sldMaster>");
+    pkg.set_part(
+        &master.uri,
+        assemble(head, b"", sp, &inner, post.as_bytes()),
+    );
     Ok(())
 }
 
@@ -355,10 +402,11 @@ fn compile_layout(pkg: &mut Package, layout: &DocLayout) -> AppResult<()> {
     let shapes = as_shapes(&layout.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
     let head = LAYOUT_HEAD.as_bytes();
-    let mid = b"";
-    let sp = DEFAULT_SP.as_bytes();
     let post = b"</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>";
-    pkg.set_part(&layout.uri, assemble(head, mid, sp, &inner, post));
+    pkg.set_part(
+        &layout.uri,
+        assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post),
+    );
     Ok(())
 }
 
@@ -366,6 +414,7 @@ fn compile_slide(
     pkg: &mut Package,
     slide: &DocSlide,
     masters: &[DocMaster],
+    media_files: &std::collections::HashSet<String>,
     chart_counter: &mut usize,
 ) -> AppResult<()> {
     let uri = &slide.uri;
@@ -373,12 +422,18 @@ fn compile_slide(
     // Pictures: ensure a rel exists for every image filename.
     let mut image_rids: HashMap<String, String> = HashMap::new();
     let mut shapes = as_shapes(&slide.shapes)?;
-    collect_image_files(&mut shapes, &mut |fname| {
+    collect_image_files(&mut shapes, &mut |shape_name, fname| {
+        if !media_files.contains(fname) {
+            return Err(AppError::InvalidValue(format!(
+                "picture shape `{shape_name}` references `src/media/{fname}`, which does not exist"
+            )));
+        }
         if !image_rids.contains_key(fname) {
             let rid = add_image_rel(pkg, uri, fname);
             image_rids.insert(fname.to_string(), rid);
         }
-    });
+        Ok(())
+    })?;
 
     // Charts: assign a part URI + rel for every chart shape, and point the
     // shape's `chart.r_id` at the real relationship id.
@@ -389,17 +444,18 @@ fn compile_slide(
         if let Some(chart) = &mut shape.chart {
             chart.r_id = Some(rid);
         }
-        pkg.set_part(
-            &chart_uri,
-            generate::chart_xml(shape.chart.as_ref().expect("chart present")),
-        );
-    });
+        let xml = generate::chart_xml(shape.chart.as_ref().expect("chart present"))?;
+        pkg.set_part(&chart_uri, xml);
+        Ok(())
+    })?;
 
-    // Notes slide.
+    // Notes slide. The notes master part is created once after the slide loop
+    // (before relationship pruning), but its URI is fixed so the notes slide
+    // can reference it here.
     if let Some(notes_shapes) = &slide.notes {
         let notes_uri = format!("ppt/notesSlides/notesSlide{}.xml", pkg.get_next_notes_num());
         add_rel(pkg, uri, &notes_uri, NOTES_REL);
-        compile_notes(pkg, &notes_uri, notes_shapes)?;
+        compile_notes(pkg, &notes_uri, uri, notes_shapes)?;
     }
 
     // Slide layout relationship.
@@ -436,14 +492,42 @@ fn compile_slide(
     Ok(())
 }
 
-fn compile_notes(pkg: &mut Package, notes_uri: &str, shapes: &[Value]) -> AppResult<()> {
+fn compile_notes(
+    pkg: &mut Package,
+    notes_uri: &str,
+    slide_uri: &str,
+    shapes: &[Value],
+) -> AppResult<()> {
+    // A notes slide links back to its slide and to the shared notes master.
+    add_rel(pkg, notes_uri, slide_uri, SLIDE_REL);
+    add_rel(pkg, notes_uri, NOTES_MASTER_URI, NOTES_MASTER_REL);
     let shapes = as_shapes(shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
-    let head = DEFAULT_HEAD.as_bytes();
-    let mid = b"";
-    let sp = DEFAULT_SP.as_bytes();
-    let post = DEFAULT_POST.as_bytes();
-    pkg.set_part(notes_uri, assemble(head, mid, sp, &inner, post));
+    let head = NOTES_HEAD.as_bytes();
+    let post = b"</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notesSlide>";
+    pkg.set_part(
+        notes_uri,
+        assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post),
+    );
+    Ok(())
+}
+
+/// The one notes master all notes slides share: the standard two placeholders
+/// (slide image + body), a color map and the theme relationship.
+fn compile_notes_master(pkg: &mut Package) -> AppResult<()> {
+    let head = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:notesMaster xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld>";
+    let inner = format!(
+        "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{NOTES_MASTER_BODY}"
+    );
+    let bytes = assemble(
+        head.as_bytes(),
+        b"",
+        DEFAULT_SP.as_bytes(),
+        inner.as_bytes(),
+        format!("</p:cSld>{CLR_MAP}</p:notesMaster>").as_bytes(),
+    );
+    pkg.set_part(NOTES_MASTER_URI, bytes);
+    add_rel(pkg, NOTES_MASTER_URI, "ppt/theme/theme1.xml", THEME_REL);
     Ok(())
 }
 
@@ -475,26 +559,23 @@ fn compile_presentation(
     }
 
     add_rel(pkg, pres_uri, "ppt/theme/theme1.xml", THEME_REL);
+    let notes_master_r_id = if pkg.part_exists(NOTES_MASTER_URI) {
+        Some(add_rel(pkg, pres_uri, NOTES_MASTER_URI, NOTES_MASTER_REL))
+    } else {
+        None
+    };
 
     let width = obj.get("slide_width").and_then(Value::as_i64).unwrap_or(0);
     let height = obj.get("slide_height").and_then(Value::as_i64).unwrap_or(0);
 
-    let xml = generate::presentation_xml(&master_entries, None, &slide_entries, width, height);
+    let xml = generate::presentation_xml(
+        &master_entries,
+        notes_master_r_id.as_deref(),
+        &slide_entries,
+        width,
+        height,
+    );
     pkg.set_part(pres_uri, xml);
-
-    // Master → theme and master → layout rels.
-    for m in masters {
-        add_rel(pkg, &m.uri, "ppt/theme/theme1.xml", THEME_REL);
-        for l in &m.layouts {
-            add_rel(pkg, &m.uri, &l.uri, LAYOUT_REL);
-        }
-    }
-    // Layout → master rels.
-    for m in masters {
-        for l in &m.layouts {
-            add_rel(pkg, &l.uri, &m.uri, MASTER_REL);
-        }
-    }
     Ok(())
 }
 
@@ -539,24 +620,27 @@ fn compile_package_rels(pkg: &mut Package) -> AppResult<()> {
     Ok(())
 }
 
+/// Build `[Content_Types].xml` from the final part list. Media extensions are
+/// covered by `Default` entries; every part must end up covered — an unknown
+/// media extension is a hard error, because a part without a content type
+/// makes the whole package invalid.
 fn compile_content_types(pkg: &mut Package) -> AppResult<()> {
     let mut entries = Vec::new();
     let mut defaults: Vec<(&str, &str)> = Vec::new();
     let mut media_exts: Vec<String> = Vec::new();
     let mut uris: Vec<&String> = pkg.part_uris().collect();
     uris.sort();
-    for uri in uris {
-        let ct = known_content_type(uri);
-        entries.push(generate::PartEntry {
-            uri: uri.clone(),
-            content_type: ct,
-        });
+    for uri in &uris {
         if let Some(name) = uri.strip_prefix("ppt/media/") {
             let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
             if !media_exts.contains(&ext) {
                 media_exts.push(ext);
             }
         }
+        entries.push(generate::PartEntry {
+            uri: (*uri).clone(),
+            content_type: known_content_type(uri),
+        });
     }
     for ext in &media_exts {
         if let Some(ct) = media_content_type(ext) {
@@ -564,8 +648,35 @@ fn compile_content_types(pkg: &mut Package) -> AppResult<()> {
         }
     }
     let xml = generate::content_types_xml(&entries, &defaults);
+
+    // Compute coverage before handing the content types part back to the
+    // package (the URI list borrows it).
+    let uncovered: Vec<String> = uris
+        .iter()
+        .filter(|uri| !part_is_covered(uri, &defaults))
+        .map(|uri| (*uri).clone())
+        .collect();
+    if !uncovered.is_empty() {
+        let list = uncovered.join(", ");
+        return Err(AppError::InvalidValue(format!(
+            "no known content type for: {list} (unsupported file extension)"
+        )));
+    }
+
     pkg.set_part("[Content_Types].xml", xml);
     Ok(())
+}
+
+/// True when the OPC consumer can determine the part's content type via a
+/// Default extension entry or a known Override.
+fn part_is_covered(uri: &str, defaults: &[(&str, &str)]) -> bool {
+    if known_content_type(uri).is_some() {
+        return true;
+    }
+    let ext = uri.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    defaults.iter().any(|(e, _)| *e == ext)
+        || ext == "rels"
+        || (ext == "xml" && uri != "[Content_Types].xml")
 }
 
 fn media_content_type(ext: &str) -> Option<&'static str> {
@@ -598,6 +709,9 @@ fn known_content_type(uri: &str) -> Option<String> {
     if uri == "docProps/app.xml" {
         return Some(APP_CT.to_string());
     }
+    if uri == NOTES_MASTER_URI {
+        return Some(NOTES_MASTER_CT.to_string());
+    }
     if let Some(ct) = numbered("ppt/slides/slide", SLIDE_CT) {
         return Some(ct);
     }
@@ -616,29 +730,19 @@ fn known_content_type(uri: &str) -> Option<String> {
     if let Some(ct) = numbered("ppt/charts/chart", CHART_CT) {
         return Some(ct);
     }
-    if let Some(name) = uri.strip_prefix("ppt/media/") {
-        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        let ct = match ext.as_str() {
-            "png" => "image/png",
-            "jpeg" | "jpg" => "image/jpeg",
-            "gif" => "image/gif",
-            "bmp" => "image/bmp",
-            "tif" | "tiff" => "image/tiff",
-            "wmf" => "image/x-wmf",
-            "emf" => "image/x-emf",
-            _ => return None,
-        };
-        return Some(ct.to_string());
-    }
     None
 }
 
+/// Add an internal relationship whose target is a package URI. OPC targets
+/// are interpreted *relative to the source part*, so the absolute package URI
+/// is rewritten to a proper `../`-style relative path first.
 fn add_rel(pkg: &mut Package, source: &str, target: &str, rel_type: &str) -> String {
+    let relative = rel_target_path(source, target);
     pkg.add_relationship(
         source,
         Relationship {
             id: String::new(),
-            target: target.to_string(),
+            target: relative,
             target_mode: None,
             rel_type: rel_type.to_string(),
         },
@@ -646,13 +750,11 @@ fn add_rel(pkg: &mut Package, source: &str, target: &str, rel_type: &str) -> Str
 }
 
 fn add_image_rel(pkg: &mut Package, source: &str, fname: &str) -> String {
-    let target = rel_target_path(source, &format!("ppt/media/{fname}"));
-    add_rel(pkg, source, &target, IMAGE_REL)
+    add_rel(pkg, source, &format!("ppt/media/{fname}"), IMAGE_REL)
 }
 
 fn add_chart_rel(pkg: &mut Package, source: &str, chart_uri: &str) -> String {
-    let target = rel_target_path(source, chart_uri);
-    add_rel(pkg, source, &target, CHART_REL)
+    add_rel(pkg, source, chart_uri, CHART_REL)
 }
 
 /// Resolve a relationship target to an absolute package URI. Never fails on
@@ -723,24 +825,33 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn collect_image_files<'a>(shapes: &'a mut [ShapeDto], f: &mut dyn FnMut(&str)) {
+fn collect_image_files(
+    shapes: &mut [ShapeDto],
+    f: &mut dyn FnMut(&str, &str) -> AppResult<()>,
+) -> AppResult<()> {
     for shape in shapes {
         if let Some(img) = &shape.image {
-            f(img);
+            let name = shape.name.as_deref().unwrap_or("");
+            f(name, img)?;
         }
         if let Some(children) = &mut shape.shapes {
-            collect_image_files(children, f);
+            collect_image_files(children, f)?;
         }
     }
+    Ok(())
 }
 
-fn collect_charts<'a>(shapes: &'a mut [ShapeDto], f: &mut dyn FnMut(&mut ShapeDto)) {
+fn collect_charts(
+    shapes: &mut [ShapeDto],
+    f: &mut dyn FnMut(&mut ShapeDto) -> AppResult<()>,
+) -> AppResult<()> {
     for shape in shapes {
         if shape.chart.is_some() {
-            f(shape);
+            f(shape)?;
         }
         if let Some(children) = &mut shape.shapes {
-            collect_charts(children, f);
+            collect_charts(children, f)?;
         }
     }
+    Ok(())
 }

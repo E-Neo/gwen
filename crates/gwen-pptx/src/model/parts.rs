@@ -117,12 +117,14 @@ pub fn c_sld_name(pkg: &Package, uri: &str) -> Option<String> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"p:cSld" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if e.name().as_ref().as_bytes() == b"p:cSld" =>
+            {
                 return e
                     .attributes()
                     .flatten()
-                    .find(|a| a.key.as_ref() == b"name")
-                    .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                    .find(|a| a.key.as_ref().as_bytes() == b"name")
+                    .map(|a| a.value.to_string());
             }
             Ok(Event::Eof) => return None,
             Err(_) => return None,

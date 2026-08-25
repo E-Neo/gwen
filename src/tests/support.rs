@@ -34,6 +34,16 @@ pub fn run_ok(args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// Run `gwen` with `args`, asserting failure, and return stderr.
+pub fn run_fail(args: &[&str]) -> String {
+    let out = Command::new(bin()).args(args).output().expect("run binary");
+    assert!(
+        !out.status.success(),
+        "command unexpectedly succeeded: {args:?}"
+    );
+    String::from_utf8_lossy(&out.stderr).to_string()
+}
+
 /// Create a new project from `template` inside a scratch dir; returns the
 /// project directory.
 pub fn new_project(template: &Path, name: &str) -> PathBuf {

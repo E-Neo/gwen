@@ -5,6 +5,7 @@ use std::io::{Cursor, Write};
 use serde_json::{Map, Value};
 
 use crate::dto::{ChartDto, ShapeDto};
+use crate::error::AppResult;
 
 fn writer() -> Writer<Cursor<Vec<u8>>> {
     Writer::new(Cursor::new(Vec::new()))
@@ -166,6 +167,50 @@ pub const THEME_COLOR_NAMES: [&str; 12] = [
     "hlink", "folHlink",
 ];
 
+/// Office default palette value for a `clrScheme` slot the mirror omits or
+/// writes in a form that is not a 6-digit hex color.
+fn default_theme_color(slot: &str) -> &'static str {
+    match slot {
+        "dk2" => "1F497D",
+        "lt2" => "EEECE1",
+        "accent1" => "4F81BD",
+        "accent2" => "C0504D",
+        "accent3" => "9BBB59",
+        "accent4" => "8064A2",
+        "accent5" => "4BACC6",
+        "accent6" => "F79646",
+        "hlink" => "0000FF",
+        _ => "800080",
+    }
+}
+
+/// True when `s` satisfies the `ST_HexColorRGB` grammar (6 hex digits).
+fn is_hex_color(s: &str) -> bool {
+    s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// One `a:<slot>` element of `a:clrScheme`. System-background slots (`dk1`,
+/// `lt1`) fall back to their `a:sysClr` form when the mirror carries no hex
+/// value; every other invalid or missing slot falls back to the Office
+/// palette, because `a:srgbClr/@val` must be exactly 6 hex digits.
+fn write_color_slot(w: &mut Writer<Cursor<Vec<u8>>>, slot: &str, val: &str) {
+    start(w, &format!("a:{slot}"), &[]);
+    let tag = format!("a:{slot}");
+    if (slot == "dk1" || slot == "lt1") && !is_hex_color(val) {
+        let (sys, last) = if slot == "dk1" {
+            ("windowText", "000000")
+        } else {
+            ("window", "FFFFFF")
+        };
+        empty(w, "a:sysClr", &[("val", sys), ("lastClr", last)]);
+    } else if is_hex_color(val) {
+        empty(w, "a:srgbClr", &[("val", val)]);
+    } else {
+        empty(w, "a:srgbClr", &[("val", default_theme_color(slot))]);
+    }
+    end(w, &tag);
+}
+
 /// Generate a `a:theme` part. The `fmtScheme` and `objectDefaults` children are
 /// regenerated from standard Office defaults.
 pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>) -> Vec<u8> {
@@ -189,9 +234,7 @@ pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>) -> Vec
     start(&mut w, "a:clrScheme", &[("name", "Office")]);
     for name in THEME_COLOR_NAMES {
         let val = colors.get(name).and_then(Value::as_str).unwrap_or("");
-        start(&mut w, &format!("a:{name}"), &[]);
-        empty(&mut w, "a:srgbClr", &[("val", val)]);
-        end(&mut w, &format!("a:{name}"));
+        write_color_slot(&mut w, name, val);
     }
     end(&mut w, "a:clrScheme");
 
@@ -203,6 +246,9 @@ pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>) -> Vec
             .and_then(Value::as_str)
             .unwrap_or("Calibri");
         empty(&mut w, "a:latin", &[("typeface", typeface)]);
+        // `CT_FontCollection` requires the ea and cs faces alongside latin.
+        empty(&mut w, "a:ea", &[("typeface", "")]);
+        empty(&mut w, "a:cs", &[("typeface", "")]);
         end(&mut w, &format!("a:{key}"));
     }
     end(&mut w, "a:fontScheme");
@@ -213,9 +259,9 @@ pub fn theme_xml(colors: &Map<String, Value>, fonts: &Map<String, Value>) -> Vec
     w.into_inner().into_inner()
 }
 
-/// Standard Office format scheme (`a:fmtScheme`): neutral solid lines, a single
-/// gradient + solid fill style, a shadow effect style, and a solid background
-/// fill style.
+/// Standard Office format scheme (`a:fmtScheme`). `CT_FillStyleList`,
+/// `CT_LineStyleList` and `CT_EffectStyleList` each require exactly three
+/// entries; effect colors nest their transforms inside the color element.
 fn fmt_scheme_xml() -> String {
     let mut w = writer();
     start(&mut w, "a:fmtScheme", &[("name", "Office")]);
@@ -224,20 +270,8 @@ fn fmt_scheme_xml() -> String {
     start(&mut w, "a:solidFill", &[]);
     empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
     end(&mut w, "a:solidFill");
-    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
-    start(&mut w, "a:gsLst", &[]);
-    start(&mut w, "a:gs", &[("pos", "0")]);
-    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    empty(&mut w, "a:lumMod", &[("val", "30000")]);
-    empty(&mut w, "a:lumOff", &[("val", "70000")]);
-    end(&mut w, "a:schemeClr");
-    end(&mut w, "a:gs");
-    start(&mut w, "a:gs", &[("pos", "100000")]);
-    empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    end(&mut w, "a:gs");
-    end(&mut w, "a:gsLst");
-    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
-    end(&mut w, "a:gradFill");
+    write_gradient_fill(&mut w, "30000", "70000");
+    write_gradient_fill(&mut w, "100000", "0");
     end(&mut w, "a:fillStyleLst");
 
     start(&mut w, "a:lnStyleLst", &[]);
@@ -258,55 +292,22 @@ fn fmt_scheme_xml() -> String {
     end(&mut w, "a:lnStyleLst");
 
     start(&mut w, "a:effectStyleLst", &[]);
+    for blur in ["0", "50800"] {
+        start(&mut w, "a:effectStyle", &[]);
+        if blur == "0" {
+            empty(&mut w, "a:effectLst", &[]);
+        } else {
+            start(&mut w, "a:effectLst", &[]);
+            write_shadow_color(&mut w, "63500", "38100");
+            end(&mut w, "a:effectLst");
+        }
+        end(&mut w, "a:effectStyle");
+    }
+    // The third entry carries the stronger shadow Office applies to
+    // placeholders.
     start(&mut w, "a:effectStyle", &[]);
     start(&mut w, "a:effectLst", &[]);
-    start(
-        &mut w,
-        "a:outerShdw",
-        &[
-            ("blurRad", "63500"),
-            ("dist", "38100"),
-            ("dir", "5400000"),
-            ("rotWithShape", "0"),
-        ],
-    );
-    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
-    empty(&mut w, "a:alpha", &[("val", "40000")]);
-    end(&mut w, "a:outerShdw");
-    end(&mut w, "a:effectLst");
-    end(&mut w, "a:effectStyle");
-    start(&mut w, "a:effectStyle", &[]);
-    start(&mut w, "a:effectLst", &[]);
-    start(
-        &mut w,
-        "a:outerShdw",
-        &[
-            ("blurRad", "50800"),
-            ("dist", "38100"),
-            ("dir", "5400000"),
-            ("rotWithShape", "0"),
-        ],
-    );
-    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
-    empty(&mut w, "a:alpha", &[("val", "40000")]);
-    end(&mut w, "a:outerShdw");
-    end(&mut w, "a:effectLst");
-    end(&mut w, "a:effectStyle");
-    start(&mut w, "a:effectStyle", &[]);
-    start(&mut w, "a:effectLst", &[]);
-    start(
-        &mut w,
-        "a:outerShdw",
-        &[
-            ("blurRad", "50800"),
-            ("dist", "38100"),
-            ("dir", "5400000"),
-            ("rotWithShape", "0"),
-        ],
-    );
-    empty(&mut w, "a:srgbClr", &[("val", "000000")]);
-    empty(&mut w, "a:alpha", &[("val", "40000")]);
-    end(&mut w, "a:outerShdw");
+    write_shadow_color(&mut w, "50800", "38100");
     end(&mut w, "a:effectLst");
     end(&mut w, "a:effectStyle");
     end(&mut w, "a:effectStyleLst");
@@ -315,44 +316,50 @@ fn fmt_scheme_xml() -> String {
     start(&mut w, "a:solidFill", &[]);
     empty(&mut w, "a:schemeClr", &[("val", "phClr")]);
     end(&mut w, "a:solidFill");
-    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
-    start(&mut w, "a:gsLst", &[]);
-    start(&mut w, "a:gs", &[("pos", "0")]);
-    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    empty(&mut w, "a:lumMod", &[("val", "102000")]);
-    empty(&mut w, "a:lumOff", &[("val", "0")]);
-    end(&mut w, "a:schemeClr");
-    end(&mut w, "a:gs");
-    start(&mut w, "a:gs", &[("pos", "100000")]);
-    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    empty(&mut w, "a:lumMod", &[("val", "100000")]);
-    empty(&mut w, "a:lumOff", &[("val", "0")]);
-    end(&mut w, "a:schemeClr");
-    end(&mut w, "a:gs");
-    end(&mut w, "a:gsLst");
-    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
-    end(&mut w, "a:gradFill");
-    start(&mut w, "a:gradFill", &[("rotWithShape", "1")]);
-    start(&mut w, "a:gsLst", &[]);
-    start(&mut w, "a:gs", &[("pos", "0")]);
-    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    empty(&mut w, "a:lumMod", &[("val", "102000")]);
-    empty(&mut w, "a:lumOff", &[("val", "0")]);
-    end(&mut w, "a:schemeClr");
-    end(&mut w, "a:gs");
-    start(&mut w, "a:gs", &[("pos", "100000")]);
-    start(&mut w, "a:schemeClr", &[("val", "phClr")]);
-    empty(&mut w, "a:lumMod", &[("val", "100000")]);
-    empty(&mut w, "a:lumOff", &[("val", "0")]);
-    end(&mut w, "a:schemeClr");
-    end(&mut w, "a:gs");
-    end(&mut w, "a:gsLst");
-    empty(&mut w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
-    end(&mut w, "a:gradFill");
+    write_gradient_fill(&mut w, "102000", "0");
+    write_gradient_fill(&mut w, "100000", "0");
     end(&mut w, "a:bgFillStyleLst");
 
     end(&mut w, "a:fmtScheme");
     String::from_utf8(w.into_inner().into_inner()).expect("valid UTF-8")
+}
+
+/// A two-stop vertical `a:gradFill` over `phClr` with a lumMod/lumOff pair on
+/// the first stop.
+fn write_gradient_fill(w: &mut Writer<Cursor<Vec<u8>>>, lum_mod: &str, lum_off: &str) {
+    start(w, "a:gradFill", &[("rotWithShape", "1")]);
+    start(w, "a:gsLst", &[]);
+    start(w, "a:gs", &[("pos", "0")]);
+    start(w, "a:schemeClr", &[("val", "phClr")]);
+    empty(w, "a:lumMod", &[("val", lum_mod)]);
+    empty(w, "a:lumOff", &[("val", lum_off)]);
+    end(w, "a:schemeClr");
+    end(w, "a:gs");
+    start(w, "a:gs", &[("pos", "100000")]);
+    empty(w, "a:schemeClr", &[("val", "phClr")]);
+    end(w, "a:gs");
+    end(w, "a:gsLst");
+    empty(w, "a:lin", &[("ang", "5400000"), ("scaled", "0")]);
+    end(w, "a:gradFill");
+}
+
+/// An `a:outerShdw` whose black color carries its `a:alpha` transform as a
+/// child element (the schema has no sibling-transform form).
+fn write_shadow_color(w: &mut Writer<Cursor<Vec<u8>>>, blur_rad: &str, dist: &str) {
+    start(
+        w,
+        "a:outerShdw",
+        &[
+            ("blurRad", blur_rad),
+            ("dist", dist),
+            ("dir", "5400000"),
+            ("rotWithShape", "0"),
+        ],
+    );
+    start(w, "a:srgbClr", &[("val", "000000")]);
+    empty(w, "a:alpha", &[("val", "40000")]);
+    end(w, "a:srgbClr");
+    end(w, "a:outerShdw");
 }
 
 /// Generate the `p:bg` element for a solid-fill slide background. Returns `None`
@@ -385,8 +392,19 @@ pub fn slide_background_xml(bg: &Value) -> Option<Vec<u8>> {
 }
 
 /// Generate a chart part (`c:chartSpace`) with literal series caches from a
-/// readable chart definition.
-pub fn chart_xml(chart: &ChartDto) -> Vec<u8> {
+/// readable chart definition. Bar charts carry the category/value axis pair
+/// the schema requires (`c:axId` refs plus `c:catAx`/`c:valAx`); pie charts
+/// have no axes. Anything else is rejected — an incomplete chart part would
+/// make the whole package invalid.
+pub fn chart_xml(chart: &ChartDto) -> AppResult<Vec<u8>> {
+    use crate::error::AppError;
+    let kind = chart.chart_type.as_deref().unwrap_or("c:barChart");
+    if kind != "c:barChart" && kind != "c:pieChart" {
+        return Err(AppError::InvalidValue(format!(
+            "unsupported chart type `{kind}` (supported: c:barChart, c:pieChart)"
+        )));
+    }
+    let pie = kind == "c:pieChart";
     let mut w = writer();
     w.write_event(Event::Decl(BytesDecl::new(
         "1.0",
@@ -410,25 +428,80 @@ pub fn chart_xml(chart: &ChartDto) -> Vec<u8> {
     w.write_event(Event::Start(root)).unwrap();
 
     start(&mut w, "c:chart", &[]);
+    empty(&mut w, "c:autoTitleDeleted", &[("val", "1")]);
     start(&mut w, "c:plotArea", &[]);
     empty(&mut w, "c:layout", &[]);
+    if pie {
+        write_pie_chart(&mut w, chart);
+    } else {
+        write_bar_chart(&mut w, chart);
+        write_cat_ax(&mut w, CAT_AX_ID, VAL_AX_ID);
+        write_val_ax(&mut w, VAL_AX_ID, CAT_AX_ID);
+    }
+    end(&mut w, "c:plotArea");
+    empty(&mut w, "c:plotVisOnly", &[("val", "1")]);
+    end(&mut w, "c:chart");
+    end(&mut w, "c:chartSpace");
+    Ok(w.into_inner().into_inner())
+}
 
-    let chart_tag = chart
-        .chart_type
-        .as_deref()
-        .filter(|t| t.starts_with("c:"))
-        .map(str::to_string)
-        .unwrap_or_else(|| "c:barChart".to_string());
-    start(&mut w, &chart_tag, &[]);
+/// Fixed axis ids binding a generated bar chart's `c:axId` refs to its axes.
+const CAT_AX_ID: &str = "111111111";
+const VAL_AX_ID: &str = "222222222";
+
+fn write_series(w: &mut Writer<Cursor<Vec<u8>>>, chart: &ChartDto) {
     for (i, series) in chart.series.iter().enumerate() {
         let xml = crate::dto::xml::chart_series_to_xml(series, i);
         w.get_mut().write_all(xml.as_bytes()).unwrap();
     }
-    end(&mut w, &chart_tag);
-    end(&mut w, "c:plotArea");
-    end(&mut w, "c:chart");
-    end(&mut w, "c:chartSpace");
-    w.into_inner().into_inner()
+}
+
+fn write_bar_chart(w: &mut Writer<Cursor<Vec<u8>>>, chart: &ChartDto) {
+    start(w, "c:barChart", &[]);
+    empty(w, "c:barDir", &[("val", "col")]);
+    empty(w, "c:grouping", &[("val", "clustered")]);
+    empty(w, "c:varyColors", &[("val", "0")]);
+    write_series(w, chart);
+    empty(w, "c:gapWidth", &[("val", "150")]);
+    empty(w, "c:axId", &[("val", CAT_AX_ID)]);
+    empty(w, "c:axId", &[("val", VAL_AX_ID)]);
+    end(w, "c:barChart");
+}
+
+fn write_pie_chart(w: &mut Writer<Cursor<Vec<u8>>>, chart: &ChartDto) {
+    start(w, "c:pieChart", &[]);
+    empty(w, "c:varyColors", &[("val", "1")]);
+    write_series(w, chart);
+    empty(w, "c:firstSliceAng", &[("val", "0")]);
+    end(w, "c:pieChart");
+}
+
+/// A minimal but schema-complete category axis (`c:catAx`).
+fn write_cat_ax(w: &mut Writer<Cursor<Vec<u8>>>, ax_id: &str, cross_id: &str) {
+    start(w, "c:catAx", &[]);
+    empty(w, "c:axId", &[("val", ax_id)]);
+    write_scaling(w);
+    empty(w, "c:delete", &[("val", "0")]);
+    empty(w, "c:axPos", &[("val", "b")]);
+    empty(w, "c:crossAx", &[("val", cross_id)]);
+    end(w, "c:catAx");
+}
+
+/// A minimal but schema-complete value axis (`c:valAx`).
+fn write_val_ax(w: &mut Writer<Cursor<Vec<u8>>>, ax_id: &str, cross_id: &str) {
+    start(w, "c:valAx", &[]);
+    empty(w, "c:axId", &[("val", ax_id)]);
+    write_scaling(w);
+    empty(w, "c:delete", &[("val", "0")]);
+    empty(w, "c:axPos", &[("val", "l")]);
+    empty(w, "c:crossAx", &[("val", cross_id)]);
+    end(w, "c:valAx");
+}
+
+fn write_scaling(w: &mut Writer<Cursor<Vec<u8>>>) {
+    start(w, "c:scaling", &[]);
+    empty(w, "c:orientation", &[("val", "minMax")]);
+    end(w, "c:scaling");
 }
 
 /// Generate `docProps/core.xml` from the mirrored core properties object.

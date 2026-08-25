@@ -378,6 +378,7 @@ pub struct CropDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShapeDto {
+    #[serde(default)]
     pub shape_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

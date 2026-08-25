@@ -147,18 +147,13 @@ impl Package {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                    if e.name().as_ref() == b"Override" {
+                    if e.name().as_ref().as_bytes() == b"Override" {
                         let mut part_name = None;
                         let mut content_type = None;
                         for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"PartName" => {
-                                    part_name = Some(String::from_utf8_lossy(&a.value).to_string())
-                                }
-                                b"ContentType" => {
-                                    content_type =
-                                        Some(String::from_utf8_lossy(&a.value).to_string())
-                                }
+                            match a.key.as_ref().as_bytes() {
+                                b"PartName" => part_name = Some(a.value.to_string()),
+                                b"ContentType" => content_type = Some(a.value.to_string()),
                                 _ => {}
                             }
                         }
@@ -221,7 +216,7 @@ impl Package {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
-                    if e.name().as_ref() == b"Types" {
+                    if e.name().as_ref().as_bytes() == b"Types" {
                         inside_types = true;
                     }
                     writer
@@ -229,10 +224,10 @@ impl Package {
                         .map_err(AppError::Io)?;
                 }
                 Ok(Event::Empty(ref e)) => {
-                    if inside_types && e.name().as_ref() == b"Override" {
+                    if inside_types && e.name().as_ref().as_bytes() == b"Override" {
                         let skip = e.attributes().flatten().any(|a| {
-                            a.key.as_ref() == b"PartName"
-                                && a.value.as_ref() == part_name.as_bytes()
+                            a.key.as_ref().as_bytes() == b"PartName"
+                                && a.value.as_ref() == part_name
                         });
                         if skip {
                             continue;
@@ -243,7 +238,7 @@ impl Package {
                         .map_err(AppError::Io)?;
                 }
                 Ok(Event::End(ref e)) => {
-                    if e.name().as_ref() == b"Types" {
+                    if e.name().as_ref().as_bytes() == b"Types" {
                         inside_types = false;
                     }
                     writer
@@ -337,7 +332,7 @@ impl Package {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::End(ref e)) if e.name().as_ref() == b"Types" && !inserted => {
+                Ok(Event::End(ref e)) if e.name().as_ref().as_bytes() == b"Types" && !inserted => {
                     let mut override_elem = quick_xml::events::BytesStart::new("Override");
                     override_elem.push_attribute(("PartName", part_name));
                     override_elem.push_attribute(("ContentType", content_type));
@@ -424,20 +419,18 @@ pub(crate) fn parse_rels_xml(data: &[u8]) -> AppResult<HashMap<String, Relations
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                if e.name().as_ref() == b"Relationship" {
+                if e.name().as_ref().as_bytes() == b"Relationship" {
                     let mut id = String::new();
                     let mut target = String::new();
                     let mut target_mode = None;
                     let mut rel_type = String::new();
 
                     for a in e.attributes().flatten() {
-                        match a.key.as_ref() {
-                            b"Id" => id = String::from_utf8_lossy(&a.value).to_string(),
-                            b"Target" => target = String::from_utf8_lossy(&a.value).to_string(),
-                            b"TargetMode" => {
-                                target_mode = Some(String::from_utf8_lossy(&a.value).to_string())
-                            }
-                            b"Type" => rel_type = String::from_utf8_lossy(&a.value).to_string(),
+                        match a.key.as_ref().as_bytes() {
+                            b"Id" => id = a.value.to_string(),
+                            b"Target" => target = a.value.to_string(),
+                            b"TargetMode" => target_mode = Some(a.value.to_string()),
+                            b"Type" => rel_type = a.value.to_string(),
                             _ => {}
                         }
                     }
@@ -474,8 +467,8 @@ fn serialize_rels_xml(rels: &HashMap<String, Relationship>) -> AppResult<Vec<u8>
     writer
         .write_event(Event::Start(
             quick_xml::events::BytesStart::new("Relationships").with_attributes(vec![(
-                b"xmlns" as &[u8],
-                b"http://schemas.openxmlformats.org/package/2006/relationships" as &[u8],
+                "xmlns",
+                "http://schemas.openxmlformats.org/package/2006/relationships",
             )]),
         ))
         .map_err(AppError::Io)?;

@@ -22,37 +22,37 @@ impl Presentation {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                    b"p:sldId" => {
-                        let mut r_id = String::new();
-                        for attr in e.attributes() {
-                            if let Ok(a) = attr
-                                && a.key.as_ref() == b"r:id"
-                            {
-                                r_id = String::from_utf8_lossy(&a.value).to_string();
+                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                    match e.name().as_ref().as_bytes() {
+                        b"p:sldId" => {
+                            let mut r_id = String::new();
+                            for attr in e.attributes() {
+                                if let Ok(a) = attr
+                                    && a.key.as_ref().as_bytes() == b"r:id"
+                                {
+                                    r_id = a.value.to_string();
+                                }
+                            }
+                            if !r_id.is_empty() {
+                                slide_uris.push(r_id);
                             }
                         }
-                        if !r_id.is_empty() {
-                            slide_uris.push(r_id);
-                        }
-                    }
-                    b"p:sldSz" => {
-                        for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"cx" => {
-                                    slide_width =
-                                        String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
+                        b"p:sldSz" => {
+                            for a in e.attributes().flatten() {
+                                match a.key.as_ref().as_bytes() {
+                                    b"cx" => {
+                                        slide_width = a.value.parse().unwrap_or(0);
+                                    }
+                                    b"cy" => {
+                                        slide_height = a.value.parse().unwrap_or(0);
+                                    }
+                                    _ => {}
                                 }
-                                b"cy" => {
-                                    slide_height =
-                                        String::from_utf8_lossy(&a.value).parse().unwrap_or(0);
-                                }
-                                _ => {}
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(AppError::Xml(e)),
                 _ => {}

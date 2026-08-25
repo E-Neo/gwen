@@ -584,7 +584,7 @@ fn write_shape_effects(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
         }
         elem.push_attribute(("rotWithShape", "0"));
         writer.write_event(Event::Start(elem)).ok();
-        write_color_effect(shadow.color.as_ref(), shadow.alpha, writer);
+        write_color_effect(shadow.color.as_ref(), shadow.alpha, "000000", writer);
         writer.write_event(Event::End(BytesEnd::new(tag))).ok();
         let _ = is_outer;
     }
@@ -594,7 +594,7 @@ fn write_shape_effects(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
             elem.push_attribute(("rad", radius.to_string().as_str()));
         }
         writer.write_event(Event::Start(elem)).ok();
-        write_color_effect(glow.color.as_ref(), glow.alpha, writer);
+        write_color_effect(glow.color.as_ref(), glow.alpha, "FFFFFF", writer);
         writer.write_event(Event::End(BytesEnd::new("a:glow"))).ok();
     }
     if let Some(ref se) = shape.soft_edge {
@@ -632,35 +632,28 @@ fn write_shape_effects(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {
 }
 
 /// Write a color plus an optional `a:alpha` child for shadow/glow effects.
+/// `EG_ColorChoice` is required inside shadow/glow elements, so a missing
+/// color falls back to `fallback_rgb` instead of emitting an empty effect.
 fn write_color_effect(
     color: Option<&ColorFormatDto>,
     alpha: Option<i64>,
+    fallback_rgb: &str,
     writer: &mut Writer<Vec<u8>>,
 ) {
-    if let Some(c) = color {
-        let clr = if c.rgb.is_some() {
-            let mut e = BytesStart::new("a:srgbClr");
-            e.push_attribute(("val", c.rgb.as_deref().unwrap_or("")));
-            e
-        } else {
-            let mut e = BytesStart::new("a:schemeClr");
-            e.push_attribute(("val", c.theme_color.as_deref().unwrap_or("tx1")));
-            e
-        };
-        writer.write_event(Event::Start(clr)).ok();
-        if let Some(a) = alpha {
-            let mut al = BytesStart::new("a:alpha");
-            al.push_attribute(("val", (a * 1000).to_string().as_str()));
-            writer.write_event(Event::Empty(al)).ok();
-        }
-        writer
-            .write_event(Event::End(BytesEnd::new(if c.rgb.is_some() {
-                "a:srgbClr"
-            } else {
-                "a:schemeClr"
-            })))
-            .ok();
+    let (tag, val) = match color {
+        Some(c) if c.rgb.is_some() => ("a:srgbClr", c.rgb.as_deref().unwrap_or(fallback_rgb)),
+        Some(c) => ("a:schemeClr", c.theme_color.as_deref().unwrap_or("tx1")),
+        None => ("a:srgbClr", fallback_rgb),
+    };
+    let mut clr = BytesStart::new(tag);
+    clr.push_attribute(("val", val));
+    writer.write_event(Event::Start(clr)).ok();
+    if let Some(a) = alpha {
+        let mut al = BytesStart::new("a:alpha");
+        al.push_attribute(("val", (a * 1000).to_string().as_str()));
+        writer.write_event(Event::Empty(al)).ok();
     }
+    writer.write_event(Event::End(BytesEnd::new(tag))).ok();
 }
 
 fn write_shape_fill_outline(shape: &ShapeDto, writer: &mut Writer<Vec<u8>>) {

@@ -36,7 +36,7 @@ pub fn find_elem_range(
     for (i, event) in events.iter().enumerate().skip(start_from) {
         match event {
             Event::Start(e) => {
-                if start.is_none() && e.name().as_ref() == name {
+                if start.is_none() && e.name().as_ref().as_bytes() == name {
                     start = Some((i, depth));
                 }
                 depth += 1;
@@ -68,7 +68,7 @@ pub fn find_child_elem_range(
     while i < parent_end {
         match &events[i] {
             Event::Start(e) => {
-                if depth == 0 && e.name().as_ref() == child_name {
+                if depth == 0 && e.name().as_ref().as_bytes() == child_name {
                     return find_elem_range(events, child_name, i);
                 }
                 depth += 1;
@@ -76,7 +76,7 @@ pub fn find_child_elem_range(
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
             }
-            Event::Empty(e) if depth == 0 && e.name().as_ref() == child_name => {
+            Event::Empty(e) if depth == 0 && e.name().as_ref().as_bytes() == child_name => {
                 return Some((i, i));
             }
             _ => {}
@@ -132,7 +132,7 @@ pub fn parse_slide_background(xml_bytes: &[u8]) -> serde_json::Value {
     };
     let csld_start = match events
         .iter()
-        .position(|e| matches!(e, Event::Start(ev) if ev.name().as_ref() == b"p:cSld"))
+        .position(|e| matches!(e, Event::Start(ev) if ev.name().as_ref().as_bytes() == b"p:cSld"))
     {
         Some(i) => i,
         None => return serde_json::Value::Null,
@@ -144,7 +144,7 @@ pub fn parse_slide_background(xml_bytes: &[u8]) -> serde_json::Value {
         if let Some((fs, fe)) = find_elem_range(&events, b"a:solidFill", ps).filter(|r| r.0 <= pe) {
             let color = (fs..=fe)
                 .find(|&i| {
-                    matches!(&events[i], Event::Empty(e) | Event::Start(e) if e.name().as_ref() == b"a:srgbClr")
+                    matches!(&events[i], Event::Empty(e) | Event::Start(e) if e.name().as_ref().as_bytes() == b"a:srgbClr")
                 })
                 .and_then(|i| {
                     let (Event::Empty(e) | Event::Start(e)) = &events[i] else {
@@ -152,8 +152,8 @@ pub fn parse_slide_background(xml_bytes: &[u8]) -> serde_json::Value {
                     };
                     e.attributes()
                         .flatten()
-                        .find(|a| a.key.as_ref() == b"val")
-                        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+                        .find(|a| a.key.as_ref().as_bytes() == b"val")
+                        .map(|a| a.value.to_string())
                 });
             return json!({
                 "fill": {
