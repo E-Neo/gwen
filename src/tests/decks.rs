@@ -37,6 +37,7 @@ const REL_NOTES_SLIDE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
 const REL_THEME: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
 const REL_CHART: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+const REL_IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const REL_OFFICE_DOC: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
@@ -49,6 +50,7 @@ pub const DECKS: &[&str] = &[
     "table_chart",
     "notes_placeholder",
     "effects",
+    "master_picture",
 ];
 
 /// Path to a generated deck, materialized once per test process. Accepts the
@@ -94,24 +96,46 @@ fn parts(name: &str) -> Vec<(String, Vec<u8>)> {
         "table_chart" => (vec![table_chart_slide()], (9_144_000, 6_858_000), false),
         "notes_placeholder" => (vec![empty_slide()], (9_144_000, 6_858_000), true),
         "effects" => (vec![effects_slide()], (9_144_000, 6_858_000), false),
+        "master_picture" => (vec![empty_slide()], (9_144_000, 6_858_000), false),
         _ => panic!("unknown deck: {name}"),
     };
     let chart = matches!(name, "table_chart");
+    let png_media = matches!(name, "master_picture");
 
     push(
         &mut p,
         "[Content_Types].xml",
-        content_types(slide_xml.len(), notes, chart),
+        content_types(slide_xml.len(), notes, chart, png_media),
     );
     push(&mut p, "_rels/.rels", root_rels());
     push(&mut p, "docProps/core.xml", core_xml());
     push(&mut p, "ppt/theme/theme1.xml", theme_xml());
-    push(&mut p, "ppt/slideMasters/slideMaster1.xml", master_xml());
-    push(
-        &mut p,
-        "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-        master_rels_xml(),
-    );
+    if png_media {
+        push(
+            &mut p,
+            "ppt/slideMasters/slideMaster1.xml",
+            master_picture_xml(),
+        );
+        push(
+            &mut p,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_picture_rels_xml(),
+        );
+        // The picture lives in the master; the media part it references must
+        // exist in the package.
+        push(
+            &mut p,
+            "ppt/media/image1.png",
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00",
+        );
+    } else {
+        push(&mut p, "ppt/slideMasters/slideMaster1.xml", master_xml());
+        push(
+            &mut p,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels_xml(),
+        );
+    }
     push(&mut p, "ppt/slideLayouts/slideLayout1.xml", layout_xml());
     push(
         &mut p,
@@ -182,7 +206,7 @@ fn rels(rels: &[(&str, &str, &str)]) -> String {
     )
 }
 
-fn content_types(slides: usize, notes: bool, chart: bool) -> String {
+fn content_types(slides: usize, notes: bool, chart: bool, png: bool) -> String {
     let mut overrides = String::new();
     for n in 1..=slides {
         overrides.push_str(&format!(
@@ -199,8 +223,13 @@ fn content_types(slides: usize, notes: bool, chart: bool) -> String {
             "<Override PartName=\"/ppt/charts/chart1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>",
         );
     }
+    let png_default = if png {
+        r#"<Default Extension="png" ContentType="image/png"/>"#
+    } else {
+        ""
+    };
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="{CT}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>{overrides}</Types>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="{CT}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{png_default}<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>{overrides}</Types>"#
     )
 }
 
@@ -317,6 +346,22 @@ fn master_rels_xml() -> String {
     rels(&[
         ("rId1", REL_LAYOUT, "../slideLayouts/slideLayout1.xml"),
         ("rId2", REL_THEME, "../theme/theme1.xml"),
+    ])
+}
+
+/// A master whose shape tree contains a picture (`r:embed="rId3"` -> the image
+/// relationship). This is the round-trip regression the previous pipeline
+/// failed: pictures in masters/layouts need image relationships and an
+/// `r:embed` rewrite exactly like pictures in slides.
+fn master_picture_xml() -> String {
+    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Office Theme"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:pic><p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>"#.to_string()
+}
+
+fn master_picture_rels_xml() -> String {
+    rels(&[
+        ("rId1", REL_LAYOUT, "../slideLayouts/slideLayout1.xml"),
+        ("rId2", REL_THEME, "../theme/theme1.xml"),
+        ("rId3", REL_IMAGE, "../media/image1.png"),
     ])
 }
 

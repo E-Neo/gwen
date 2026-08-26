@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::dto::ShapeDto;
+use crate::dto::{ShapeDto, ShapeType};
 use crate::error::{AppError, AppResult};
 use crate::opc::{Package, Relationship};
 
@@ -84,18 +84,9 @@ pub fn compile_package(project: &Project<'_>) -> AppResult<Package> {
 
     let mut chart_counter = next_chart_number(&pkg);
 
-    for master in &masters {
-        compile_master(&mut pkg, master)?;
-    }
-    for master in &masters {
-        for layout in &master.layouts {
-            compile_layout(&mut pkg, layout)?;
-            add_rel(&mut pkg, &layout.uri, &master.uri, MASTER_REL);
-        }
-    }
-
     // Media extracted by the mirror (`src/media`) become `ppt/media/<name>`.
-    // Picture shapes may only reference files that exist here.
+    // Collected first so every shape-bearing part (master, layout, slide,
+    // notes) can verify its pictures reference existing files.
     let mut media_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(media_dir) = project.media_dir.filter(|d| d.is_dir()) {
         for path in walk_dir(media_dir)? {
@@ -103,6 +94,16 @@ pub fn compile_package(project: &Project<'_>) -> AppResult<Package> {
                 media_files.insert(name.to_string());
                 pkg.set_part(&format!("ppt/media/{name}"), std::fs::read(&path)?);
             }
+        }
+    }
+
+    for master in &masters {
+        compile_master(&mut pkg, master, &media_files)?;
+    }
+    for master in &masters {
+        for layout in &master.layouts {
+            compile_layout(&mut pkg, layout, &media_files)?;
+            add_rel(&mut pkg, &layout.uri, &master.uri, MASTER_REL);
         }
     }
 
@@ -372,8 +373,12 @@ fn assemble(head: &[u8], mid: &[u8], sp: &[u8], inner: &[u8], post: &[u8]) -> Ve
     out
 }
 
-fn compile_master(pkg: &mut Package, master: &DocMaster) -> AppResult<()> {
-    let shapes = as_shapes(&master.shapes)?;
+fn compile_master(
+    pkg: &mut Package,
+    master: &DocMaster,
+    media_files: &std::collections::HashSet<String>,
+) -> AppResult<()> {
+    let mut shapes = as_shapes(&master.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
     let head = MASTER_HEAD.as_bytes();
     let sp = DEFAULT_SP.as_bytes();
@@ -391,22 +396,24 @@ fn compile_master(pkg: &mut Package, master: &DocMaster) -> AppResult<()> {
     }
     let post =
         format!("</p:cSld>{CLR_MAP}<p:sldLayoutIdLst>{entries}</p:sldLayoutIdLst></p:sldMaster>");
-    pkg.set_part(
-        &master.uri,
-        assemble(head, b"", sp, &inner, post.as_bytes()),
-    );
+    let bytes = assemble(head, b"", sp, &inner, post.as_bytes());
+    let bytes = wire_picture_rels(pkg, &master.uri, &mut shapes, media_files, bytes)?;
+    pkg.set_part(&master.uri, bytes);
     Ok(())
 }
 
-fn compile_layout(pkg: &mut Package, layout: &DocLayout) -> AppResult<()> {
-    let shapes = as_shapes(&layout.shapes)?;
+fn compile_layout(
+    pkg: &mut Package,
+    layout: &DocLayout,
+    media_files: &std::collections::HashSet<String>,
+) -> AppResult<()> {
+    let mut shapes = as_shapes(&layout.shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
     let head = LAYOUT_HEAD.as_bytes();
     let post = b"</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>";
-    pkg.set_part(
-        &layout.uri,
-        assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post),
-    );
+    let bytes = assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post);
+    let bytes = wire_picture_rels(pkg, &layout.uri, &mut shapes, media_files, bytes)?;
+    pkg.set_part(&layout.uri, bytes);
     Ok(())
 }
 
@@ -419,21 +426,7 @@ fn compile_slide(
 ) -> AppResult<()> {
     let uri = &slide.uri;
 
-    // Pictures: ensure a rel exists for every image filename.
-    let mut image_rids: HashMap<String, String> = HashMap::new();
     let mut shapes = as_shapes(&slide.shapes)?;
-    collect_image_files(&mut shapes, &mut |shape_name, fname| {
-        if !media_files.contains(fname) {
-            return Err(AppError::InvalidValue(format!(
-                "picture shape `{shape_name}` references `src/media/{fname}`, which does not exist"
-            )));
-        }
-        if !image_rids.contains_key(fname) {
-            let rid = add_image_rel(pkg, uri, fname);
-            image_rids.insert(fname.to_string(), rid);
-        }
-        Ok(())
-    })?;
 
     // Charts: assign a part URI + rel for every chart shape, and point the
     // shape's `chart.r_id` at the real relationship id.
@@ -455,7 +448,7 @@ fn compile_slide(
     if let Some(notes_shapes) = &slide.notes {
         let notes_uri = format!("ppt/notesSlides/notesSlide{}.xml", pkg.get_next_notes_num());
         add_rel(pkg, uri, &notes_uri, NOTES_REL);
-        compile_notes(pkg, &notes_uri, uri, notes_shapes)?;
+        compile_notes(pkg, &notes_uri, uri, notes_shapes, media_files)?;
     }
 
     // Slide layout relationship.
@@ -477,16 +470,8 @@ fn compile_slide(
     let generated_bg = generate::slide_background_xml(&slide.background);
     let mid = generated_bg.as_deref().unwrap_or(b"");
 
-    let mut bytes = assemble(head, mid, sp, &inner, post);
-
-    // Rewrite picture `r:embed="<filename>"` to the assigned rel id.
-    for (fname, rid) in &image_rids {
-        let from = format!("r:embed=\"{fname}\"");
-        let to = format!("r:embed=\"{rid}\"");
-        if from != to {
-            bytes = replace_all(&bytes, from.as_bytes(), to.as_bytes());
-        }
-    }
+    let bytes = assemble(head, mid, sp, &inner, post);
+    let bytes = wire_picture_rels(pkg, uri, &mut shapes, media_files, bytes)?;
 
     pkg.set_part(uri, bytes);
     Ok(())
@@ -497,18 +482,18 @@ fn compile_notes(
     notes_uri: &str,
     slide_uri: &str,
     shapes: &[Value],
+    media_files: &std::collections::HashSet<String>,
 ) -> AppResult<()> {
     // A notes slide links back to its slide and to the shared notes master.
     add_rel(pkg, notes_uri, slide_uri, SLIDE_REL);
     add_rel(pkg, notes_uri, NOTES_MASTER_URI, NOTES_MASTER_REL);
-    let shapes = as_shapes(shapes)?;
+    let mut shapes = as_shapes(shapes)?;
     let inner = generate::sp_tree_body(&shapes).into_bytes();
     let head = NOTES_HEAD.as_bytes();
     let post = b"</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notesSlide>";
-    pkg.set_part(
-        notes_uri,
-        assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post),
-    );
+    let bytes = assemble(head, b"", DEFAULT_SP.as_bytes(), &inner, post);
+    let bytes = wire_picture_rels(pkg, notes_uri, &mut shapes, media_files, bytes)?;
+    pkg.set_part(notes_uri, bytes);
     Ok(())
 }
 
@@ -825,14 +810,56 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Add an image relationship for every picture in `part_uri` and rewrite the
+/// `r:embed="<filename>"` tokens the pic writer emits into the assigned
+/// relationship ids. Without this a picture in a master, layout or notes
+/// slide would carry a filename that no relationship resolves.
+fn wire_picture_rels(
+    pkg: &mut Package,
+    part_uri: &str,
+    shapes: &mut [ShapeDto],
+    media_files: &std::collections::HashSet<String>,
+    bytes: Vec<u8>,
+) -> AppResult<Vec<u8>> {
+    let mut rids: HashMap<String, String> = HashMap::new();
+    collect_image_files(shapes, &mut |shape_name, fname| {
+        if !media_files.contains(fname) {
+            return Err(AppError::InvalidValue(format!(
+                "picture shape `{shape_name}` in `{part_uri}` references `src/media/{fname}`, which does not exist"
+            )));
+        }
+        if !rids.contains_key(fname) {
+            let rid = add_image_rel(pkg, part_uri, fname);
+            rids.insert(fname.to_string(), rid);
+        }
+        Ok(())
+    })?;
+    let mut bytes = bytes;
+    for (fname, rid) in &rids {
+        let from = format!("r:embed=\"{fname}\"");
+        let to = format!("r:embed=\"{rid}\"");
+        if from != to {
+            bytes = replace_all(&bytes, from.as_bytes(), to.as_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 fn collect_image_files(
     shapes: &mut [ShapeDto],
     f: &mut dyn FnMut(&str, &str) -> AppResult<()>,
 ) -> AppResult<()> {
     for shape in shapes {
-        if let Some(img) = &shape.image {
+        if matches!(shape.shape_type, ShapeType::Picture) {
             let name = shape.name.as_deref().unwrap_or("");
-            f(name, img)?;
+            match &shape.image {
+                Some(img) => f(name, img)?,
+                None => {
+                    return Err(AppError::InvalidValue(format!(
+                        "picture shape `{name}` has no `image` attribute"
+                    )));
+                }
+            }
         }
         if let Some(children) = &mut shape.shapes {
             collect_image_files(children, f)?;

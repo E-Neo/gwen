@@ -180,6 +180,22 @@ fn effects_deck_rebuilds_valid() {
     assert!(slide.contains("a:reflection"), "reflection present");
 }
 
+/// The regression this whole pipeline existed to catch: a picture living in a
+/// *master* (not a slide) must get an image relationship and a rewritten
+/// `r:embed` on rebuild, or the package fails validation. `new` -> `build` on
+/// the `master_picture` deck must succeed and stay structurally sound.
+#[test]
+fn master_picture_deck_rebuilds_valid() {
+    let project = new_project(&fixture("master_picture.pptx"), "deck");
+    let out = build_project(&project);
+    assert_valid(&out);
+    let master = read_zip_entry(&out, "ppt/slideMasters/slideMaster1.xml");
+    assert!(
+        master.contains("r:embed=\"rId3\""),
+        "master picture embed rewritten to a real relationship id"
+    );
+}
+
 /// The effects deck's mirror must express gradients and effects as CSS.
 #[test]
 fn effects_mirror_uses_css_grammar() {
