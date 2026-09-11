@@ -8,7 +8,7 @@ use crate::content::Slide;
 use crate::error::Result;
 use crate::ooxml::package::Package;
 use crate::ooxml::rels;
-use crate::parts::{core, layout, master, notes, presentation, slide, theme};
+use crate::parts::{core, layout, master, notes, presentation, props, slide, theme};
 
 /// Build the whole package for a project rooted at `project`.
 pub fn build(project: &Path, config: &Config, slides: &[Slide]) -> Result<Package> {
@@ -39,9 +39,9 @@ pub fn build(project: &Path, config: &Config, slides: &[Slide]) -> Result<Packag
         master::build(&config.presentation.name, &layout_refs),
     );
 
-    // Presentation-level rels to the master and theme.
+    // Presentation-level rel to the master (rId1). Optional parts are added
+    // after the slides further down.
     let master_rid = pkg.relate(presentation::URI, rels::SLIDE_MASTER, master::URI);
-    pkg.relate(presentation::URI, rels::THEME, theme::URI);
 
     // Slides.
     let media_dir = project.join("src").join("media");
@@ -99,9 +99,25 @@ pub fn build(project: &Path, config: &Config, slides: &[Slide]) -> Result<Packag
         slide_refs.push((256 + i as u32, rid));
     }
 
+    // Optional presentation parts come after the slides, so the first slide is
+    // rId2 (right after the master) and theme precedes tableStyles — the
+    // ordering PowerPoint (and its validators) expect.
+    pkg.relate(presentation::URI, rels::THEME, theme::URI);
+    pkg.add_part(props::PRES_PROPS_URI, props::pres_props());
+    pkg.relate(presentation::URI, rels::PRES_PROPS, props::PRES_PROPS_URI);
+    pkg.add_part(props::VIEW_PROPS_URI, props::view_props());
+    pkg.relate(presentation::URI, rels::VIEW_PROPS, props::VIEW_PROPS_URI);
+    pkg.add_part(props::TABLE_STYLES_URI, props::table_styles());
+    pkg.relate(
+        presentation::URI,
+        rels::TABLE_STYLES,
+        props::TABLE_STYLES_URI,
+    );
+
     let notes_master_rid = if any_notes {
+        pkg.add_part(theme::NOTES_URI, theme::build(&config.theme));
         pkg.add_part(notes::MASTER_URI, notes::build_master());
-        pkg.relate(notes::MASTER_URI, rels::THEME, theme::URI);
+        pkg.relate(notes::MASTER_URI, rels::THEME, theme::NOTES_URI);
         Some(pkg.relate(presentation::URI, rels::NOTES_MASTER, notes::MASTER_URI))
     } else {
         None
@@ -118,10 +134,12 @@ pub fn build(project: &Path, config: &Config, slides: &[Slide]) -> Result<Packag
         ),
     );
     pkg.add_part(core::URI, core::build(&config.presentation.name));
+    pkg.add_part(props::APP_URI, props::app_props(slides.len()));
 
     // Package root rels.
     pkg.relate("", rels::OFFICE_DOCUMENT, presentation::URI);
     pkg.relate("", rels::CORE_PROPERTIES, core::URI);
+    pkg.relate("", rels::EXTENDED_PROPERTIES, props::APP_URI);
 
     Ok(pkg)
 }

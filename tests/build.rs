@@ -112,7 +112,24 @@ height = 5029200
 }
 
 fn build(dir: &Path) -> PathBuf {
-    gwen::build(dir).expect("build succeeds")
+    let out = gwen::build(dir).expect("build succeeds");
+    assert_ppt_rs_valid(&out);
+    out
+}
+
+/// Validate a generated deck with ppt-rs's repair utility, which is the same
+/// engine behind the `pptcli` binary. The tests are self-contained: no
+/// third-party command is run, everything is linked in as a dev-dependency.
+fn assert_ppt_rs_valid(out: &Path) {
+    let bytes = std::fs::read(out).unwrap();
+    let mut repair = ppt_rs::oxml::repair::PptxRepair::from_bytes(&bytes)
+        .expect("ppt-rs can open the generated deck");
+    let issues = repair.validate();
+    assert!(
+        issues.is_empty(),
+        "ppt-rs found issues in {}: {issues:?}",
+        out.display()
+    );
 }
 
 fn zip_entry(path: &Path, name: &str) -> Option<String> {
@@ -301,15 +318,86 @@ fn theme_has_the_required_scheme_shape() {
     let dir = sample_project("theme", &[("title", "---\nlayout: title\n---\n\n# A\n")]);
     let out = build(&dir);
     let theme = zip_entry(&out, "ppt/theme/theme1.xml").unwrap();
-    // Exactly three entries in each fmtScheme list (schema requirement):
-    // fillStyleLst = 1 solid + 2 gradients, bgFillStyleLst = 1 solid + 2
-    // gradients, lnStyleLst = 3 lines, effectStyleLst = 3 effects.
-    assert_eq!(theme.matches("<a:gradFill").count(), 4);
-    assert_eq!(theme.matches("<a:ln ").count(), 3);
-    assert_eq!(theme.matches("<a:effectStyle>").count(), 3);
-    assert_eq!(theme.matches("<a:solidFill>").count(), 5);
+    // Full Office theme: script fonts, object defaults and the extra color
+    // scheme list. PowerPoint's validators reject a trimmed-down theme.
+    assert!(theme.contains("<a:objectDefaults>"));
+    assert!(theme.contains("<a:extraClrSchemeLst/>"));
+    assert!(theme.contains("<a:font script=\"Jpan\""));
+    assert!(
+        theme.len() > 6000,
+        "theme must be full size ({} bytes)",
+        theme.len()
+    );
     // Font faces come from config and include the required ea/cs children.
     assert!(theme.contains("<a:latin typeface=\"Arial Black\"/>"));
     assert!(theme.contains("<a:ea typeface=\"\"/>"));
     assert!(theme.contains("<a:cs typeface=\"\"/>"));
+    // Exactly three effect styles (schema requirement).
+    assert_eq!(theme.matches("<a:effectStyle>").count(), 3);
+}
+
+#[test]
+fn presentation_support_parts_are_present() {
+    let dir = sample_project("support", &[("title", "---\nlayout: title\n---\n\n# A\n")]);
+    let out = build(&dir);
+    for part in [
+        "ppt/presProps.xml",
+        "ppt/viewProps.xml",
+        "ppt/tableStyles.xml",
+        "docProps/app.xml",
+    ] {
+        assert!(zip_has(&out, part), "{part} must exist");
+    }
+    let ct = zip_entry(&out, "[Content_Types].xml").unwrap();
+    assert!(ct.contains("PartName=\"/ppt/presProps.xml\""));
+    assert!(ct.contains("PartName=\"/ppt/viewProps.xml\""));
+    assert!(ct.contains("PartName=\"/ppt/tableStyles.xml\""));
+    assert!(ct.contains("PartName=\"/docProps/app.xml\""));
+    let root_rels = zip_entry(&out, "_rels/.rels").unwrap();
+    assert!(root_rels.contains("relationships/extended-properties"));
+}
+
+#[test]
+fn presentation_rels_follow_the_expected_order() {
+    let dir = sample_project(
+        "relorder",
+        &[
+            ("title", "---\nlayout: title\n---\n\n# A\n"),
+            ("content", "---\nlayout: content\n---\n\n# B\n"),
+        ],
+    );
+    let out = build(&dir);
+    let rels = zip_entry(&out, "ppt/_rels/presentation.xml.rels").unwrap();
+    // master first, then slides (first slide = rId2), then optional parts.
+    assert!(rels.contains("Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\""));
+    assert!(rels.contains("Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\""));
+    let theme = rels.find("relationships/theme").unwrap();
+    let table = rels.find("relationships/tableStyles").unwrap();
+    assert!(theme < table, "theme must appear before tableStyles");
+}
+
+/// A deck exercising every slide kind (title, content + background, picture,
+/// notes) passes ppt-rs's structural validation with no issues.
+#[test]
+fn ppt_rs_validation_passes() {
+    let dir = sample_project(
+        "ppt_rs",
+        &[
+            ("title", "---\nlayout: title\n---\n\n# Hello\n"),
+            (
+                "content",
+                "---\nlayout: content\nbackground: \"#112233\"\n---\n\n# Points\n\n- one\n- two\n",
+            ),
+            (
+                "pic",
+                "---\nlayout: picture\n---\n\n![logo](media/logo.png)\n",
+            ),
+            (
+                "talk",
+                "---\nlayout: content\n---\n\n# Talk\n\nbody\n\n## Notes\n\nremember\n",
+            ),
+        ],
+    );
+    let out = build(&dir);
+    assert_ppt_rs_valid(&out);
 }

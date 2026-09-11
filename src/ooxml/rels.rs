@@ -1,7 +1,8 @@
 //! OPC relationships: relationship types, relative-target resolution, and the
 //! `.rels` part serializer.
 
-use crate::ooxml::Elem;
+use quick_xml::Writer;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 
 pub const OFFICE_DOCUMENT: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
@@ -16,6 +17,14 @@ pub const NOTES_SLIDE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
 pub const NOTES_MASTER: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster";
+pub const PRES_PROPS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps";
+pub const VIEW_PROPS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps";
+pub const TABLE_STYLES: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles";
+pub const EXTENDED_PROPERTIES: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties";
 pub const CORE_PROPERTIES: &str =
     "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
 
@@ -90,24 +99,45 @@ pub fn resolve_target(source_uri: &str, target: &str) -> String {
     segments.join("/")
 }
 
-/// Serialize a relationship list into a `.rels` part.
+/// Serialize a relationship list into a `.rels` part. One `<Relationship>`
+/// element per line: PowerPoint and some validators (e.g. ppt-rs's repair
+/// utility) read `.rels` line by line, so a single-line document would only
+/// ever surface its first relationship.
 pub fn rels_xml(rels: &[Relationship]) -> Vec<u8> {
-    let root = Elem::new("Relationships").attr(
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Decl(BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            Some("yes"),
+        )))
+        .ok();
+    writer.write_event(Event::Text(BytesText::new("\n"))).ok();
+
+    let mut root = BytesStart::new("Relationships");
+    root.push_attribute((
         "xmlns",
         "http://schemas.openxmlformats.org/package/2006/relationships",
-    );
-    let mut root = root;
+    ));
+    writer.write_event(Event::Start(root)).ok();
+    writer.write_event(Event::Text(BytesText::new("\n"))).ok();
+
     for rel in rels {
-        let mut elem = Elem::new("Relationship")
-            .attr("Id", rel.id.clone())
-            .attr("Type", rel.rel_type.clone())
-            .attr("Target", rel.target.clone());
+        let mut elem = BytesStart::new("Relationship");
+        elem.push_attribute(("Id", rel.id.as_str()));
+        elem.push_attribute(("Type", rel.rel_type.as_str()));
+        elem.push_attribute(("Target", rel.target.as_str()));
         if rel.external {
-            elem = elem.attr("TargetMode", "External");
+            elem.push_attribute(("TargetMode", "External"));
         }
-        root = root.child(elem);
+        writer.write_event(Event::Empty(elem)).ok();
+        writer.write_event(Event::Text(BytesText::new("\n"))).ok();
     }
-    root.to_xml()
+
+    writer
+        .write_event(Event::End(BytesEnd::new("Relationships")))
+        .ok();
+    writer.into_inner()
 }
 
 #[cfg(test)]

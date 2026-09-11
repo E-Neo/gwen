@@ -13,9 +13,13 @@ deck/
 ```
 
 Run `gwen new <deck>` to scaffold one, then `gwen build <deck>`. The deck is
-written to `<deck>/target/<name>.pptx`. The package is structurally validated
-before it is written; on any violation nothing is written and the problems are
-reported.
+written to `<deck>/target/<name>.pptx`. The package is validated before it is
+written (missing parts, dangling relationships, content-type gaps, and
+root/content-type mismatches all fail the build); on any violation nothing is
+written and the problems are reported. The test suite validates every generated
+deck with the `ppt-rs` repair utility (`PptxRepair::validate`), which is the
+same engine behind `pptcli validate`, so `<deck>/target/<name>.pptx` is
+expected to pass it with no issues.
 
 ## `SUMMARY.md`
 

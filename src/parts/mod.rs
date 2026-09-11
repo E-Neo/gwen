@@ -6,6 +6,7 @@ pub mod layout;
 pub mod master;
 pub mod notes;
 pub mod presentation;
+pub mod props;
 pub mod slide;
 pub mod theme;
 

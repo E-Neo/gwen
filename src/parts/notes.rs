@@ -48,7 +48,17 @@ pub fn build_master() -> Vec<u8> {
             "xmlns:p",
             "http://schemas.openxmlformats.org/presentationml/2006/main",
         )
-        .child(Elem::new("p:cSld").child(sp_tree(vec![sld_img, body])))
+        .child(
+            Elem::new("p:cSld")
+                .child(
+                    Elem::new("p:bg").child(
+                        Elem::new("p:bgRef")
+                            .attr("idx", "1001")
+                            .child(Elem::new("a:schemeClr").attr("val", "bg1")),
+                    ),
+                )
+                .child(sp_tree(vec![sld_img, body])),
+        )
         .child(
             Elem::new("a:clrMap")
                 .attr("bg1", "lt1")
