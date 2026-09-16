@@ -1,7 +1,7 @@
 # The gwen project format
 
-gwen turns a Markdown project into a clean PowerPoint deck. The project is the
-single source of truth; `build` never reads the original `.pptx`.
+gwen turns a Markdown project into a PowerPoint deck. The project is the single
+source of truth; `build` never reads the original `.pptx`.
 
 ```
 deck/
@@ -13,13 +13,10 @@ deck/
 ```
 
 Run `gwen new <deck>` to scaffold one, then `gwen build <deck>`. The deck is
-written to `<deck>/target/<name>.pptx`. The package is validated before it is
-written (missing parts, dangling relationships, content-type gaps, and
-root/content-type mismatches all fail the build); on any violation nothing is
-written and the problems are reported. The test suite validates every generated
-deck with the `ppt-rs` repair utility (`PptxRepair::validate`), which is the
-same engine behind `pptcli validate`, so `<deck>/target/<name>.pptx` is
-expected to pass it with no issues.
+written to `<deck>/target/<name>.pptx`. gwen translates the project into a
+pptxgenjs spec and renders it with the real `pptxgenjs` bundle running on an
+embedded QuickJS runtime (rquickjs); the parts pptxgenjs produces are packaged
+into the `.pptx` container by gwen itself. A `node` runtime is not required.
 
 ## `SUMMARY.md`
 
