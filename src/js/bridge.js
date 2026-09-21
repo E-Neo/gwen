@@ -1,9 +1,11 @@
 // gwen -> pptxgenjs bridge. Rendered inside the embedded QuickJS runtime by
-// src/jsbridge.rs. `gwenRender(specJson)` builds a deck with pptxgenjs and
-// lets `write()` register every part on its internal JSZip object. JSZip's
-// async generation is unreliable under QuickJS, so instead of using its output
-// we intercept `JSZip.prototype.file`/`folder` and hand the captured part list
-// back to the host, which packages it into a zip itself.
+// src/jsbridge.rs. `gwenRender(specJson)` builds a deck with pptxgenjs using
+// only its public API (defineLayout/defineSlideMaster/addSection/addSlide/
+// addText/addShape/addImage/addNotes/write) and lets `write()` register every
+// part on its internal JSZip object. JSZip's async generation is unreliable
+// under QuickJS, so instead of using its output we intercept
+// `JSZip.prototype.file`/`folder` and hand the captured part list back to the
+// host, which packages it into a zip itself.
 
 (function () {
   "use strict";
@@ -37,53 +39,118 @@
     };
   })();
 
+  // Drop the spec-only keys so the object is a plain pptxgenjs options map.
+  function optOf(sh) {
+    var out = {};
+    for (var k in sh) {
+      if (sh.hasOwnProperty(k)) {
+        var v = sh[k];
+        if (v === null || v === undefined) {
+          continue;
+        }
+        switch (k) {
+          case "kind":
+          case "runs":
+          case "type":
+            continue;
+        }
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+
+  function renderSlide(p, s, sectionTitle) {
+    var opts = {};
+    if (s.master) {
+      opts.masterName = s.master;
+    }
+    if (sectionTitle) {
+      opts.sectionTitle = sectionTitle;
+    }
+    var slide = p.addSlide(opts);
+    if (s.background) {
+      slide.background = s.background;
+    }
+    if (s.notes) {
+      slide.addNotes(s.notes);
+    }
+    for (var hi = 0; hi < s.shapes.length; hi++) {
+      var sh = s.shapes[hi];
+      if (sh.kind === "text") {
+        // pptxgenjs's text model: addText takes a flat run list; paragraph
+        // boundaries are `breakLine` run options and soft breaks are
+        // `softBreakBefore` (pptxgenjs renders both, not us).
+        var runs = [];
+        for (var ri = 0; ri < sh.runs.length; ri++) {
+          var r = sh.runs[ri];
+          var ro = {};
+          for (var rk in r) {
+            if (rk === "text") {
+              continue;
+            }
+            if (r[rk] === null || r[rk] === undefined || r[rk] === false) {
+              continue;
+            }
+            ro[rk] = r[rk];
+          }
+          runs.push({ text: r.text, options: ro });
+        }
+        slide.addText(runs, optOf(sh));
+      } else if (sh.kind === "shape") {
+        slide.addShape(sh.type, optOf(sh));
+      } else if (sh.kind === "image") {
+        slide.addImage(optOf(sh));
+      }
+    }
+  }
+
   function gwenRender(specJson) {
     var spec = JSON.parse(specJson);
     var p = new PptxGenJS();
     p.defineLayout({ name: "GWEN", width: spec.width, height: spec.height });
     p.layout = "GWEN";
+    p.theme = { headFontFace: spec.majorFont, bodyFontFace: spec.minorFont };
 
-    for (var si = 0; si < spec.slides.length; si++) {
-      var s = spec.slides[si];
-      var slide = p.addSlide();
-      if (s.background) {
-        slide.background = { color: s.background };
+    for (var mi = 0; mi < spec.masters.length; mi++) {
+      var m = spec.masters[mi];
+      var def = { title: m.name };
+      if (m.background) {
+        def.background = m.background;
       }
-      for (var hi = 0; hi < s.shapes.length; hi++) {
-        var sh = s.shapes[hi];
-        if (sh.kind === "shape") {
-          var so = { x: sh.x, y: sh.y, w: sh.w, h: sh.h };
-          if (sh.fill) so.fill = { color: sh.fill };
-          if (sh.line) so.line = { color: sh.line.color, width: sh.line.width };
-          slide.addShape(sh.preset, so);
-        } else if (sh.kind === "text") {
-          var paras = [];
-          for (var pi = 0; pi < sh.paragraphs.length; pi++) {
-            var para = sh.paragraphs[pi];
-            var po = { breakLine: false };
-            if (para.bullet) po.bullet = { code: "2022" };
-            if (para.level > 0) po.indentLevel = para.level;
-            paras.push({ text: para.text, options: po });
+      if (m.margin) {
+        def.margin = m.margin;
+      }
+      def.objects = [];
+      for (var oi = 0; oi < m.objects.length; oi++) {
+        var o = m.objects[oi];
+        var obj = {};
+        var combined = { x: o.x, y: o.y, w: o.w, h: o.h };
+        for (var k in o.options) {
+          if (o.options.hasOwnProperty(k)) {
+            combined[k] = o.options[k];
           }
-          var to = { x: sh.x, y: sh.y, w: sh.w, h: sh.h, isTextBox: true };
-          if (sh.fontSize) to.fontSize = sh.fontSize;
-          if (sh.color) to.color = sh.color;
-          if (sh.bold) to.bold = sh.bold;
-          if (sh.italic) to.italic = sh.italic;
-          if (sh.fontFace) to.fontFace = sh.fontFace;
-          if (sh.align) to.align = sh.align;
-          if (sh.anchor) to.valign = sh.anchor;
-          to.wrap = sh.wrap !== false;
-          if (sh.fill) to.fill = { color: sh.fill };
-          slide.addText(paras, to);
-        } else if (sh.kind === "picture") {
-          slide.addImage({
-            x: sh.x, y: sh.y, w: sh.w, h: sh.h,
-            data: sh.dataUri, sizing: { type: "contain" },
-          });
         }
+        if (o.data) {
+          combined.data = o.data;
+        }
+        if (o.type === "text" || o.type === "placeholder") {
+          // defineSlideMaster text/placeholder objects are `{ text, options }`.
+          obj[o.type] = { text: o.text || "", options: combined };
+        } else {
+          obj[o.type] = combined;
+        }
+        def.objects.push(obj);
       }
-      if (s.notes) { slide.addNotes(s.notes); }
+      p.defineSlideMaster(def);
+    }
+
+    for (var si = 0; si < spec.sections.length; si++) {
+      var sec = spec.sections[si];
+      p.addSection({ title: sec.title });
+      for (var li = 0; li < sec.slides.length; li++) {
+        renderSlide(p, sec.slides[li], sec.title);
+      }
     }
 
     // Let write() register every part on its JSZip instance (which we

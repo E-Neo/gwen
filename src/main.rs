@@ -1,4 +1,4 @@
-//! The `gwen` command line: `new` scaffolds a project, `build` compiles it.
+//! The `gwen` command line: `new` scaffolds a TOML project, `build` compiles it.
 
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use gwen::error::Result;
 #[command(
     name = "gwen",
     version,
-    about = "Generate clean PowerPoint decks from Markdown",
+    about = "Generate PowerPoint decks from TOML (drives pptxgenjs)",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -26,7 +26,7 @@ enum Commands {
         /// Project directory to create.
         project: String,
     },
-    /// Build `target/<name>.pptx` from a project.
+    /// Build `target/<title>.pptx` from a project.
     Build {
         /// Project directory (defaults to the current directory).
         #[arg(default_value = ".")]
@@ -46,94 +46,119 @@ fn main() -> miette::Result<()> {
     }
 }
 
-const DEFAULT_CONFIG: &str = r##"[presentation]
-name = "deck"
-slide_width = 12192000
-slide_height = 6858000
-default_layout = "title"
+const DEFAULT_MAIN: &str = r##"[presentation]
+title = "deck"
+author = ""
+company = ""
+subject = ""
+
+[layout]
+name = "GWEN"
+width = "13.333in"
+height = "7.5in"
 
 [theme]
-major_font = "Calibri"
-minor_font = "Calibri"
+major_font = "Arial Black"
+minor_font = "Arial"
 
-[[layouts.title.elements]]
-kind = "slot"
-slot = "title"
-type = "text"
-left = 914400
-top = 2743200
-width = 10363200
-height = 1371600
-align = "center"
-anchor = "middle"
-text_size = 40
-color = "#1D1D1A"
+# Slide index: each section lists its slide files in order.
+# [[sections]]
+# title = "Intro"
+# slides = ["slides/intro.toml"]
 
-[[layouts.title.elements]]
-kind = "slot"
-slot = "subtitle"
-type = "text"
-left = 914400
-top = 4200000
-width = 10363200
-height = 685800
-align = "center"
-anchor = "top"
-text_size = 20
-color = "#595959"
+# Built-in defaults shared by every slide (shape keys win over these).
+# [defaults.text]
+# font_face = "Arial"
+# font_size = 18
+# color = "262626"
+# [defaults.shape]
+# fill = { color = "C7000A" }
+# [defaults.image]
+# sizing = { type = "contain" }
 
-[[layouts.content.elements]]
-kind = "slot"
-slot = "title"
-type = "text"
-left = 914400
-top = 685800
-width = 10363200
-height = 914400
-align = "left"
-anchor = "middle"
-text_size = 32
-color = "#1D1D1A"
-bold = true
-
-[[layouts.content.elements]]
-kind = "slot"
-slot = "body"
-type = "text"
-left = 914400
-top = 1828800
-width = 10363200
-height = 4114800
-align = "left"
-anchor = "top"
-text_size = 20
-color = "#262626"
+# Named styles; a shape referencing `style = "muted"` merges these.
+# [styles.muted]
+# color = "808080"
+# italic = true
 "##;
 
-const DEFAULT_SUMMARY: &str =
-    "# Summary\n\n- [Title](slides/title.md)\n- [Content](slides/content.md)\n";
+const DEFAULT_MASTER: &str = r##"# masters/title_base.toml — the master name is the file stem.
 
-const DEFAULT_TITLE: &str = "---\nlayout: title\n---\n\n# My Deck\n\n## A gwen presentation\n";
+background = { color = "FFFFFF" }
+margin = 0.5
 
-const DEFAULT_CONTENT: &str =
-    "---\nlayout: content\n---\n\n# First slide\n\n- point one\n- point two\n";
+[[objects]]
+type = "rect"
+x = "0in"
+y = "0in"
+w = "13.333in"
+h = "1.167in"
+fill = { color = "C7000A" }
+line = { color = "C7000A", width = 0 }
+
+[[objects]]
+type = "text"
+x = "0.8in"
+y = "0.25in"
+w = "11.7in"
+h = "0.667in"
+text = "Acme Inc."
+font_size = 14
+color = "FFFFFF"
+bold = true
+"##;
+
+const DEFAULT_TITLE: &str = r##"# slides/title.toml
+
+master = "title_base"
+
+[[shapes]]
+type = "text"
+x = "1in"
+y = "2.6in"
+w = "11.3in"
+h = "1in"
+text = "*Welcome to* **gwen**"
+align = "center"
+valign = "middle"
+font_size = 44
+"##;
+
+const DEFAULT_INTRO: &str = r##"# slides/intro.toml
+
+master = "title_base"
+
+[[shapes]]
+type = "text"
+x = "0.8in"
+y = "1.5in"
+w = "11.7in"
+h = "5in"
+text = """**gwen** builds .pptx from TOML.
+
+It drives the real pptxgenjs under QuickJS, so everything is
+[standard](https://gitbrent.github.io/PptxGenJS/) PowerPoint.
+"""
+font_size = 24
+"##;
 
 fn new_project(project: &str) -> Result<()> {
     let root = Path::new(project);
     if root.exists() {
         return Err(miette::miette!("`{project}` already exists"));
     }
-    let src = root.join("src");
-    create_dir(&src.join("slides"))?;
-    create_dir(&src.join("media"))?;
-    write_file(&root.join("config.toml"), DEFAULT_CONFIG)?;
-    write_file(&src.join("SUMMARY.md"), DEFAULT_SUMMARY)?;
-    write_file(&src.join("slides").join("title.md"), DEFAULT_TITLE)?;
-    write_file(&src.join("slides").join("content.md"), DEFAULT_CONTENT)?;
+    create_dir(&root.join("slides"))?;
+    create_dir(&root.join("masters"))?;
+    create_dir(&root.join("media"))?;
+    write_file(&root.join("main.toml"), DEFAULT_MAIN)?;
+    write_file(
+        &root.join("masters").join("title_base.toml"),
+        DEFAULT_MASTER,
+    )?;
+    write_file(&root.join("slides").join("title.toml"), DEFAULT_TITLE)?;
+    write_file(&root.join("slides").join("intro.toml"), DEFAULT_INTRO)?;
     eprintln!("created project `{project}`");
-    eprintln!(
-        "  edit {project}/src/SUMMARY.md and src/slides/*.md, then run `gwen build {project}`"
-    );
+    eprintln!("  edit {project}/main.toml and slides/*.toml, then run `gwen build {project}`");
     Ok(())
 }
 

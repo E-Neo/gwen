@@ -58,6 +58,12 @@ globalThis.__gwenError = null;
     }
   };
 })();
+
+// pptxgenjs gives every section a random UUID; make it deterministic too so
+// building the same deck twice yields identical bytes.
+Math.random = function () {
+  return 0.5;
+};
 "#;
 
 /// One part captured from pptxgenjs's JSZip object.
@@ -186,7 +192,7 @@ mod tests {
 
     #[test]
     fn empty_deck_renders_a_zip() {
-        let spec = r#"{"width":10,"height":7.5,"slides":[]}"#;
+        let spec = r#"{"width":10,"height":7.5,"majorFont":"Calibri","minorFont":"Calibri","masters":[],"sections":[]}"#;
         let bytes = render(spec).unwrap();
         assert_eq!(&bytes[0..2], b"PK", "output must be a zip");
         assert!(bytes.len() > 100, "deck is unexpectedly tiny");

@@ -1,9 +1,13 @@
-//! End-to-end smoke tests: scaffold a project, build it, and verify the output
-//! is a real `.pptx` package. Content mapping is covered by unit tests on
-//! `render::spec`; here we only assert the packaged artifact is well-formed.
+//! End-to-end smoke tests: scaffold a TOML project, build it, and verify the
+//! output is a real `.pptx` package. Content mapping is covered by unit tests
+//! on `render::spec`; here we only assert the packaged artifact is well-formed
+//! and that `gwen new` produces a buildable project.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use base64::Engine;
 
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -23,74 +27,116 @@ fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-/// A minimal project: two slides, no media.
+/// A 1x1 PNG, decoded at runtime so the repo keeps no binary fixtures.
+fn pixel_png() -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        .unwrap()
+}
+
+/// A minimal TOML project: one master, two slides, one image.
 fn sample_project(name: &str) -> PathBuf {
     let dir = tmp(name);
     write(
-        &dir.join("config.toml"),
+        &dir.join("main.toml"),
         r##"[presentation]
-name = "deck"
-slide_width = 12192000
-slide_height = 6858000
-default_layout = "title"
+title = "deck"
+
+[layout]
+width = "13.333in"
+height = "7.5in"
 
 [theme]
-major_font = "Calibri"
-minor_font = "Calibri"
+major_font = "Arial"
+minor_font = "Arial"
 
-[[layouts.title.elements]]
-kind = "slot"
-slot = "title"
-type = "text"
-left = 914400
-top = 2743200
-width = 10363200
-height = 1371600
-align = "center"
-anchor = "middle"
-text_size = 40
-color = "#1D1D1A"
+[defaults.text]
+font_face = "Arial"
+color = "262626"
 
-[[layouts.content.elements]]
-kind = "slot"
-slot = "title"
-type = "text"
-left = 914400
-top = 685800
-width = 10363200
-height = 914400
-align = "left"
-anchor = "middle"
-text_size = 32
-color = "#1D1D1A"
+[styles.muted]
+color = "808080"
+italic = true
 
-[[layouts.content.elements]]
-kind = "slot"
-slot = "body"
-type = "text"
-left = 914400
-top = 1828800
-width = 10363200
-height = 4114800
-align = "left"
-anchor = "top"
-text_size = 20
-color = "#262626"
+[[sections]]
+title = "Intro"
+slides = ["title.toml", "content.toml"]
 "##,
     );
     write(
-        &dir.join("src").join("SUMMARY.md"),
-        "# Summary\n\n- [Title](slides/title.md)\n- [Content](slides/content.md)\n",
+        &dir.join("masters").join("brand.toml"),
+        r##"background = { color = "FFFFFF" }
+
+[[objects]]
+type = "rect"
+x = 0
+y = 0
+w = "13.333in"
+h = "1.16in"
+fill = { color = "C7000A" }
+
+[[objects]]
+type = "text"
+x = "0.8in"
+y = "0.25in"
+w = "11.7in"
+h = "0.66in"
+text = "Acme"
+bold = true
+"##,
     );
     write(
-        &dir.join("src").join("slides").join("title.md"),
-        "---\nlayout: title\n---\n\n# My Deck\n\n## A gwen presentation\n",
+        &dir.join("slides").join("title.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "text"
+x = "1in"
+y = "2.5in"
+w = "11.3in"
+h = "1in"
+text = "*Welcome* to **gwen**"
+align = "center"
+font_size = 44
+"##,
     );
     write(
-        &dir.join("src").join("slides").join("content.md"),
-        "---\nlayout: content\nbackground: \"#112233\"\n---\n\n# First slide\n\n- point one\n- point two\n\n## Notes\n\nremember this\n",
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+background = "112233"
+
+[[shapes]]
+type = "text"
+x = "0.8in"
+y = "1.5in"
+w = "7in"
+h = "4in"
+text = "line one\n\nline two"
+style = "muted"
+font_size = 20
+
+[[shapes]]
+type = "rect"
+x = "8.5in"
+y = "2in"
+w = "3in"
+h = "1in"
+fill = { color = "C7000A" }
+line = { color = "000000", width = 1 }
+
+[[shapes]]
+type = "image"
+x = "0.8in"
+y = "5.5in"
+w = "1in"
+h = "1in"
+src = "media/pixel.png"
+
+notes = "remember && escape <!--"
+"##,
     );
-    std::fs::create_dir_all(dir.join("src").join("media")).unwrap();
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    std::fs::write(dir.join("media").join("pixel.png"), pixel_png()).unwrap();
     dir
 }
 
@@ -107,7 +153,6 @@ fn build_produces_a_pptx_package() {
         b"PK\x03\x04",
         "starts with a zip local header"
     );
-    // A zip ends with its EOCD record (22 bytes, signature first).
     assert_eq!(
         &bytes[bytes.len() - 22..bytes.len() - 18],
         b"PK\x05\x06",
@@ -121,4 +166,40 @@ fn build_is_deterministic() {
     let first = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
     let second = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
     assert_eq!(first, second, "building twice yields identical bytes");
+}
+
+#[test]
+fn unknown_master_is_reported() {
+    let dir = sample_project("badmaster");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"nope\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("unknown master `nope`"),
+        "expected a clear error, got: {err:?}"
+    );
+}
+
+#[test]
+fn gwen_new_scaffolds_a_buildable_project() {
+    let dir = tmp("scaffold");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(dir.as_os_str())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("main.toml").is_file());
+    assert!(dir.join("slides").join("title.toml").is_file());
+
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+    assert_eq!(&bytes[0..2], b"PK");
 }
