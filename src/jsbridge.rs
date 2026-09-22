@@ -59,11 +59,18 @@ globalThis.__gwenError = null;
   };
 })();
 
-// pptxgenjs gives every section a random UUID; make it deterministic too so
-// building the same deck twice yields identical bytes.
-Math.random = function () {
-  return 0.5;
-};
+// pptxgenjs gives every section a random UUID. A frozen `Math.random` made
+// those reproducible but identical across sections (duplicate `<p14:section
+// id>`), which breaks PowerPoint's slide sorter for decks with more than one
+// section. Use a deterministic LCG instead: same seed per build (byte-identical
+// output) but a distinct value on every call (unique section ids).
+(function () {
+  var state = 0x9e3779b9;
+  Math.random = function () {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+})();
 "#;
 
 /// One part captured from pptxgenjs's JSZip object.

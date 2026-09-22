@@ -8,6 +8,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::Engine;
+use flate2::read::DeflateDecoder;
+use std::io::Read;
 
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -143,6 +145,115 @@ src = "media/pixel.png"
     std::fs::create_dir_all(dir.join("media")).unwrap();
     std::fs::write(dir.join("media").join("pixel.png"), pixel_png()).unwrap();
     dir
+}
+
+/// Extract one member from a zip produced by `gwen::zip`, returning its
+/// uncompressed bytes.
+fn zip_member(bytes: &[u8], want: &str) -> Option<Vec<u8>> {
+    let eocd_at = bytes.windows(4).rposition(|w| w == b"PK\x05\x06")?;
+    let cd_offset = u32::from_le_bytes(bytes[eocd_at + 16..eocd_at + 20].try_into().ok()?) as usize;
+    let mut pos = cd_offset;
+    loop {
+        if pos + 46 > bytes.len() || &bytes[pos..pos + 4] != b"PK\x01\x02" {
+            return None;
+        }
+        let name_len = u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().ok()?) as usize;
+        let extra_len = u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().ok()?) as usize;
+        let comment_len = u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().ok()?) as usize;
+        let local_offset = u32::from_le_bytes(bytes[pos + 42..pos + 46].try_into().ok()?) as usize;
+        let name = std::str::from_utf8(&bytes[pos + 46..pos + 46 + name_len])
+            .ok()?
+            .to_string();
+        if name == want {
+            let lh_name = u16::from_le_bytes(
+                bytes[local_offset + 26..local_offset + 28]
+                    .try_into()
+                    .ok()?,
+            ) as usize;
+            let lh_extra = u16::from_le_bytes(
+                bytes[local_offset + 28..local_offset + 30]
+                    .try_into()
+                    .ok()?,
+            ) as usize;
+            let comp_size = u32::from_le_bytes(
+                bytes[local_offset + 18..local_offset + 22]
+                    .try_into()
+                    .ok()?,
+            ) as usize;
+            let data = &bytes[local_offset + 30 + lh_name + lh_extra
+                ..local_offset + 30 + lh_name + lh_extra + comp_size];
+            let mut out = Vec::new();
+            DeflateDecoder::new(data).read_to_end(&mut out).ok()?;
+            return Some(out);
+        }
+        pos += 46 + name_len + extra_len + comment_len;
+    }
+}
+
+/// Parse `p14:section` blocks out of `presentation.xml`.
+fn sections(xml: &str) -> Vec<(String, String, usize)> {
+    fn between(s: &str, open: &str, close: char) -> Option<String> {
+        let i = s.find(open)? + open.len();
+        let rest = &s[i..];
+        let end = rest.find(close)?;
+        Some(rest[..end].to_string())
+    }
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = xml[pos..].find("<p14:section ") {
+        let start = pos + rel;
+        let Some(gap) = xml[start..].find('>') else {
+            break;
+        };
+        let head_end = start + gap;
+        let head = &xml[start + "<p14:section ".len()..head_end];
+        let Some(gap2) = xml[start..].find("</p14:section>") else {
+            break;
+        };
+        let end = start + gap2;
+        out.push((
+            between(head, "name=\"", '"').unwrap_or_default(),
+            between(head, "id=\"{", '}').unwrap_or_default(),
+            xml[start..end].matches("<p14:sldId ").count(),
+        ));
+        pos = end + "</p14:section>".len();
+    }
+    out
+}
+
+#[test]
+fn multiple_sections_have_unique_ids() {
+    let dir = sample_project("multisection");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = main.replace(
+        "[[sections]]\ntitle = \"Intro\"\nslides = [\"title.toml\", \"content.toml\"]\n",
+        "[[sections]]\ntitle = \"Cover\"\nslides = [\"title.toml\"]\n\n[[sections]]\ntitle = \"Content\"\nslides = []\n\n[[sections]]\ntitle = \"End\"\nslides = [\"content.toml\"]\n",
+    );
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+
+    let out = gwen::build(&dir).unwrap();
+    let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/presentation.xml")
+        .expect("presentation.xml in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    let sections = sections(&xml);
+
+    assert_eq!(
+        sections
+            .iter()
+            .map(|(n, _, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Cover", "Content", "End"],
+        "section names/order from multipart presentation.xml"
+    );
+    let ids: Vec<&str> = sections.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids.len(), 3, "three section ids");
+    let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+    assert_eq!(unique.len(), 3, "section ids must be unique, got: {ids:?}");
+    assert_eq!(
+        sections.iter().map(|(_, _, n)| *n).collect::<Vec<_>>(),
+        vec![1, 0, 1],
+        "Cover and End each hold one slide, Content none"
+    );
 }
 
 #[test]
