@@ -41,8 +41,6 @@ fn sample_project(name: &str) -> PathBuf {
         &dir.join("main.toml"),
         r##"[presentation]
 title = "deck"
-
-[layout]
 width = "13.333in"
 height = "7.5in"
 
@@ -66,8 +64,9 @@ slides = ["title.toml", "content.toml"]
     write(
         &dir.join("masters").join("brand.toml"),
         r##"background = { color = "FFFFFF" }
+slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in", font_size = 12 }
 
-[[objects]]
+[[shapes]]
 type = "rect"
 x = 0
 y = 0
@@ -75,12 +74,24 @@ w = "13.333in"
 h = "1.16in"
 fill = { color = "C7000A" }
 
-[[objects]]
-type = "text"
+[[shapes]]
+type = "placeholder"
+ph_type = "title"
+name = "Title"
 x = "0.8in"
 y = "0.25in"
 w = "11.7in"
 h = "0.66in"
+font_size = 26
+color = "FFFFFF"
+bold = true
+
+[[shapes]]
+type = "text"
+x = "0.8in"
+y = "1.2in"
+w = "3in"
+h = "0.3in"
 text = "Acme"
 bold = true
 "##,
@@ -91,13 +102,8 @@ bold = true
 
 [[shapes]]
 type = "text"
-x = "1in"
-y = "2.5in"
-w = "11.3in"
-h = "1in"
+placeholder = "Title"
 text = "*Welcome* to **gwen**"
-align = "center"
-font_size = 44
 "##,
     );
     write(
@@ -179,6 +185,70 @@ fn unknown_master_is_reported() {
     assert!(
         format!("{err:?}").contains("unknown master `nope`"),
         "expected a clear error, got: {err:?}"
+    );
+}
+
+fn sections_free_project(name: &str) -> PathBuf {
+    let dir = sample_project(name);
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let cut = main.replace(
+        "[[sections]]\ntitle = \"Intro\"\nslides = [\"title.toml\", \"content.toml\"]\n",
+        "",
+    );
+    std::fs::write(dir.join("main.toml"), cut).unwrap();
+    dir
+}
+
+#[test]
+fn missing_sections_is_reported() {
+    let dir = sections_free_project("nosections");
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("[[sections]]"),
+        "expected an error about [[sections]], got: {err:?}"
+    );
+}
+
+#[test]
+fn bad_ph_type_is_reported() {
+    let dir = sample_project("badphtype");
+    write(
+        &dir.join("masters").join("brand.toml"),
+        "[[shapes]]\ntype = \"placeholder\"\nname = \"Title\"\nph_type = \"weird\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("ph_type") && msg.contains("weird"),
+        "expected a ph_type error, got: {msg}"
+    );
+}
+
+#[test]
+fn missing_placeholder_name_is_reported() {
+    let dir = sample_project("noname");
+    write(
+        &dir.join("masters").join("brand.toml"),
+        "[[shapes]]\ntype = \"placeholder\"\nph_type = \"title\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("needs a `name`"),
+        "expected a placeholder-name error, got: {err:?}"
+    );
+}
+
+#[test]
+fn unknown_placeholder_fill_is_reported() {
+    let dir = sample_project("badfill");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nplaceholder = \"Nope\"\ntext = \"hi\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("placeholder `Nope`"),
+        "expected a placeholder-fill error, got: {err:?}"
     );
 }
 

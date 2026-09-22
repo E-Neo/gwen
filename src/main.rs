@@ -47,24 +47,21 @@ fn main() -> miette::Result<()> {
 }
 
 const DEFAULT_MAIN: &str = r##"[presentation]
-title = "deck"
+title = "__NAME__"
 author = ""
 company = ""
 subject = ""
-
-[layout]
-name = "GWEN"
-width = "13.333in"
-height = "7.5in"
+width = 12196763
+height = 6858000
 
 [theme]
 major_font = "Arial Black"
 minor_font = "Arial"
 
-# Slide index: each section lists its slide files in order.
-# [[sections]]
-# title = "Intro"
-# slides = ["slides/intro.toml"]
+# Slide index: [[sections]] is required and lists the slide files in order.
+[[sections]]
+title = "Intro"
+slides = ["title.toml", "intro.toml"]
 
 # Built-in defaults shared by every slide (shape keys win over these).
 # [defaults.text]
@@ -82,58 +79,57 @@ minor_font = "Arial"
 # italic = true
 "##;
 
-const DEFAULT_MASTER: &str = r##"# masters/title_base.toml — the master name is the file stem.
+const DEFAULT_MASTER: &str = r##"# masters/base.toml — the master name is the file stem.
 
 background = { color = "FFFFFF" }
-margin = 0.5
+slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
+                 font_size = 12, color = "999999", align = "right" }
 
-[[objects]]
+[[shapes]]
 type = "rect"
-x = "0in"
-y = "0in"
-w = "13.333in"
-h = "1.167in"
+x = 0
+y = 0
+w = "100%"
+h = "1.1in"
 fill = { color = "C7000A" }
 line = { color = "C7000A", width = 0 }
 
-[[objects]]
-type = "text"
+[[shapes]]
+type = "placeholder"
+ph_type = "title"
+name = "Title"
 x = "0.8in"
-y = "0.25in"
+y = "0.18in"
 w = "11.7in"
-h = "0.667in"
-text = "Acme Inc."
-font_size = 14
+h = "0.74in"
+font_size = 26
 color = "FFFFFF"
 bold = true
+align = "left"
+valign = "middle"
+text = "Click to edit title"
 "##;
 
 const DEFAULT_TITLE: &str = r##"# slides/title.toml
 
-master = "title_base"
+master = "base"
 
 [[shapes]]
 type = "text"
-x = "1in"
-y = "2.6in"
-w = "11.3in"
-h = "1in"
+placeholder = "Title"
 text = "*Welcome to* **gwen**"
-align = "center"
-valign = "middle"
-font_size = 44
 "##;
 
 const DEFAULT_INTRO: &str = r##"# slides/intro.toml
 
-master = "title_base"
+master = "base"
 
 [[shapes]]
 type = "text"
-x = "0.8in"
-y = "1.5in"
-w = "11.7in"
-h = "5in"
+x = "1in"
+y = "1.8in"
+w = "11.3in"
+h = "4in"
 text = """**gwen** builds .pptx from TOML.
 
 It drives the real pptxgenjs under QuickJS, so everything is
@@ -150,11 +146,15 @@ fn new_project(project: &str) -> Result<()> {
     create_dir(&root.join("slides"))?;
     create_dir(&root.join("masters"))?;
     create_dir(&root.join("media"))?;
-    write_file(&root.join("main.toml"), DEFAULT_MAIN)?;
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| project.to_string());
     write_file(
-        &root.join("masters").join("title_base.toml"),
-        DEFAULT_MASTER,
+        &root.join("main.toml"),
+        &DEFAULT_MAIN.replace("__NAME__", &name),
     )?;
+    write_file(&root.join("masters").join("base.toml"), DEFAULT_MASTER)?;
     write_file(&root.join("slides").join("title.toml"), DEFAULT_TITLE)?;
     write_file(&root.join("slides").join("intro.toml"), DEFAULT_INTRO)?;
     eprintln!("created project `{project}`");

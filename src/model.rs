@@ -1,12 +1,12 @@
 //! TOML model for a gwen deck, mirroring the pptxgenjs API surface.
 //!
-//! `main.toml` (`[presentation]`, `[layout]`, `[theme]`, `[[sections]]`,
-//! `[defaults.<type>]`, `[styles.<name>]`), `masters/<name>.toml` and
-//! `slides/<name>.toml`. Option keys are snake_case and become the corresponding
-//! pptxgenjs camelCase properties; arbitrary extra keys pass straight through.
+//! `main.toml` (`[presentation]`, `[theme]`, `[[sections]]`, `[defaults.<type>]`,
+//! `[styles.<name>]`), `masters/<name>.toml` and `slides/<name>.toml`. Option
+//! keys are snake_case and become the corresponding pptxgenjs camelCase
+//! properties; arbitrary extra keys pass straight through.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use miette::{Result, miette};
 
@@ -21,11 +21,9 @@ pub struct Project {
     pub main: Main,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Main {
     pub presentation: Presentation,
-    #[serde(default)]
-    pub layout: Layout,
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
@@ -37,7 +35,7 @@ pub struct Main {
     pub styles: BTreeMap<String, Opts>,
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Presentation {
     #[serde(default)]
     pub title: String,
@@ -51,27 +49,34 @@ pub struct Presentation {
     pub subject: String,
     #[serde(default)]
     pub rtl_mode: bool,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Layout {
-    #[serde(default = "default_layout_name")]
-    pub name: String,
-    /// pptxgenjs `presLayout` width/height: EMU or a unit string/percentage.
+    /// Slide width in EMU or a unit string/percentage.
     #[serde(default = "default_width", rename = "width")]
     pub width: Coord,
+    /// Slide height in EMU or a unit string/percentage.
     #[serde(default = "default_height", rename = "height")]
     pub height: Coord,
 }
 
-fn default_layout_name() -> String {
-    "GWEN".into()
+impl Default for Presentation {
+    fn default() -> Self {
+        Presentation {
+            title: String::new(),
+            author: String::new(),
+            company: String::new(),
+            revision: String::new(),
+            subject: String::new(),
+            rtl_mode: false,
+            width: default_width(),
+            height: default_height(),
+        }
+    }
 }
+
 fn default_width() -> Coord {
-    Coord::Text("10in".into())
+    Coord::Emu(12_196_763)
 }
 fn default_height() -> Coord {
-    Coord::Text("7.5in".into())
+    Coord::Emu(6_858_000)
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -120,21 +125,16 @@ pub struct Master {
     /// Margin in points/inches/EMU as a single number or `[t, r, b, l]`.
     #[serde(default)]
     pub margin: Option<toml::Value>,
+    /// Positions a slide-number placeholder on every slide using this master.
     #[serde(default)]
-    pub objects: Vec<Object>,
+    pub slide_number: Option<SlideNumber>,
+    #[serde(default)]
+    pub shapes: Vec<Shape>,
 }
 
-/// A master object (`rect`, `line`, `text`, `image`, `chart`, `placeholder`).
+/// pptxgenjs `SlideNumberProps`: a positioned slide-number text box.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct Object {
-    #[serde(rename = "type")]
-    pub ty: String,
-    #[serde(default)]
-    pub style: Option<String>,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub src: Option<String>,
+pub struct SlideNumber {
     #[serde(default)]
     pub x: Option<Coord>,
     #[serde(default)]
@@ -162,9 +162,11 @@ pub struct Slide {
     pub notes: Option<String>,
 }
 
-/// A slide shape. `type` is `text`, `image` or a pptxgenjs `ShapeType` preset
-/// (`rect`, `roundRect`, `line`, ...). Reserved `chart`, `table` and `media`
-/// are recognised but not yet implemented.
+/// A positioned element used by both slides and masters. `type` is `text`,
+/// `image` or a pptxgenjs `ShapeType` preset (`rect`, `roundRect`, `line`,
+/// ...). Reserved `chart`, `table` and `media` are recognised but not yet
+/// implemented. In a master, `type = "placeholder"` defines a placeholder the
+/// slide content can fill (`name` + `ph_type`: `title|body|pic|chart|tbl|media`).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Shape {
     #[serde(rename = "type")]
@@ -257,63 +259,8 @@ impl Project {
     }
 }
 
-impl Default for Main {
-    fn default() -> Self {
-        Main {
-            presentation: Presentation::default(),
-            layout: Layout {
-                name: default_layout_name(),
-                width: default_width(),
-                height: default_height(),
-            },
-            theme: default_theme(),
-            sections: Vec::new(),
-            defaults: Defaults::default(),
-            styles: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for Layout {
-    fn default() -> Self {
-        Layout {
-            name: default_layout_name(),
-            width: default_width(),
-            height: default_height(),
-        }
-    }
-}
-
 impl Default for Theme {
     fn default() -> Self {
         default_theme()
     }
-}
-
-/// If `sections` is empty, default to a single section covering every slide
-/// file in `slides/`.
-pub fn default_section(dir: &Path) -> Result<Section> {
-    let slides_dir = dir.join("slides");
-    let mut names: Vec<String> = Vec::new();
-    if slides_dir.is_dir() {
-        let mut entries: Vec<_> = std::fs::read_dir(&slides_dir)
-            .map_err(|e| miette!("cannot list `{}`: {e}", slides_dir.display()))?
-            .filter_map(|e| e.ok())
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && entry.file_name().to_string_lossy().ends_with(".toml")
-            {
-                names.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    if names.is_empty() && !slides_dir.is_dir() {
-        return Err(miette!("no `slides/` directory in `{}`", dir.display()));
-    }
-    Ok(Section {
-        title: "Deck".into(),
-        slides: names,
-    })
 }

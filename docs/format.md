@@ -21,24 +21,21 @@ public API — it never writes OOXML. A `node` runtime is not required.
 ## `main.toml`
 
 ```toml
-[presentation]      # optional (all defaults empty/""/false)
-title = "Deck"      # output file stem and core.xml title
+[presentation]      # most fields optional (defaults ""/false)
+title = "Deck"      # output file stem (gwen new writes the directory name)
 author = ""
 company = ""
 revision = ""
 subject = ""
 rtl_mode = false
-
-[layout]            # optional, defaults 10in x 7.5in, layout name "GWEN"
-name = "GWEN"
-width = "13.333in"  # EMU int or "1in"/"2.5cm"/"25mm"/"72pt"/"50%"
-height = "7.5in"
+width = 12196763    # slide size: EMU int or "1in"/"2.5cm"/"25mm"/"72pt"/"50%"
+height = 6858000    # default width/height = 13.3386in x 7.5in
 
 [theme]             # optional, defaults Calibri
 major_font = "Arial Black"
 minor_font = "Arial"
 
-[[sections]]        # optional; the slide ordering index
+[[sections]]        # required; the slide ordering index
 title = "Intro"
 slides = ["title.toml", "content.toml"]   # paths relative to slides/
 
@@ -62,48 +59,64 @@ pptxgenjs accepts can be set, and unknown keys pass straight through.
 Precedence when building a shape's options:
 `[defaults.<type>]` < `[styles.<name>]` < the shape's own keys.
 
-If `[[sections]]` is empty, every `slides/*.toml` is used in alphabetical
-order. A slide listed in more than one section is an error; a slide not listed
-at all is skipped with a warning.
+`[[sections]]` is required — building without it is an error. A slide listed
+in more than one section is an error; a slide not listed at all is not
+rendered.
 
 ## `masters/<name>.toml`
 
-The master name is the file stem — there is no `title` field.
+The master name is the file stem — there is no `title` field. Elements are
+`[[shapes]]`, exactly like slides.
 
 ```toml
 background = { color = "FFFFFF" }   # or a color shorthand string
 margin = 0.5                        # inches (EMU/unit strings/arrays also OK)
 
-[[objects]]
-type = "rect"       # rect | line | text | image | placeholder
+# Slide number: put a page-number box in the corner of every slide.
+slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
+                 font_size = 12, color = "999999", align = "right" }
+
+[[shapes]]
+type = "rect"       # rect | line | text | image | chart | placeholder
 x = 0
 y = 0
-w = "13.333in"
-h = "1.167in"
+w = "100%"
+h = "1.1in"
 fill = { color = "C7000A" }
 line = { color = "C7000A", width = 0 }
 
-[[objects]]
-type = "text"
+# A placeholder the slide content can fill.
+[[shapes]]
+type = "placeholder"
+ph_type = "title"   # p:ph type: title|body|pic|chart|tbl|media
+name = "Title"      # what slides reference
 x = "0.8in"
-y = "0.25in"
+y = "0.18in"
 w = "11.7in"
-h = "0.667in"
-text = "Acme Inc."
-font_size = 14
+h = "0.74in"
+font_size = 26
 color = "FFFFFF"
 bold = true
+align = "left"
+valign = "middle"
+text = "Click to edit title"
 ```
+
+Placeholders stay inline in `[[shapes]]`, so their z-order is exactly what you
+write. A slide fills one by setting `placeholder = "<name>"` on a text shape
+(its geometry is inherited from the master). Referencing a placeholder the
+master doesn't define is an error.
 
 ## `slides/<name>.toml`
 
 ```toml
-master = "title_base"               # optional master name
+master = "brand"                    # optional master name
 background = "112233"               # color string or background object
 hidden = false                      # accepted; not applied (pptxgenjs has no hidden slides)
 
 [[shapes]]
 type = "text"                       # text | image | a pptxgenjs shape preset (rect, ...)
+placeholder = "Title"               # fills a master placeholder (geometry inherited)
 x = "1in"
 y = "2.6in"
 w = "11.3in"

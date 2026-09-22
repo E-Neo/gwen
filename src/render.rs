@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use miette::{Result, miette};
 use serde_json::{Map, Value, json};
 
-use crate::model::{Kind, Main, Master, Project, Section, Shape};
+use crate::model::{Kind, Main, Master, Project, Section, Shape, SlideNumber};
 use crate::richtext;
 use crate::units::{Coord, EMU_PER_IN};
 use base64::Engine;
@@ -19,15 +19,15 @@ use base64::Engine;
 pub fn spec_json(project: &Project) -> Result<String> {
     let main_ = &project.main;
     let width = main_
-        .layout
+        .presentation
         .width
         .emu(0)
-        .map_err(|e| miette!("[layout].width: {e}"))?;
+        .map_err(|e| miette!("[presentation].width: {e}"))?;
     let height = main_
-        .layout
+        .presentation
         .height
         .emu(0)
-        .map_err(|e| miette!("[layout].height: {e}"))?;
+        .map_err(|e| miette!("[presentation].height: {e}"))?;
 
     let masters = load_masters(project, width, height, main_)?;
     let sections = resolve_sections(project)?;
@@ -73,8 +73,11 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
         let master: Master = toml::from_str(&raw)
             .map_err(|e| miette!("cannot parse `{}`: {e}", entry.path().display()))?;
         let mut objects = Vec::new();
-        for obj in &master.objects {
-            let opts = merge_opts(main, defaults_key(&obj.ty), obj.style.as_deref(), &obj.opts);
+        for obj in &master.shapes {
+            let mut opts = merge_opts(main, defaults_key(&obj.ty), obj.style.as_deref(), &obj.opts);
+            if obj.ty == "placeholder" {
+                placeholder_opts(&mut opts, &stem)?;
+            }
             let mut out = Map::new();
             out.insert("type".into(), json!(obj.ty));
             out.insert("x".into(), json!(geo(&obj.x, width, "x")?));
@@ -92,14 +95,65 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             }
             objects.push(Value::Object(out));
         }
+        let slide_number = match &master.slide_number {
+            Some(sn) => slide_number_value(sn, width, height)?,
+            None => Value::Null,
+        };
         out.push(json!({
             "name": stem,
             "background": normalize_background(&master.background, "master")?,
             "margin": normalize_margin(&master.margin)?,
+            "slideNumber": slide_number,
             "objects": objects,
         }));
     }
     Ok(out)
+}
+
+/// Validate placeholder options on a master shape and rewrite `ph_type` to the
+/// `type` pptxgenjs's `defineSlideMaster` expects.
+fn placeholder_opts(opts: &mut toml::Value, master: &str) -> Result<()> {
+    let table = opts
+        .as_table_mut()
+        .ok_or_else(|| miette!("internal: placeholder options"))?;
+    if !table.contains_key("name") {
+        return Err(miette!("master `{master}` placeholder needs a `name`"));
+    }
+    let label = table
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| "<unnamed>".into());
+    let ph_type = table
+        .remove("ph_type")
+        .ok_or_else(|| miette!("master `{master}` placeholder `{label}` needs a `ph_type`"))?;
+    let ph_type = ph_type.as_str().ok_or_else(|| {
+        miette!("master `{master}` placeholder `{label}`: `ph_type` must be a string")
+    })?;
+    if !matches!(
+        ph_type,
+        "title" | "body" | "pic" | "chart" | "tbl" | "media"
+    ) {
+        return Err(miette!(
+            "master `{master}` placeholder `{label}`: `ph_type` must be one of title|body|pic|chart|tbl|media, got `{ph_type}`"
+        ));
+    }
+    table.insert("type".into(), toml::Value::String(ph_type.to_string()));
+    Ok(())
+}
+
+/// Convert a master `slide_number` into inches + camelCase options for `defineSlideMaster`.
+fn slide_number_value(sn: &SlideNumber, width: i64, height: i64) -> Result<Value> {
+    let mut out = Map::new();
+    out.insert("x".into(), json!(geo(&sn.x, width, "x")?));
+    out.insert("y".into(), json!(geo(&sn.y, height, "y")?));
+    out.insert("w".into(), json!(geo(&sn.w, width, "w")?));
+    out.insert("h".into(), json!(geo(&sn.h, height, "h")?));
+    let opts = to_pptxgen(&toml::Value::Table(sn.opts.clone()));
+    for (k, v) in opts.as_object().unwrap() {
+        out.insert(k.clone(), v.clone());
+    }
+    Ok(Value::Object(out))
 }
 
 /// Text content (and per-pptxgenjs text options) inside a master `text`
@@ -134,6 +188,29 @@ fn build_sections(
     Ok(out)
 }
 
+/// The placeholder `name`s a master defines, for slide-fill validation.
+fn master_placeholder_names(
+    project: &Project,
+    master: &str,
+    slide: &str,
+) -> Result<BTreeSet<String>> {
+    let path = project.master_path(master);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| miette!("slide `{slide}`: cannot read `{}`: {e}", path.display()))?;
+    let m: Master = toml::from_str(&raw)
+        .map_err(|e| miette!("slide `{slide}`: cannot parse `{}`: {e}", path.display()))?;
+    Ok(m.shapes
+        .iter()
+        .filter(|s| s.ty == "placeholder")
+        .filter_map(|s| {
+            s.opts
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect())
+}
+
 fn build_slide(
     project: &Project,
     main: &Main,
@@ -153,6 +230,18 @@ fn build_slide(
             "slide `{file}` references unknown master `{master}` (no `{}`)",
             project.master_path(master).display()
         ));
+    }
+    if let Some(master) = &slide.master {
+        let names = master_placeholder_names(project, master, file)?;
+        for shape in &slide.shapes {
+            if let Some(p) = shape.opts.get("placeholder").and_then(|v| v.as_str())
+                && !names.contains(p)
+            {
+                return Err(miette!(
+                    "slide `{file}` fills placeholder `{p}` but master `{master}` has no placeholder of that name"
+                ));
+            }
+        }
     }
 
     let mut shapes = Vec::new();
@@ -431,12 +520,14 @@ fn normalize_margin(margin: &Option<toml::Value>) -> Result<Value> {
     }
 }
 
-/// Resolve `[[sections]]`, or default to a single section with every slide.
+/// The slide ordering index comes from `[[sections]]` in `main.toml`.
 fn resolve_sections(project: &Project) -> Result<Vec<Section>> {
-    if !project.main.sections.is_empty() {
-        return Ok(project.main.sections.clone());
+    if project.main.sections.is_empty() {
+        return Err(miette!(
+            "main.toml has no [[sections]]; list your slides under [[sections]] to build the deck"
+        ));
     }
-    Ok(vec![crate::model::default_section(&project.dir)?])
+    Ok(project.main.sections.clone())
 }
 
 fn mime_for(filename: &str) -> Result<&'static str> {

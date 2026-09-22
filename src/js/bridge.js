@@ -121,6 +121,9 @@
       if (m.margin) {
         def.margin = m.margin;
       }
+      if (m.slideNumber) {
+        def.slideNumber = m.slideNumber;
+      }
       def.objects = [];
       for (var oi = 0; oi < m.objects.length; oi++) {
         var o = m.objects[oi];
