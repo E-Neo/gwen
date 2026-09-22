@@ -10,6 +10,7 @@
 pub mod error;
 pub mod jsbridge;
 pub mod model;
+pub mod opts;
 pub mod render;
 pub mod richtext;
 pub mod units;

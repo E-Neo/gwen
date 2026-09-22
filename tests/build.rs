@@ -110,6 +110,7 @@ text = "*Welcome* to **gwen**"
         &dir.join("slides").join("content.toml"),
         r##"master = "brand"
 background = "112233"
+notes = "remember && escape <!--"
 
 [[shapes]]
 type = "text"
@@ -137,8 +138,6 @@ y = "5.5in"
 w = "1in"
 h = "1in"
 src = "media/pixel.png"
-
-notes = "remember && escape <!--"
 "##,
     );
     std::fs::create_dir_all(dir.join("media")).unwrap();
@@ -206,6 +205,36 @@ fn missing_sections_is_reported() {
     assert!(
         format!("{err:?}").contains("[[sections]]"),
         "expected an error about [[sections]], got: {err:?}"
+    );
+}
+
+#[test]
+fn unknown_toml_field_is_reported() {
+    let dir = sample_project("badfield");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shaps]]\ntype = \"text\"\ntext = \"hi\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("`shaps`"),
+        "expected an unknown-field error for `shaps`, got: {msg}"
+    );
+}
+
+#[test]
+fn unknown_pptxgen_option_is_reported() {
+    let dir = sample_project("badopt");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"hi\"\nfount_size = 14\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("fount_size") && msg.contains("unknown text option"),
+        "expected an unknown-option error, got: {msg}"
     );
 }
 

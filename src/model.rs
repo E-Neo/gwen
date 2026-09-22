@@ -22,6 +22,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Main {
     pub presentation: Presentation,
     #[serde(default)]
@@ -36,6 +37,7 @@ pub struct Main {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Presentation {
     #[serde(default)]
     pub title: String,
@@ -80,6 +82,7 @@ fn default_height() -> Coord {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Theme {
     #[serde(default = "default_font")]
     pub major_font: String,
@@ -99,6 +102,7 @@ fn default_theme() -> Theme {
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Defaults {
     #[serde(default)]
     pub text: Opts,
@@ -110,6 +114,7 @@ pub struct Defaults {
 
 /// The slide ordering index: each section pins `title` and the slide files.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Section {
     pub title: String,
     #[serde(default)]
@@ -119,6 +124,7 @@ pub struct Section {
 /// `masters/<name>.toml`. The master name is the file stem; there is no
 /// `title` field (the file name is the master name).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Master {
     #[serde(default)]
     pub background: Option<toml::Value>,
@@ -149,6 +155,7 @@ pub struct SlideNumber {
 
 /// `slides/<name>.toml`.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Slide {
     #[serde(default)]
     pub master: Option<String>,

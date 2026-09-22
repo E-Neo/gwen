@@ -8,6 +8,7 @@ use miette::{Result, miette};
 use serde_json::{Map, Value, json};
 
 use crate::model::{Kind, Main, Master, Project, Section, Shape, SlideNumber};
+use crate::opts::{self, Ctx};
 use crate::richtext;
 use crate::units::{Coord, EMU_PER_IN};
 use base64::Engine;
@@ -29,6 +30,8 @@ pub fn spec_json(project: &Project) -> Result<String> {
         .emu(0)
         .map_err(|e| miette!("[presentation].height: {e}"))?;
 
+    validate_defaults_and_styles(main_)?;
+
     let masters = load_masters(project, width, height, main_)?;
     let sections = resolve_sections(project)?;
     let slides = build_sections(project, &sections, main_, width, height)?;
@@ -42,6 +45,33 @@ pub fn spec_json(project: &Project) -> Result<String> {
         "sections": slides,
     });
     serde_json::to_string(&out).map_err(|e| miette!("cannot serialise spec: {e}"))
+}
+
+/// Validate `[defaults.*]` and `[styles.*]` option maps once, up front.
+fn validate_defaults_and_styles(main: &Main) -> Result<()> {
+    opts::validate_ctx(
+        Ctx::Text,
+        &toml::Value::Table(main.defaults.text.clone()),
+        "[defaults.text]",
+    )?;
+    opts::validate_ctx(
+        Ctx::Shape,
+        &toml::Value::Table(main.defaults.shape.clone()),
+        "[defaults.shape]",
+    )?;
+    opts::validate_ctx(
+        Ctx::Image,
+        &toml::Value::Table(main.defaults.image.clone()),
+        "[defaults.image]",
+    )?;
+    for (name, table) in &main.styles {
+        opts::validate_ctx(
+            Ctx::Style,
+            &toml::Value::Table(table.clone()),
+            &format!("[styles.{name}]"),
+        )?;
+    }
+    Ok(())
 }
 
 fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Result<Vec<Value>> {
@@ -75,6 +105,16 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
         let mut objects = Vec::new();
         for obj in &master.shapes {
             let mut opts = merge_opts(main, defaults_key(&obj.ty), obj.style.as_deref(), &obj.opts);
+            let ctx = match obj.ty.as_str() {
+                "text" => Some(Ctx::Text),
+                "placeholder" => Some(Ctx::Placeholder),
+                "image" => Some(Ctx::Image),
+                "chart" => None,
+                _ => Some(Ctx::Shape),
+            };
+            if let Some(ctx) = ctx {
+                opts::validate_ctx(ctx, &opts, &format!("master `{stem}` shape `{}`", obj.ty))?;
+            }
             if obj.ty == "placeholder" {
                 placeholder_opts(&mut opts, &stem)?;
             }
@@ -96,7 +136,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             objects.push(Value::Object(out));
         }
         let slide_number = match &master.slide_number {
-            Some(sn) => slide_number_value(sn, width, height)?,
+            Some(sn) => slide_number_value(sn, width, height, &stem)?,
             None => Value::Null,
         };
         out.push(json!({
@@ -143,7 +183,14 @@ fn placeholder_opts(opts: &mut toml::Value, master: &str) -> Result<()> {
 }
 
 /// Convert a master `slide_number` into inches + camelCase options for `defineSlideMaster`.
-fn slide_number_value(sn: &SlideNumber, width: i64, height: i64) -> Result<Value> {
+fn slide_number_value(sn: &SlideNumber, width: i64, height: i64, master: &str) -> Result<Value> {
+    if !sn.opts.is_empty() {
+        opts::validate_ctx(
+            Ctx::Text,
+            &toml::Value::Table(sn.opts.clone()),
+            &format!("master `{master}` slide_number"),
+        )?;
+    }
     let mut out = Map::new();
     out.insert("x".into(), json!(geo(&sn.x, width, "x")?));
     out.insert("y".into(), json!(geo(&sn.y, height, "y")?));
@@ -267,12 +314,23 @@ fn shape_value(
     shape: &Shape,
 ) -> Result<Value> {
     let kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
-    let opts = to_pptxgen(&merge_opts(
+    let merged = merge_opts(
         main,
         defaults_key(&shape.ty),
         shape.style.as_deref(),
         &shape.opts,
-    ));
+    );
+    let ctx = match kind {
+        Kind::Text => Ctx::Text,
+        Kind::Image => Ctx::Image,
+        Kind::Shape => Ctx::Shape,
+    };
+    opts::validate_ctx(
+        ctx,
+        &merged,
+        &format!("slide `{file}` shape `{}`", shape.ty),
+    )?;
+    let opts = to_pptxgen(&merged);
 
     let mut value = Map::new();
     value.insert("x".into(), json!(geo(&shape.x, width, "x")?));
@@ -282,7 +340,7 @@ fn shape_value(
     match kind {
         Kind::Text => {
             value.insert("kind".into(), json!("text"));
-            value.insert("runs".into(), runs_value(shape)?);
+            value.insert("runs".into(), runs_value(shape, file)?);
             for (k, v) in opts.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }
@@ -320,7 +378,7 @@ fn shape_value(
 ///
 /// Text is `[[paragraphs]]` if given, else the `text` shorthand, else one
 /// empty run so `addText` always has content.
-fn runs_value(shape: &Shape) -> Result<Value> {
+fn runs_value(shape: &Shape, file: &str) -> Result<Value> {
     struct Para<'a> {
         text: &'a str,
         opts: &'a toml::Table,
@@ -329,6 +387,13 @@ fn runs_value(shape: &Shape) -> Result<Value> {
     let empty = toml::Table::new();
     if !shape.paragraphs.is_empty() {
         for para in &shape.paragraphs {
+            if !para.opts.is_empty() {
+                opts::validate_ctx(
+                    Ctx::Text,
+                    &toml::Value::Table(para.opts.clone()),
+                    &format!("slide `{file}` shape `{}` paragraph", shape.ty),
+                )?;
+            }
             paragraphs.push(Para {
                 text: &para.text,
                 opts: &para.opts,
@@ -489,7 +554,14 @@ fn geo(coord: &Option<Coord>, slide_emu: i64, axis: &str) -> Result<f64> {
 fn normalize_background(bg: &Option<toml::Value>, where_: &str) -> Result<Value> {
     match bg {
         None => Ok(Value::Null),
-        Some(toml::Value::Table(t)) => Ok(to_pptxgen(&toml::Value::Table(t.clone()))),
+        Some(toml::Value::Table(t)) => {
+            opts::validate_ctx(
+                Ctx::Background,
+                &toml::Value::Table(t.clone()),
+                &format!("{where_} background"),
+            )?;
+            Ok(to_pptxgen(&toml::Value::Table(t.clone())))
+        }
         Some(toml::Value::String(s)) => Ok(json!({ "color": s })),
         Some(other) => Err(miette!(
             "{where_} background must be a color string or table, got `{other}`"

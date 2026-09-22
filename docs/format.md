@@ -113,6 +113,11 @@ master doesn't define is an error.
 master = "brand"                    # optional master name
 background = "112233"               # color string or background object
 hidden = false                      # accepted; not applied (pptxgenjs has no hidden slides)
+notes = "presenter notes"
+
+# slide-level keys (master/background/hidden/notes) must come BEFORE the
+# first [[shapes]] — in TOML, keys after a [[shapes]] header belong to the
+# last shape, not the slide.
 
 [[shapes]]
 type = "text"                       # text | image | a pptxgenjs shape preset (rect, ...)
@@ -140,8 +145,6 @@ y = "5.5in"
 w = "1in"
 h = "1in"
 src = "media/pixel.png"             # relative to the deck root
-
-notes = "presenter notes"
 ```
 
 `chart`, `table` and `media` shape types are recognised but not supported yet.
