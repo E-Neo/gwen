@@ -30,10 +30,7 @@ pub struct Main {
     #[serde(default)]
     pub sections: Vec<Section>,
     #[serde(default)]
-    #[serde(rename = "defaults")]
-    pub defaults: Defaults,
-    #[serde(default)]
-    pub styles: BTreeMap<String, Opts>,
+    pub styles: Styles,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -101,15 +98,18 @@ fn default_theme() -> Theme {
     }
 }
 
+/// The unified style tables: built-in defaults per shape type under
+/// `[styles.<type>]` (`shape` is the fallback for every shape), and named
+/// opt-in styles under `[styles.named.<name>]`.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Defaults {
+pub struct Styles {
+    /// `[styles.<type>]` — `shape`, `text`, `image`, `placeholder`, or a
+    /// shape preset id.
+    #[serde(flatten)]
+    pub by_type: BTreeMap<String, Opts>,
+    /// `[styles.named.<name>]` — reusable styles referenced by `style = "<name>"`.
     #[serde(default)]
-    pub text: Opts,
-    #[serde(default)]
-    pub shape: Opts,
-    #[serde(default)]
-    pub image: Opts,
+    pub named: BTreeMap<String, Opts>,
 }
 
 /// The slide ordering index: each section pins `title` and the slide files.
@@ -230,16 +230,17 @@ impl Shape {
 }
 
 impl Main {
-    /// The built-in defaults for a shape category (`text`/`image`/`shape`).
-    pub fn defaults_map(&self, key: &str) -> toml::Table {
-        let map = match key {
-            "text" => &self.defaults.text,
-            "image" => &self.defaults.image,
-            _ => &self.defaults.shape,
-        };
+    /// The built-in style defaults for a shape type: `[styles.shape]` (the
+    /// fallback for every shape) layered with the type-specific
+    /// `[styles.<type>]` bucket if present.
+    pub fn type_defaults(&self, ty: &str) -> toml::Table {
         let mut out = toml::Table::new();
-        for (k, v) in map {
-            out.insert(k.clone(), v.clone());
+        for layer in ["shape", ty] {
+            if let Some(t) = self.styles.by_type.get(layer) {
+                for (k, v) in t {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
         }
         out
     }
@@ -269,5 +270,45 @@ impl Project {
 impl Default for Theme {
     fn default() -> Self {
         default_theme()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn main_toml(s: &str) -> Main {
+        toml::from_str(&format!("[presentation]\ntitle = \"deck\"\n{s}")).unwrap()
+    }
+
+    #[test]
+    fn type_defaults_layer_shape_then_specific() {
+        let main = main_toml(
+            "[styles.shape]\nfill = { color = \"C7000A\" }\ncolor = \"FFFFFF\"\n[styles.rect]\nfill = { color = \"112233\" }\n",
+        );
+        // rect inherits the shared `color` but its own `fill` wins.
+        let merged = main.type_defaults("rect");
+        assert_eq!(merged.get("color").unwrap().as_str().unwrap(), "FFFFFF");
+        assert!(
+            merged
+                .get("fill")
+                .unwrap()
+                .get("color")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                == "112233"
+        );
+        // an unspecified preset falls back to [styles.shape] alone.
+        let ellipse = main.type_defaults("ellipse");
+        assert_eq!(ellipse.get("color").unwrap().as_str().unwrap(), "FFFFFF");
+        assert!(ellipse.get("fill").is_some());
+    }
+
+    #[test]
+    fn named_styles_deserialize() {
+        let main = main_toml("[styles.named.muted]\nitalic = true\n");
+        assert_eq!(main.styles.named.len(), 1);
+        assert!(main.styles.named["muted"].get("italic").is_some());
     }
 }

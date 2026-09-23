@@ -63,18 +63,19 @@ minor_font = "Arial"
 title = "Intro"
 slides = ["title.toml", "intro.toml"]
 
-# Built-in defaults shared by every slide (shape keys win over these).
-# [defaults.text]
+# [styles.shape] is the base style for every shape; [styles.<type>] layers on
+# top of it for specific shape types (text, image, rect, ellipse, ...).
+# [styles.shape]
+# fill = { color = "C7000A" }
+# [styles.text]
 # font_face = "Arial"
 # font_size = 18
 # color = "262626"
-# [defaults.shape]
-# fill = { color = "C7000A" }
-# [defaults.image]
+# [styles.image]
 # sizing = { type = "contain" }
 
 # Named styles; a shape referencing `style = "muted"` merges these.
-# [styles.muted]
+# [styles.named.muted]
 # color = "808080"
 # italic = true
 "##;

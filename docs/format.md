@@ -39,15 +39,20 @@ minor_font = "Arial"
 title = "Intro"
 slides = ["title.toml", "content.toml"]   # paths relative to slides/
 
-[defaults.text]     # built-in defaults merged into every text shape
+[styles.shape]       # base style for EVERY shape (text, image, presets)
+fill = { color = "C7000A" }
+
+[styles.text]        # layered over [styles.shape] for text shapes
 font_face = "Arial"
 color = "262626"
-[defaults.shape]    # every non-text shape
-fill = { color = "C7000A" }
-[defaults.image]
+
+[styles.image]       # layered over [styles.shape] for images
 sizing = { type = "contain" }
 
-[styles.muted]      # named styles; a shape with style = "muted" merges these
+[styles.ellipse]     # ...or any shape preset id
+line = { color = "333333", width = 0.5 }
+
+[styles.named.muted] # named style; shapes opt in via style = "muted"
 color = "808080"
 italic = true
 ```
@@ -57,7 +62,9 @@ Option keys are snake_case and map to the pptxgenjs camelCase properties
 pptxgenjs accepts can be set, and unknown keys pass straight through.
 
 Precedence when building a shape's options:
-`[defaults.<type>]` < `[styles.<name>]` < the shape's own keys.
+`[styles.shape]` < `[styles.<type>]` < `[styles.named.<name>]` < the shape's
+own keys. A `style = "<name>"` reference to a `[styles.named.<name>]` block
+that doesn't exist is an error.
 
 `[[sections]]` is required — building without it is an error. A slide listed
 in more than one section is an error; a slide not listed at all is not

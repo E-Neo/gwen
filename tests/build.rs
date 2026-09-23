@@ -50,11 +50,14 @@ height = "7.5in"
 major_font = "Arial"
 minor_font = "Arial"
 
-[defaults.text]
+[styles.shape]
+fill = { color = "C7000A" }
+
+[styles.text]
 font_face = "Arial"
 color = "262626"
 
-[styles.muted]
+[styles.named.muted]
 color = "808080"
 italic = true
 
@@ -378,6 +381,47 @@ fn unknown_pptxgen_option_is_reported() {
     assert!(
         msg.contains("fount_size") && msg.contains("unknown text option"),
         "expected an unknown-option error, got: {msg}"
+    );
+}
+
+#[test]
+fn unknown_style_type_is_reported() {
+    let dir = sample_project("badstyletype");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = format!("{main}\n[styles.rectt]\nfill = {{ color = \"000000\" }}\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("unknown style type `[styles.rectt]`"),
+        "expected a style-type error"
+    );
+}
+
+#[test]
+fn unknown_style_reference_is_reported() {
+    let dir = sample_project("badstyleref");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"hi\"\nstyle = \"nope\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("unknown style `nope`"),
+        "expected a style-reference error"
+    );
+}
+
+#[test]
+fn unknown_shape_type_is_reported() {
+    let dir = sample_project("badshapetype");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rectt\"\ntext = \"hi\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("unknown shape type `rectt`"),
+        "expected a shape-type error"
     );
 }
 

@@ -30,7 +30,7 @@ pub fn spec_json(project: &Project) -> Result<String> {
         .emu(0)
         .map_err(|e| miette!("[presentation].height: {e}"))?;
 
-    validate_defaults_and_styles(main_)?;
+    validate_styles(main_)?;
 
     let masters = load_masters(project, width, height, main_)?;
     let sections = resolve_sections(project)?;
@@ -47,28 +47,22 @@ pub fn spec_json(project: &Project) -> Result<String> {
     serde_json::to_string(&out).map_err(|e| miette!("cannot serialise spec: {e}"))
 }
 
-/// Validate `[defaults.*]` and `[styles.*]` option maps once, up front.
-fn validate_defaults_and_styles(main: &Main) -> Result<()> {
-    opts::validate_ctx(
-        Ctx::Text,
-        &toml::Value::Table(main.defaults.text.clone()),
-        "[defaults.text]",
-    )?;
-    opts::validate_ctx(
-        Ctx::Shape,
-        &toml::Value::Table(main.defaults.shape.clone()),
-        "[defaults.shape]",
-    )?;
-    opts::validate_ctx(
-        Ctx::Image,
-        &toml::Value::Table(main.defaults.image.clone()),
-        "[defaults.image]",
-    )?;
-    for (name, table) in &main.styles {
+/// Validate the unified `[styles.*]` tables once, up front.
+fn validate_styles(main: &Main) -> Result<()> {
+    for (ty, table) in &main.styles.by_type {
+        let ctx = opts::ctx_for_style_type(ty)
+            .ok_or_else(|| miette!("unknown style type `[styles.{ty}]` (not a shape type)"))?;
+        opts::validate_ctx(
+            ctx,
+            &toml::Value::Table(table.clone()),
+            &format!("[styles.{ty}]"),
+        )?;
+    }
+    for (name, table) in &main.styles.named {
         opts::validate_ctx(
             Ctx::Style,
             &toml::Value::Table(table.clone()),
-            &format!("[styles.{name}]"),
+            &format!("[styles.named.{name}]"),
         )?;
     }
     Ok(())
@@ -104,7 +98,10 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             .map_err(|e| miette!("cannot parse `{}`: {e}", entry.path().display()))?;
         let mut objects = Vec::new();
         for obj in &master.shapes {
-            let mut opts = merge_opts(main, defaults_key(&obj.ty), obj.style.as_deref(), &obj.opts);
+            if !matches!(obj.ty.as_str(), "chart") && opts::ctx_for_style_type(&obj.ty).is_none() {
+                return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
+            }
+            let mut opts = merge_opts(main, &obj.ty, obj.style.as_deref(), &obj.opts)?;
             let ctx = match obj.ty.as_str() {
                 "text" => Some(Ctx::Text),
                 "placeholder" => Some(Ctx::Placeholder),
@@ -201,16 +198,6 @@ fn slide_number_value(sn: &SlideNumber, width: i64, height: i64, master: &str) -
         out.insert(k.clone(), v.clone());
     }
     Ok(Value::Object(out))
-}
-
-/// Text content (and per-pptxgenjs text options) inside a master `text`
-/// object is handled by the bridge from `options.text`.
-fn defaults_key(ty: &str) -> &'static str {
-    match ty {
-        "text" => "text",
-        "image" | "placeholder" => "image",
-        _ => "shape",
-    }
 }
 
 fn build_sections(
@@ -314,6 +301,9 @@ fn shape_value(
     shape: &Shape,
 ) -> Result<Value> {
     let mut kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
+    if matches!(kind, Kind::Shape) && !opts::is_shape_type(&shape.ty) {
+        return Err(miette!("slide `{file}`: unknown shape type `{}`", shape.ty));
+    }
     // A shape preset with text becomes a text box drawn with that preset
     // (pptxgenjs `addText` accepts a `shape` option), so markdown works and
     // the shape's fill/line/font options all apply.
@@ -322,12 +312,7 @@ fn shape_value(
     if carries_text {
         kind = Kind::Text;
     }
-    let mut merged = merge_opts(
-        main,
-        defaults_key(&shape.ty),
-        shape.style.as_deref(),
-        &shape.opts,
-    );
+    let mut merged = merge_opts(main, &shape.ty, shape.style.as_deref(), &shape.opts)?;
     if carries_text {
         merged
             .as_table_mut()
@@ -497,25 +482,30 @@ fn media_data(project: &Project, src: &str) -> Result<(String, &'static str)> {
     Ok((format!("data:{mime};base64,{encoded}"), mime))
 }
 
-/// Merge `[defaults.<type>] == [styles.<name>] == shape.opts` (later wins).
+/// Merge `[styles.<type>]` == `[styles.named.<name>]` == shape.opts (later
+/// wins). An unknown named-style reference is an error so typos are caught.
 fn merge_opts(
     main: &Main,
-    default_key: &str,
+    ty: &str,
     style: Option<&str>,
     local: &toml::Table,
-) -> toml::Value {
-    let mut merged = main.defaults_map(default_key);
+) -> Result<toml::Value> {
+    let mut merged = main.type_defaults(ty);
     if let Some(name) = style
-        && let Some(style_opts) = main.styles.get(name)
+        && let Some(style_opts) = main.styles.named.get(name)
     {
         for (k, v) in style_opts {
             merged.insert(k.clone(), v.clone());
         }
+    } else if let Some(name) = style {
+        return Err(miette!(
+            "unknown style `{name}` (no `[styles.named.{name}]` in main.toml)"
+        ));
     }
     for (k, v) in local {
         merged.insert(k.clone(), v.clone());
     }
-    toml::Value::Table(merged)
+    Ok(toml::Value::Table(merged))
 }
 
 /// snake_case -> camelCase recursively over the pptxgenjs option object.
