@@ -1,40 +1,44 @@
-# The gwen project format
+# gwen
 
-gwen turns a TOML project into a PowerPoint deck. The project is the single
-source of truth; `build` never reads the original `.pptx`.
+Generate clean PowerPoint decks (`.pptx`) from TOML.
+
+## How it works
+
+A deck is a directory of TOML files — `main.toml`, `masters/*.toml` and
+`slides/*.toml` — that is the single source of truth. `gwen build` compiles it
+into a JSON spec and renders the deck with the **real pptxgenjs bundle** running
+on an embedded QuickJS runtime (`rquickjs`). The parts pptxgenjs produces are
+packaged into a valid `.pptx` container by gwen itself. gwen only ever calls
+pptxgenjs's public API — it never writes OOXML — and a `node` runtime is not
+required.
+
+## Quick start
+
+```sh
+gwen new <deck>      # scaffold a project
+gwen build <deck>    # render <deck>/target/<title>.pptx
+```
+
+`gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
+if set, otherwise `~/.gwen`. If `<home>/template/` is present, the new project
+is copied from it — `template/main.toml` (required, with its
+`[presentation] title` overwritten by the `<deck>` directory name) plus
+`template/masters/`, `template/slides/` and `template/media/` (copied
+recursively when present). Without a template, a small built-in starter deck is
+used. Pass `--no-template` to force the built-in scaffold even when a template
+is installed.
+
+## The gwen project format
 
 ```
 deck/
-  main.toml            presentation metadata, layout, theme, sections, defaults, styles
+  main.toml            presentation metadata, theme, sections, styles
   masters/*.toml       one slide master per file (the file stem is the master name)
   slides/*.toml        one slide per file
   media/               images referenced by slides and masters
 ```
 
-Run `gwen new <deck>` to scaffold one, then `gwen build <deck>`. The deck is
-written to `<deck>/target/<title>.pptx`. gwen translates the project into a
-pptxgenjs spec and renders it with the real `pptxgenjs` bundle running on an
-embedded QuickJS runtime (rquickjs); the parts pptxgenjs produces are packaged
-into the `.pptx` container by gwen itself. gwen only ever calls pptxgenjs's
-public API — it never writes OOXML. A `node` runtime is not required.
-
-## `gwen new` and templates
-
-`gwen new <deck>` looks for a template in gwen's home directory — `$GWEN_HOME`
-if set, otherwise `~/.gwen`. If `$GWEN_HOME/template/` exists, the new project
-is copied from it:
-
-- `template/main.toml` is required and is copied; its `[presentation] title`
-  is **overwritten** with the `<deck>` directory name;
-- `template/masters/`, `template/slides/` and `template/media/` are copied
-  recursively when present;
-- everything else in the template is ignored.
-
-If no template exists, `gwen new` falls back to a small built-in starter
-deck. Pass `--no-template` to force the built-in scaffold even when a template
-is installed.
-
-## `main.toml`
+### `main.toml`
 
 ```toml
 [presentation]      # most fields optional (defaults ""/false)
@@ -48,8 +52,8 @@ width = 12196763    # slide size: EMU int or "1in"/"2.5cm"/"25mm"/"72pt"/"50%"
 height = 6858000    # default width/height = 13.3386in x 7.5in
 
 [theme]             # optional, defaults Calibri
-major_font = "Arial Black"
-minor_font = "Arial"
+major_font = "Arial Black"    # inherited by placeholder/heading text
+minor_font = "Arial"          # inherited by ordinary text without font_face
 
 [[sections]]        # required; the slide ordering index
 title = "Intro"
@@ -75,21 +79,21 @@ italic = true
 
 Option keys are snake_case and map to the pptxgenjs camelCase properties
 (`font_size` -> `fontSize`, `line_spacing` -> `lineSpacing`, ...); any key
-pptxgenjs accepts can be set, and unknown keys pass straight through.
+pptxgenjs accepts can be set.
 
 Precedence when building a shape's options:
-`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < `[styles.named.<name>]` < the shape's
-own keys. Shape-preset buckets (`[styles.rect]`, `[styles.ellipse]`, ...) may
-also carry text options (`font_face`, `font_size`, ...) since those presets
-can contain text. Shapes that carry text fall back to `[styles.text]` for any
-text option the type bucket doesn't set. A `style = "<name>"` reference to a
-`[styles.named.<name>]` block that doesn't exist is an error.
+`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < `[styles.named.<name>]` <
+the shape's own keys. Shape-preset buckets (`[styles.rect]`, `[styles.ellipse]`,
+...) may also carry text options (`font_face`, `font_size`, ...), since those
+presets can contain text; shapes that carry text fall back to `[styles.text]`
+for any text option the type bucket doesn't set. A `style = "<name>"` reference
+to a `[styles.named.<name>]` block that doesn't exist is an error.
 
 `[[sections]]` is required — building without it is an error. A slide listed
 in more than one section is an error; a slide not listed at all is not
 rendered.
 
-## `masters/<name>.toml`
+### `masters/<name>.toml`
 
 The master name is the file stem — there is no `title` field. Elements are
 `[[shapes]]`, exactly like slides.
@@ -133,7 +137,7 @@ write. A slide fills one by setting `placeholder = "<name>"` on a text shape
 (its geometry is inherited from the master). Referencing a placeholder the
 master doesn't define is an error.
 
-## `slides/<name>.toml`
+### `slides/<name>.toml`
 
 ```toml
 master = "brand"                    # optional master name
@@ -192,10 +196,9 @@ valign = "middle"
 text = "**OK**"
 ```
 
-Equivalently, a text shape can draw a preset explicitly with
-`shape = "rect"`.
+Equivalently, a text shape can draw a preset explicitly with `shape = "rect"`.
 
-## Rich text
+### Rich text
 
 `text` (and each `[[shapes.paragraphs]]` entry) is parsed by `pulldown-cmark`:
 
@@ -211,7 +214,7 @@ Equivalently, a text shape can draw a preset explicitly with
 A single `\n` becomes a soft line break (pptxgenjs `softBreakBefore`); a blank
 line starts a new paragraph. `  \n` (a hard break) behaves like a soft break.
 
-## Explicit paragraphs
+### Explicit paragraphs
 
 For per-paragraph options use `[[shapes.paragraphs]]`; `text` is then ignored.
 
@@ -224,14 +227,14 @@ w = "7in"
 h = "4in"
 font_size = 20
 
-  [[shapes.paragraphs]]
-  text = "**first** bullet point"
-  bullet = true
+[[shapes.paragraphs]]
+text = "**first** bullet point"
+bullet = true
 
-  [[shapes.paragraphs]]
-  text = "second point"
-  bullet = true
-  level = 1
+[[shapes.paragraphs]]
+text = "second point"
+bullet = true
+level = 1
 ```
 
 Paragraph options (`bullet`, `level`, `line_spacing`, `para_space_before`,
@@ -240,7 +243,7 @@ paragraph level in v1 — pptxgenjs auto-splits paragraphs on `align` changes,
 which clashes with explicit paragraph boundaries; use the shape-level `align`
 instead.
 
-## Coordinates
+### Coordinates
 
 All `x`/`y`/`w`/`h` values are English Metric Units (EMU) when written as
 plain integers. Unit-suffixed strings and percentages are also accepted:
@@ -248,7 +251,18 @@ plain integers. Unit-suffixed strings and percentages are also accepted:
 - `"1in"`, `"2.5cm"`, `"25mm"`, `"72pt"`
 - `"50%"` — relative to the slide width (`x`/`w`) or height (`y`/`h`)
 
+### Validation
+
+Unknown TOML fields (a misspelled table or key such as `[[shaps]]`) and unknown
+pptxgenjs option keys (`fount_size`, a stray key inside `fill`, an unknown
+`style = "<name>"`) are build errors, so typos fail loudly instead of being
+silently ignored.
+
 ## Rendering
 
-The spec is a plain JSON document — it is `JSON.parse`d and passed to
-pptxgenjs objects; nothing from the project is ever evaluated as code.
+`gwen build` turns the project into a JSON spec string (`render.rs`). Inside
+the embedded QuickJS runtime, the bridge parses that string with
+`JSON.parse(specJson)` — it becomes a plain JavaScript **data** object, nothing
+more — and passes it to pptxgenjs's public methods (`defineSlideMaster`,
+`addSlide`, `addText`, `addShape`, ...). The spec is data only: nothing from
+your TOML is ever `eval`'d or executed as code in the runtime.
