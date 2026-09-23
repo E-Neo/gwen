@@ -313,13 +313,27 @@ fn shape_value(
     file: &str,
     shape: &Shape,
 ) -> Result<Value> {
-    let kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
-    let merged = merge_opts(
+    let mut kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
+    // A shape preset with text becomes a text box drawn with that preset
+    // (pptxgenjs `addText` accepts a `shape` option), so markdown works and
+    // the shape's fill/line/font options all apply.
+    let carries_text =
+        matches!(kind, Kind::Shape) && (shape.text.is_some() || !shape.paragraphs.is_empty());
+    if carries_text {
+        kind = Kind::Text;
+    }
+    let mut merged = merge_opts(
         main,
         defaults_key(&shape.ty),
         shape.style.as_deref(),
         &shape.opts,
     );
+    if carries_text {
+        merged
+            .as_table_mut()
+            .unwrap()
+            .insert("shape".into(), toml::Value::String(shape.ty.clone()));
+    }
     let ctx = match kind {
         Kind::Text => Ctx::Text,
         Kind::Image => Ctx::Image,

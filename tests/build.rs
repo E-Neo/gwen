@@ -257,6 +257,38 @@ fn multiple_sections_have_unique_ids() {
 }
 
 #[test]
+fn rect_with_text_renders_bold_inside() {
+    let dir = sample_project("recttext");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "rect"
+x = "1cm"
+y = "1cm"
+w = "4cm"
+h = "1cm"
+font_size = 14
+align = "left"
+valign = "top"
+text = "**Bold** and plain"
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(
+        xml.contains("prstGeom prst=\"rect\""),
+        "rect preset is drawn"
+    );
+    assert!(xml.contains("<a:t>Bold</a:t>"), "bold run text present");
+    assert!(xml.contains("b=\"1\""), "bold applied to the run");
+    assert!(!xml.contains("**"), "no literal markdown stars");
+}
+
+#[test]
 fn build_produces_a_pptx_package() {
     let dir = sample_project("basic");
     let out = gwen::build(&dir).unwrap();

@@ -149,6 +149,26 @@ src = "media/pixel.png"             # relative to the deck root
 
 `chart`, `table` and `media` shape types are recognised but not supported yet.
 
+A shape preset that carries `text` draws the shape **with** the text inside it
+(markdown works, and the shape's `fill`/`line`/font options all apply):
+
+```toml
+[[shapes]]
+type = "rect"
+x = "1cm"
+y = "1cm"
+w = "4cm"
+h = "1cm"
+fill = { color = "C7000A" }
+color = "FFFFFF"
+align = "center"
+valign = "middle"
+text = "**OK**"
+```
+
+Equivalently, a text shape can draw a preset explicitly with
+`shape = "rect"`.
+
 ## Rich text
 
 `text` (and each `[[shapes.paragraphs]]` entry) is parsed by `pulldown-cmark`:
