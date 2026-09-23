@@ -205,7 +205,7 @@ pub fn ctx_for_style_type(ty: &str) -> Option<Ctx> {
         "text" => Some(Ctx::Text),
         "image" => Some(Ctx::Image),
         "placeholder" => Some(Ctx::Placeholder),
-        p if SHAPE_PRESETS.contains(&p) => Some(Ctx::Shape),
+        p if SHAPE_PRESETS.contains(&p) => Some(Ctx::TextShape),
         _ => None,
     }
 }
@@ -218,8 +218,9 @@ pub enum Ctx {
     Text,
     /// Master placeholder options: text options plus `name`/`ph_type`.
     Placeholder,
-    /// Shape presets (rect, roundRect, line, ...).
-    Shape,
+    /// Shape presets (rect, roundRect, line, ...): shape options plus text
+    /// options, because any preset may carry text.
+    TextShape,
     /// Images.
     Image,
     /// Slide/master backgrounds.
@@ -287,24 +288,66 @@ const TEXT_KEYS: &[&str] = &[
     "line_tail",
 ];
 
-const SHAPE_KEYS: &[&str] = &[
+/// Shape presets can carry text (rect/ellipse/... with a `text` value), so
+/// their option maps accept both shape and text keys.
+const TEXTSHAPE_KEYS: &[&str] = &[
     "align",
-    "angle_range",
-    "arc_thickness_ratio",
+    "bold",
+    "break_line",
+    "bullet",
+    "color",
+    "font_face",
+    "font_size",
+    "highlight",
+    "italic",
+    "lang",
+    "soft_break_before",
+    "tab_stops",
+    "text_direction",
+    "transparency",
+    "underline",
+    "valign",
+    "baseline",
+    "char_spacing",
+    "fit",
     "fill",
     "flip_h",
     "flip_v",
+    "glow",
     "hyperlink",
+    "indent_level",
+    "is_text_box",
     "line",
-    "points",
+    "line_spacing",
+    "line_spacing_multiple",
+    "margin",
+    "outline",
+    "para_space_after",
+    "para_space_before",
+    "placeholder",
     "rect_radius",
     "rotate",
+    "rtl_mode",
     "shadow",
+    "shape",
+    "strike",
+    "subscript",
+    "superscript",
+    "vert",
+    "wrap",
+    "auto_fit",
+    "shrink_text",
+    "inset",
     "object_name",
-    "line_size",
+    "path",
+    "data",
     "line_dash",
     "line_head",
+    "line_size",
     "line_tail",
+    "angle_range",
+    "arc_thickness_ratio",
+    "points",
     "shape_name",
 ];
 
@@ -462,7 +505,7 @@ pub fn validate_ctx(ctx: Ctx, value: &toml::Value, where_: &str) -> Result<()> {
     let (keys, label, extra): (&[&str], &str, &[&str]) = match ctx {
         Ctx::Text => (TEXT_KEYS, "text", &[]),
         Ctx::Placeholder => (TEXT_KEYS, "placeholder", &["name", "ph_type"]),
-        Ctx::Shape => (SHAPE_KEYS, "shape", &[]),
+        Ctx::TextShape => (TEXTSHAPE_KEYS, "shape", &[]),
         Ctx::Image => (IMAGE_KEYS, "image", &[]),
         Ctx::Background => (BACKGROUND_KEYS, "background", &[]),
         Ctx::Style => (STYLE_KEYS, "style", &[]),

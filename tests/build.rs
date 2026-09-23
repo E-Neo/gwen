@@ -426,6 +426,45 @@ fn unknown_shape_type_is_reported() {
 }
 
 #[test]
+fn preset_style_bucket_allows_text_options() {
+    let dir = sample_project("rectstyle");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main =
+        format!("{main}\n[styles.rect]\nfont_face = \"Arial\"\nfill = {{ color = \"112233\" }}\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\n",
+    );
+    gwen::build(&dir).unwrap();
+}
+
+#[test]
+fn text_style_falls_back_for_text_carrying_shape() {
+    let dir = sample_project("textfallback");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = format!("{main}\n[styles.rect]\nfont_size = 14\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\ntext = \"**Bold** text\"\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(
+        xml.contains("Arial"),
+        "font_face falls back to [styles.text]"
+    );
+    assert!(
+        xml.contains("sz=\"1400\""),
+        "font_size from [styles.rect] wins"
+    );
+    assert!(xml.contains("<a:t>Bold</a:t>"), "text rendered");
+}
+
+#[test]
 fn bad_ph_type_is_reported() {
     let dir = sample_project("badphtype");
     write(

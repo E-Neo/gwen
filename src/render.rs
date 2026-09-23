@@ -101,13 +101,19 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             if !matches!(obj.ty.as_str(), "chart") && opts::ctx_for_style_type(&obj.ty).is_none() {
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
             }
-            let mut opts = merge_opts(main, &obj.ty, obj.style.as_deref(), &obj.opts)?;
+            let mut opts = merge_opts(
+                main,
+                &obj.ty,
+                matches!(obj.ty.as_str(), "text" | "placeholder"),
+                obj.style.as_deref(),
+                &obj.opts,
+            )?;
             let ctx = match obj.ty.as_str() {
                 "text" => Some(Ctx::Text),
                 "placeholder" => Some(Ctx::Placeholder),
                 "image" => Some(Ctx::Image),
                 "chart" => None,
-                _ => Some(Ctx::Shape),
+                _ => Some(Ctx::TextShape),
             };
             if let Some(ctx) = ctx {
                 opts::validate_ctx(ctx, &opts, &format!("master `{stem}` shape `{}`", obj.ty))?;
@@ -312,7 +318,13 @@ fn shape_value(
     if carries_text {
         kind = Kind::Text;
     }
-    let mut merged = merge_opts(main, &shape.ty, shape.style.as_deref(), &shape.opts)?;
+    let mut merged = merge_opts(
+        main,
+        &shape.ty,
+        carries_text,
+        shape.style.as_deref(),
+        &shape.opts,
+    )?;
     if carries_text {
         merged
             .as_table_mut()
@@ -322,7 +334,7 @@ fn shape_value(
     let ctx = match kind {
         Kind::Text => Ctx::Text,
         Kind::Image => Ctx::Image,
-        Kind::Shape => Ctx::Shape,
+        Kind::Shape => Ctx::TextShape,
     };
     opts::validate_ctx(
         ctx,
@@ -483,14 +495,17 @@ fn media_data(project: &Project, src: &str) -> Result<(String, &'static str)> {
 }
 
 /// Merge `[styles.<type>]` == `[styles.named.<name>]` == shape.opts (later
-/// wins). An unknown named-style reference is an error so typos are caught.
+/// wins). Text-carrying shapes layer `[styles.text]` beneath the type bucket,
+/// so type-specific styles win and text options fall back to `[styles.text]`.
+/// An unknown named-style reference is an error so typos are caught.
 fn merge_opts(
     main: &Main,
     ty: &str,
+    carries_text: bool,
     style: Option<&str>,
     local: &toml::Table,
 ) -> Result<toml::Value> {
-    let mut merged = main.type_defaults(ty);
+    let mut merged = main.type_defaults_with_text(ty, carries_text);
     if let Some(name) = style
         && let Some(style_opts) = main.styles.named.get(name)
     {

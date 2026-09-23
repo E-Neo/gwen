@@ -78,9 +78,12 @@ Option keys are snake_case and map to the pptxgenjs camelCase properties
 pptxgenjs accepts can be set, and unknown keys pass straight through.
 
 Precedence when building a shape's options:
-`[styles.shape]` < `[styles.<type>]` < `[styles.named.<name>]` < the shape's
-own keys. A `style = "<name>"` reference to a `[styles.named.<name>]` block
-that doesn't exist is an error.
+`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < `[styles.named.<name>]` < the shape's
+own keys. Shape-preset buckets (`[styles.rect]`, `[styles.ellipse]`, ...) may
+also carry text options (`font_face`, `font_size`, ...) since those presets
+can contain text. Shapes that carry text fall back to `[styles.text]` for any
+text option the type bucket doesn't set. A `style = "<name>"` reference to a
+`[styles.named.<name>]` block that doesn't exist is an error.
 
 `[[sections]]` is required — building without it is an error. A slide listed
 in more than one section is an error; a slide not listed at all is not

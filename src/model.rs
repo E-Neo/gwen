@@ -231,15 +231,30 @@ impl Shape {
 
 impl Main {
     /// The built-in style defaults for a shape type: `[styles.shape]` (the
-    /// fallback for every shape) layered with the type-specific
-    /// `[styles.<type>]` bucket if present.
-    pub fn type_defaults(&self, ty: &str) -> toml::Table {
+    /// fallback for every shape) layered with `[styles.text]` when the shape
+    /// carries text, then the type-specific `[styles.<type>]` bucket. Later
+    /// layers win, so `[styles.text]` is the fallback for text options and
+    /// the type bucket overrides it.
+    pub fn type_defaults_with_text(&self, ty: &str, carries_text: bool) -> toml::Table {
         let mut out = toml::Table::new();
-        for layer in ["shape", ty] {
+        for layer in ["shape"] {
             if let Some(t) = self.styles.by_type.get(layer) {
                 for (k, v) in t {
                     out.insert(k.clone(), v.clone());
                 }
+            }
+        }
+        if carries_text
+            && ty != "text"
+            && let Some(text) = self.styles.by_type.get("text")
+        {
+            for (k, v) in text {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(specific) = self.styles.by_type.get(ty) {
+            for (k, v) in specific {
+                out.insert(k.clone(), v.clone());
             }
         }
         out
@@ -287,7 +302,7 @@ mod tests {
             "[styles.shape]\nfill = { color = \"C7000A\" }\ncolor = \"FFFFFF\"\n[styles.rect]\nfill = { color = \"112233\" }\n",
         );
         // rect inherits the shared `color` but its own `fill` wins.
-        let merged = main.type_defaults("rect");
+        let merged = main.type_defaults_with_text("rect", false);
         assert_eq!(merged.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(
             merged
@@ -300,9 +315,25 @@ mod tests {
                 == "112233"
         );
         // an unspecified preset falls back to [styles.shape] alone.
-        let ellipse = main.type_defaults("ellipse");
+        let ellipse = main.type_defaults_with_text("ellipse", false);
         assert_eq!(ellipse.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(ellipse.get("fill").is_some());
+    }
+
+    #[test]
+    fn text_fallback_layers_beneath_type() {
+        let main = main_toml(
+            "[styles.text]\nfont_face = \"Arial\"\nfont_size = 12\n[styles.rect]\nfont_size = 14\n",
+        );
+        // A text-carrying rect gets the text font_face but its own font_size.
+        let merged = main.type_defaults_with_text("rect", true);
+        assert_eq!(merged.get("font_face").unwrap().as_str().unwrap(), "Arial");
+        assert_eq!(merged.get("font_size").unwrap().as_integer().unwrap(), 14);
+        // A plain rect (no text) does NOT pick up the [styles.text] fallback,
+        // but still gets the [styles.rect] font_size.
+        let plain = main.type_defaults_with_text("rect", false);
+        assert!(plain.get("font_face").is_none());
+        assert_eq!(plain.get("font_size").unwrap().as_integer().unwrap(), 14);
     }
 
     #[test]
