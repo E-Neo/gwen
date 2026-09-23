@@ -472,9 +472,11 @@ fn unknown_placeholder_fill_is_reported() {
 fn gwen_new_scaffolds_a_buildable_project() {
     let dir = tmp("scaffold");
     let _ = std::fs::remove_dir_all(&dir);
+    let empty_home = tmp("empty-home");
     let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
         .arg("new")
         .arg(dir.as_os_str())
+        .env("GWEN_HOME", &empty_home)
         .output()
         .unwrap();
     assert!(
@@ -488,4 +490,122 @@ fn gwen_new_scaffolds_a_buildable_project() {
     let deck = gwen::build(&dir).unwrap();
     let bytes = std::fs::read(&deck).unwrap();
     assert_eq!(&bytes[0..2], b"PK");
+}
+
+/// A fake gwen home containing a `template/` tree.
+fn template_home(name: &str) -> PathBuf {
+    let home = tmp(name);
+    let t = home.join("template");
+    write(
+        &t.join("main.toml"),
+        "[presentation]\ntitle = \"Ignored\"\n\n[[sections]]\ntitle = \"T\"\nslides = [\"a.toml\"]\n",
+    );
+    write(
+        &t.join("masters").join("a.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
+        &t.join("slides").join("a.toml"),
+        "[[shapes]]\ntype = \"text\"\ntext = \"from template\"\n",
+    );
+    write(&t.join("media").join("keep.txt"), "payload\n");
+    home
+}
+
+#[test]
+fn gwen_new_uses_template() {
+    let home = template_home("home-t");
+    let dir = tmp("from-template");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        main.contains(&format!("title = \"{name}\"")),
+        "title overridden"
+    );
+    assert!(
+        !main.contains("title = \"Ignored\""),
+        "template title ignored"
+    );
+    assert!(
+        dir.join("masters").join("a.toml").is_file(),
+        "masters copied"
+    );
+    assert!(dir.join("slides").join("a.toml").is_file(), "slides copied");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("media").join("keep.txt")).unwrap(),
+        "payload\n"
+    );
+    assert!(
+        !dir.join("slides").join("title.toml").is_file(),
+        "no built-in slide"
+    );
+    gwen::build(&dir).unwrap();
+}
+
+#[test]
+fn gwen_new_falls_back_when_no_template() {
+    let home = tmp("home-none");
+    let dir = tmp("fallback");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("masters").join("base.toml").is_file(),
+        "built-in master"
+    );
+    assert!(
+        dir.join("slides").join("intro.toml").is_file(),
+        "built-in slides"
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(main.contains(&format!("title = \"{name}\"")));
+}
+
+#[test]
+fn gwen_new_no_template_flag_ignores_template() {
+    let home = template_home("home-flag");
+    let dir = tmp("no-template");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg("--no-template")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("masters").join("base.toml").is_file(),
+        "built-in scaffold used"
+    );
+    assert!(
+        !dir.join("slides").join("a.toml").is_file(),
+        "template slide absent"
+    );
 }

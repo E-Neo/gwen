@@ -18,6 +18,22 @@ embedded QuickJS runtime (rquickjs); the parts pptxgenjs produces are packaged
 into the `.pptx` container by gwen itself. gwen only ever calls pptxgenjs's
 public API — it never writes OOXML. A `node` runtime is not required.
 
+## `gwen new` and templates
+
+`gwen new <deck>` looks for a template in gwen's home directory — `$GWEN_HOME`
+if set, otherwise `~/.gwen`. If `$GWEN_HOME/template/` exists, the new project
+is copied from it:
+
+- `template/main.toml` is required and is copied; its `[presentation] title`
+  is **overwritten** with the `<deck>` directory name;
+- `template/masters/`, `template/slides/` and `template/media/` are copied
+  recursively when present;
+- everything else in the template is ignored.
+
+If no template exists, `gwen new` falls back to a small built-in starter
+deck. Pass `--no-template` to force the built-in scaffold even when a template
+is installed.
+
 ## `main.toml`
 
 ```toml
