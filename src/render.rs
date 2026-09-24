@@ -50,13 +50,14 @@ pub fn spec_json(project: &Project) -> Result<String> {
 /// Validate the unified `[styles.*]` tables once, up front.
 fn validate_styles(main: &Main) -> Result<()> {
     for (ty, table) in &main.styles.by_type {
-        let ctx = opts::ctx_for_style_type(ty)
+        let ctx = opts::ctx_for_style_type(opts::canonical_preset(ty).unwrap_or(ty))
             .ok_or_else(|| miette!("unknown style type `[styles.{ty}]` (not a shape type)"))?;
         opts::validate_ctx(
             ctx,
             &toml::Value::Table(table.clone()),
             &format!("[styles.{ty}]"),
         )?;
+        opts::validate_list_markers(table, &format!("[styles.{ty}]"))?;
     }
     for (name, table) in &main.styles.named {
         opts::validate_ctx(
@@ -64,6 +65,7 @@ fn validate_styles(main: &Main) -> Result<()> {
             &toml::Value::Table(table.clone()),
             &format!("[styles.named.{name}]"),
         )?;
+        opts::validate_list_markers(table, &format!("[styles.named.{name}]"))?;
     }
     Ok(())
 }
@@ -98,17 +100,19 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             .map_err(|e| miette!("cannot parse `{}`: {e}", entry.path().display()))?;
         let mut objects = Vec::new();
         for obj in &master.shapes {
-            if !matches!(obj.ty.as_str(), "chart") && opts::ctx_for_style_type(&obj.ty).is_none() {
+            let ty = opts::canonical_preset(&obj.ty).unwrap_or(&obj.ty);
+            if !matches!(ty, "chart") && opts::ctx_for_style_type(ty).is_none() {
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
             }
             let mut opts = merge_opts(
                 main,
-                &obj.ty,
-                matches!(obj.ty.as_str(), "text" | "placeholder"),
+                ty,
+                matches!(ty, "text" | "placeholder"),
                 obj.style.as_deref(),
                 &obj.opts,
             )?;
-            let ctx = match obj.ty.as_str() {
+            let _ = take_markers(&mut opts);
+            let ctx = match ty {
                 "text" => Some(Ctx::Text),
                 "placeholder" => Some(Ctx::Placeholder),
                 "image" => Some(Ctx::Image),
@@ -310,6 +314,7 @@ fn shape_value(
     if matches!(kind, Kind::Shape) && !opts::is_shape_type(&shape.ty) {
         return Err(miette!("slide `{file}`: unknown shape type `{}`", shape.ty));
     }
+    let canon_ty = opts::canonical_preset(&shape.ty).unwrap_or(&shape.ty);
     // A shape preset with text becomes a text box drawn with that preset
     // (pptxgenjs `addText` accepts a `shape` option), so markdown works and
     // the shape's fill/line/font options all apply.
@@ -320,16 +325,17 @@ fn shape_value(
     }
     let mut merged = merge_opts(
         main,
-        &shape.ty,
+        canon_ty,
         carries_text,
         shape.style.as_deref(),
         &shape.opts,
     )?;
+    let (ordered_markers, unordered_markers) = take_markers(&mut merged);
     if carries_text {
         merged
             .as_table_mut()
             .unwrap()
-            .insert("shape".into(), toml::Value::String(shape.ty.clone()));
+            .insert("shape".into(), toml::Value::String(canon_ty.to_string()));
     }
     let ctx = match kind {
         Kind::Text => Ctx::Text,
@@ -351,7 +357,10 @@ fn shape_value(
     match kind {
         Kind::Text => {
             value.insert("kind".into(), json!("text"));
-            value.insert("runs".into(), runs_value(shape, file)?);
+            value.insert(
+                "runs".into(),
+                runs_value(shape, file, &ordered_markers, &unordered_markers)?,
+            );
             for (k, v) in opts.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }
@@ -383,13 +392,18 @@ fn shape_value(
 /// the paragraph *after* that run) and the first run of a paragraph carries
 /// its own options (`bullet`, `indent_level`, `line_spacing`, ...). A markdown
 /// single `\n` already became a `softBreakBefore` run. `align` is dropped from
-/// paragraph options in v1 because pptxgenjs auto-splits paragraphs on `align`
+/// paragraph options because pptxgenjs auto-splits paragraphs on `align`
 /// changes, which would double-split with `breakLine`; use the shape-level
 /// `align` instead.
 ///
 /// Text is `[[paragraphs]]` if given, else the `text` shorthand, else one
 /// empty run so `addText` always has content.
-fn runs_value(shape: &Shape, file: &str) -> Result<Value> {
+fn runs_value(
+    shape: &Shape,
+    file: &str,
+    ordered_markers: &[String],
+    unordered_markers: &[String],
+) -> Result<Value> {
     struct Para<'a> {
         text: &'a str,
         opts: &'a toml::Table,
@@ -432,7 +446,7 @@ fn runs_value(shape: &Shape, file: &str) -> Result<Value> {
             .filter(|(k, _)| k.as_str() != "align")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Map<_, _>>();
-        for runs in richtext::parse_paragraphs(para.text) {
+        for runs in richtext::parse_paragraphs(para.text, ordered_markers, unordered_markers) {
             groups.push(Group {
                 runs,
                 opts: para_opts.clone(),
@@ -521,6 +535,22 @@ fn merge_opts(
         merged.insert(k.clone(), v.clone());
     }
     Ok(toml::Value::Table(merged))
+}
+
+/// Remove the gwen-owned list-marker options from a merged options table,
+/// returning them (they configure markdown list rendering, not pptxgenjs).
+fn take_markers(merged: &mut toml::Value) -> (Vec<String>, Vec<String>) {
+    let table = merged.as_table_mut().unwrap();
+    let mut strings = |key: &str| -> Vec<String> {
+        match table.remove(key) {
+            Some(toml::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    (strings("ordered_markers"), strings("unordered_markers"))
 }
 
 /// snake_case -> camelCase recursively over the pptxgenjs option object.

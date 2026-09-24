@@ -234,28 +234,24 @@ impl Main {
     /// fallback for every shape) layered with `[styles.text]` when the shape
     /// carries text, then the type-specific `[styles.<type>]` bucket. Later
     /// layers win, so `[styles.text]` is the fallback for text options and
-    /// the type bucket overrides it.
+    /// the type bucket overrides it. Bucket keys are matched by the type's
+    /// canonical preset id (`roundRect`) or its snake form (`round_rect`).
     pub fn type_defaults_with_text(&self, ty: &str, carries_text: bool) -> toml::Table {
-        let mut out = toml::Table::new();
-        for layer in ["shape"] {
-            if let Some(t) = self.styles.by_type.get(layer) {
+        let extend = |out: &mut toml::Table, key: &str| {
+            if let Some(t) = self.styles.by_type.get(key) {
                 for (k, v) in t {
                     out.insert(k.clone(), v.clone());
                 }
             }
+        };
+        let mut out = toml::Table::new();
+        extend(&mut out, "shape");
+        if carries_text && ty != "text" {
+            extend(&mut out, "text");
         }
-        if carries_text
-            && ty != "text"
-            && let Some(text) = self.styles.by_type.get("text")
-        {
-            for (k, v) in text {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(specific) = self.styles.by_type.get(ty) {
-            for (k, v) in specific {
-                out.insert(k.clone(), v.clone());
-            }
+        extend(&mut out, ty);
+        if let Some(canon) = crate::opts::canonical_preset(ty) {
+            extend(&mut out, canon);
         }
         out
     }

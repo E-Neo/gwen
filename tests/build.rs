@@ -648,3 +648,79 @@ fn gwen_new_no_template_flag_ignores_template() {
         "template slide absent"
     );
 }
+
+#[test]
+fn markdown_lists_render_bullets_with_per_level_markers() {
+    let dir = sample_project("listmarkers");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "deck"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[styles.text]
+font_face = "Arial"
+ordered_markers = ["A."]
+unordered_markers = ["\u25BA"]
+
+[[sections]]
+title = "Intro"
+slides = ["content.toml"]
+"##,
+    );
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"[[shapes]]
+type = "text"
+x = "1in"
+y = "1in"
+w = "8in"
+h = "4in"
+text = "abc\n- a\n- b\n  1. x\n  2. y"
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide1.xml").expect("slide1 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(
+        xml.contains("buChar char=\"&#x25BA;\""),
+        "unordered rune bullet"
+    );
+    assert!(
+        xml.contains("buAutoNum type=\"alphaUcPeriod\""),
+        "ordered marker \"A.\" maps to alphaUcPeriod"
+    );
+    assert!(xml.contains("<a:t>abc</a:t>"), "plain line still renders");
+    assert!(xml.contains("<a:t>y</a:t>"), "nested item renders");
+}
+
+#[test]
+fn snake_case_shape_type_builds_as_preset() {
+    let dir = sample_project("snakepreset");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"[[shapes]]
+type = "round_rect"
+x = "1in"
+y = "1in"
+w = "3in"
+h = "1in"
+text = "**Box**"
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(
+        xml.contains("prstGeom prst=\"roundRect\""),
+        "snake preset canonicalised"
+    );
+    assert!(xml.contains("<a:t>Box</a:t>"), "text inside renders");
+}

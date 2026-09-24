@@ -206,7 +206,7 @@ Equivalently, a text shape can draw a preset explicitly with `shape = "rect"`.
 |---------------------|-------------------------------------------------|
 | `*italic*`          | italic run                                      |
 | `**bold**`          | bold run                                        |
-| `` `code` ``        | plain run (v1)                                  |
+| `` `code` ``        | plain run                                     |
 | `[text](url)`       | run with a hyperlink                            |
 | single `\n`         | soft line break                                 |
 | blank line (`\n\n`) | new paragraph                                   |
@@ -234,14 +234,39 @@ bullet = true
 [[shapes.paragraphs]]
 text = "second point"
 bullet = true
-level = 1
+indent_level = 1
 ```
 
-Paragraph options (`bullet`, `level`, `line_spacing`, `para_space_before`,
-...) are applied to the paragraph's first run. `align` is not supported at the
-paragraph level in v1 — pptxgenjs auto-splits paragraphs on `align` changes,
-which clashes with explicit paragraph boundaries; use the shape-level `align`
-instead.
+Paragraph options (`bullet`, `indent_level`, `line_spacing`,
+`para_space_before`, ...) are applied to the paragraph's first run. `align` is
+not supported at the paragraph level — pptxgenjs auto-splits paragraphs
+on `align` changes, which clashes with explicit paragraph boundaries; use the
+shape-level `align` instead.
+
+### Lists
+
+Markdown lists in `text` become bulleted paragraphs with the correct indent
+level (top-level = 0, nested = parent + 1). The marker style per indent level
+is configured in style buckets:
+
+```toml
+[styles.text]
+ordered_markers = ["1.", "A.", "i)"]     # auto-number patterns per level
+unordered_markers = ["\u25BA", "\u2022"] # bullet runes per level
+```
+
+- `ordered_markers` entries are display patterns (`"1"`, `"1."`, `"1)"`,
+  `"(1)"`, `"a."`, `"A."`, `"a)"`, `"A)"`, `"(a)"`, `"(A)"`, `"i."`, `"I."`,
+  `"i)"`, `"I)"`, `"(i)"`, `"(I)"`) mapped to pptxgenjs `buAutoNum` types;
+  default `"1."`.
+- `unordered_markers` entries are the actual bullet characters; gwen converts
+  them to character codes internally. Default: the standard bullet.
+- A level with no entry falls back to the last configured marker, else the
+  default. These keys are gwen-owned (never passed to pptxgenjs).
+
+Shape preset names are snake_case in the DSL — `round_rect`, `flow_chart_process`,
+`action_button_back_previous` — and are canonicalised to pptxgenjs's camelCase
+(`roundRect`, ...) internally; the camelCase forms still work too.
 
 ### Coordinates
 

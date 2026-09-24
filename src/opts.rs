@@ -191,10 +191,35 @@ pub const SHAPE_PRESETS: &[&str] = &[
     "wedgeRoundRectCallout",
 ];
 
+/// `snake_case -> camelCase` (used to canonicalise shape preset names, so
+/// `round_rect` and `roundRect` both resolve).
+pub fn snake_to_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut upper_next = false;
+    for c in s.chars() {
+        if c == '_' {
+            upper_next = true;
+        } else if upper_next {
+            out.push(c.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Resolve a shape `type` to its canonical pptxgenjs preset id, accepting
+/// snake_case (`round_rect`) or the camelCase preset (`roundRect`).
+pub fn canonical_preset(ty: &str) -> Option<&'static str> {
+    let camel = snake_to_camel(ty);
+    SHAPE_PRESETS.iter().find(|p| **p == camel).copied()
+}
+
 /// Whether a shape `type` is a valid slide shape type (`text`, `image`, or a
 /// shape preset). Chart/table/media are handled separately as reserved.
 pub fn is_shape_type(ty: &str) -> bool {
-    matches!(ty, "text" | "image") || SHAPE_PRESETS.contains(&ty)
+    matches!(ty, "text" | "image") || canonical_preset(ty).is_some()
 }
 
 /// Which option context a `[styles.<type>]` bucket feeds. `shape` is the
@@ -286,6 +311,8 @@ const TEXT_KEYS: &[&str] = &[
     "line_head",
     "line_size",
     "line_tail",
+    "ordered_markers",
+    "unordered_markers",
 ];
 
 /// Shape presets can carry text (rect/ellipse/... with a `text` value), so
@@ -345,6 +372,8 @@ const TEXTSHAPE_KEYS: &[&str] = &[
     "line_head",
     "line_size",
     "line_tail",
+    "ordered_markers",
+    "unordered_markers",
     "angle_range",
     "arc_thickness_ratio",
     "points",
@@ -433,6 +462,8 @@ const STYLE_KEYS: &[&str] = &[
     "line_head",
     "line_size",
     "line_tail",
+    "ordered_markers",
+    "unordered_markers",
     "angle_range",
     "arc_thickness_ratio",
     "points",
@@ -495,6 +526,64 @@ const NESTED: &[(&str, &[&str])] = &[
     ("outline", &["color", "size"]),
     ("glow", &["color", "opacity", "size"]),
 ];
+
+/// Ordered-list marker display patterns mapped to pptxgenjs `buAutoNum`
+/// number types. The pattern's counter char is `1`, `a`, `A`, `i` or `I`.
+pub const MARKER_PATTERNS: &[(&str, &str)] = &[
+    ("1", "arabicPlain"),
+    ("1.", "arabicPeriod"),
+    ("1)", "arabicParenR"),
+    ("(1)", "arabicParenBoth"),
+    ("a.", "alphaLcPeriod"),
+    ("a)", "alphaLcParenR"),
+    ("(a)", "alphaLcParenBoth"),
+    ("A.", "alphaUcPeriod"),
+    ("A)", "alphaUcParenR"),
+    ("(A)", "alphaUcParenBoth"),
+    ("i.", "romanLcPeriod"),
+    ("i)", "romanLcParenR"),
+    ("(i)", "romanLcParenBoth"),
+    ("I.", "romanUcPeriod"),
+    ("I)", "romanUcParenR"),
+    ("(I)", "romanUcParenBoth"),
+];
+
+/// Validate the gwen-owned list-marker options inside a style bucket:
+/// `ordered_markers` must be display patterns, `unordered_markers` must be
+/// single unicode codepoints (converted to bullet character codes by gwen).
+pub fn validate_list_markers(table: &toml::Table, where_: &str) -> Result<()> {
+    if let Some(arr) = table.get("ordered_markers") {
+        let arr = arr.as_array().ok_or_else(|| {
+            miette!("{where_}: `ordered_markers` must be an array of marker patterns")
+        })?;
+        for v in arr {
+            let s = v
+                .as_str()
+                .ok_or_else(|| miette!("{where_}: `ordered_markers` entries must be strings"))?;
+            if !MARKER_PATTERNS.iter().any(|(p, _)| *p == s) {
+                return Err(miette!(
+                    "{where_}: unknown ordered marker `{s}` (use e.g. \"1.\", \"(1)\", \"A.\")"
+                ));
+            }
+        }
+    }
+    if let Some(arr) = table.get("unordered_markers") {
+        let arr = arr.as_array().ok_or_else(|| {
+            miette!("{where_}: `unordered_markers` must be an array of bullet characters")
+        })?;
+        for v in arr {
+            let s = v
+                .as_str()
+                .ok_or_else(|| miette!("{where_}: `unordered_markers` entries must be strings"))?;
+            if s.chars().count() != 1 {
+                return Err(miette!(
+                    "{where_}: `unordered_markers` entry `{s}` must be a single character"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Validate an option map. A non-table value (e.g. a color shorthand for
 /// `background`) is fine; only table keys are checked.
