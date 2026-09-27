@@ -124,7 +124,7 @@ y = "1.5in"
 w = "7in"
 h = "4in"
 text = "line one\n\nline two"
-style = "muted"
+styles = "muted"
 font_size = 20
 
 [[shapes]]
@@ -402,7 +402,7 @@ fn unknown_style_reference_is_reported() {
     let dir = sample_project("badstyleref");
     write(
         &dir.join("slides").join("title.toml"),
-        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"hi\"\nstyle = \"nope\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"hi\"\nstyles = \"nope\"\n",
     );
     let err = gwen::build(&dir).unwrap_err();
     assert!(

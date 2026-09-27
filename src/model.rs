@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use miette::{Result, miette};
 
+use crate::opts;
 use crate::units::Coord;
 
 /// A free-form option map: everything pptxgenjs accepts for a call, in TOML.
@@ -178,8 +179,10 @@ pub struct Slide {
 pub struct Shape {
     #[serde(rename = "type")]
     pub ty: String,
-    #[serde(default)]
-    pub style: Option<String>,
+    /// Named styles to apply, in order (later wins). Accepts a scalar
+    /// (`styles = "muted"`) or a list (`styles = ["brand", "accent"]`).
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub styles: Vec<String>,
     /// Shorthand for a single paragraph of markdown text.
     #[serde(default)]
     pub text: Option<String>,
@@ -208,6 +211,38 @@ pub struct Para {
     pub opts: Opts,
 }
 
+/// Deserialise a field that is either a string or a list of strings
+/// (`styles = "muted"` or `styles = ["brand", "accent"]`).
+pub fn one_or_many<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_any(V)
+}
+
 /// Which pptxgenjs call a shape maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -230,30 +265,96 @@ impl Shape {
 }
 
 impl Main {
-    /// The built-in style defaults for a shape type: `[styles.shape]` (the
-    /// fallback for every shape) layered with `[styles.text]` when the shape
-    /// carries text, then the type-specific `[styles.<type>]` bucket. Later
-    /// layers win, so `[styles.text]` is the fallback for text options and
-    /// the type bucket overrides it. Bucket keys are matched by the type's
-    /// canonical preset id (`roundRect`) or its snake form (`round_rect`).
-    pub fn type_defaults_with_text(&self, ty: &str, carries_text: bool) -> toml::Table {
-        let extend = |out: &mut toml::Table, key: &str| {
-            if let Some(t) = self.styles.by_type.get(key) {
-                for (k, v) in t {
-                    out.insert(k.clone(), v.clone());
-                }
+    /// Layer a bucket's referenced `styles` (resolved recursively, in list
+    /// order) and then its own inline keys, so the bucket's own options win
+    /// over what it includes.
+    fn apply_bucket(
+        &self,
+        out: &mut toml::Table,
+        bucket: &toml::Table,
+        path: &mut Vec<String>,
+    ) -> Result<()> {
+        if let Some(refs_value) = bucket.get("styles") {
+            for name in opts::parse_styles_value(refs_value)
+                .ok_or_else(|| miette!("`styles` must be a string or a list of strings"))?
+            {
+                self.resolve_named(out, &name, path)?;
             }
-        };
+        }
+        for (k, v) in bucket {
+            if k != "styles" {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// A named style's effective options: its own `styles` references
+    /// (depth-first) then its own inline keys. Cyclic references error.
+    pub fn resolve_named(
+        &self,
+        out: &mut toml::Table,
+        name: &str,
+        path: &mut Vec<String>,
+    ) -> Result<()> {
+        if path.iter().any(|p| p == name) {
+            return Err(miette!("styles cycle: {} -> {}", path.join(" -> "), name));
+        }
+        let bucket = self.styles.named.get(name).ok_or_else(|| {
+            miette!("unknown style `{name}` (no `[styles.named.{name}]` in main.toml)")
+        })?;
+        path.push(name.to_string());
+        self.apply_bucket(out, bucket, path)?;
+        path.pop();
+        Ok(())
+    }
+
+    /// The full style chain for a shape's options:
+    /// `[styles.shape]` < `[styles.text]` (text-carrying) < `[styles.<type>]`
+    /// < the shape's `styles` references; each bucket applies its own
+    /// `styles` references before its inline keys. Later layers win.
+    pub fn style_chain(
+        &self,
+        ty: &str,
+        carries_text: bool,
+        shape_styles: &[String],
+    ) -> Result<toml::Table> {
         let mut out = toml::Table::new();
-        extend(&mut out, "shape");
-        if carries_text && ty != "text" {
-            extend(&mut out, "text");
+        let mut path: Vec<String> = Vec::new();
+        if let Some(bucket) = self.styles.by_type.get("shape") {
+            self.apply_bucket(&mut out, bucket, &mut path)?;
         }
-        extend(&mut out, ty);
-        if let Some(canon) = crate::opts::canonical_preset(ty) {
-            extend(&mut out, canon);
+        if carries_text
+            && ty != "text"
+            && let Some(text) = self.styles.by_type.get("text")
+        {
+            self.apply_bucket(&mut out, text, &mut path)?;
         }
-        out
+        if let Some(bucket) = self.styles.by_type.get(ty) {
+            self.apply_bucket(&mut out, bucket, &mut path)?;
+        }
+        if let Some(canon) = crate::opts::canonical_preset(ty)
+            && canon != ty
+            && let Some(bucket) = self.styles.by_type.get(canon)
+        {
+            self.apply_bucket(&mut out, bucket, &mut path)?;
+        }
+        for name in shape_styles {
+            self.resolve_named(&mut out, name, &mut path)?;
+        }
+        Ok(out)
+    }
+
+    /// Validate every named-style reference and their cycle-freeness, so an
+    /// unused broken style still fails at build time.
+    pub fn validate_style_graph(&self) -> Result<()> {
+        let roots: Vec<String> = self.styles.named.keys().cloned().collect();
+        let mut path: Vec<String> = Vec::new();
+        for root in &roots {
+            let mut scratch = toml::Table::new();
+            self.resolve_named(&mut scratch, root, &mut path)?;
+        }
+        Ok(())
     }
 }
 
@@ -298,7 +399,7 @@ mod tests {
             "[styles.shape]\nfill = { color = \"C7000A\" }\ncolor = \"FFFFFF\"\n[styles.rect]\nfill = { color = \"112233\" }\n",
         );
         // rect inherits the shared `color` but its own `fill` wins.
-        let merged = main.type_defaults_with_text("rect", false);
+        let merged = main.style_chain("rect", false, &[]).unwrap();
         assert_eq!(merged.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(
             merged
@@ -311,7 +412,7 @@ mod tests {
                 == "112233"
         );
         // an unspecified preset falls back to [styles.shape] alone.
-        let ellipse = main.type_defaults_with_text("ellipse", false);
+        let ellipse = main.style_chain("ellipse", false, &[]).unwrap();
         assert_eq!(ellipse.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(ellipse.get("fill").is_some());
     }
@@ -322,14 +423,53 @@ mod tests {
             "[styles.text]\nfont_face = \"Arial\"\nfont_size = 12\n[styles.rect]\nfont_size = 14\n",
         );
         // A text-carrying rect gets the text font_face but its own font_size.
-        let merged = main.type_defaults_with_text("rect", true);
+        let merged = main.style_chain("rect", true, &[]).unwrap();
         assert_eq!(merged.get("font_face").unwrap().as_str().unwrap(), "Arial");
         assert_eq!(merged.get("font_size").unwrap().as_integer().unwrap(), 14);
         // A plain rect (no text) does NOT pick up the [styles.text] fallback,
         // but still gets the [styles.rect] font_size.
-        let plain = main.type_defaults_with_text("rect", false);
+        let plain = main.style_chain("rect", false, &[]).unwrap();
         assert!(plain.get("font_face").is_none());
         assert_eq!(plain.get("font_size").unwrap().as_integer().unwrap(), 14);
+    }
+
+    #[test]
+    fn named_styles_compose_recursively() {
+        let main = main_toml(
+            "[styles.named.brand]\nfill = { color = \"C7000A\" }\n[styles.named.dark]\nstyles = [\"brand\"]\nfill = { color = \"111111\" }\n",
+        );
+        // dark inherits nothing else but its own fill wins over brand's.
+        let merged = main.style_chain("rect", false, &["dark".into()]).unwrap();
+        assert_eq!(
+            merged
+                .get("fill")
+                .unwrap()
+                .get("color")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "111111"
+        );
+    }
+
+    #[test]
+    fn named_style_cycle_is_reported() {
+        let main =
+            main_toml("[styles.named.a]\nstyles = [\"b\"]\n[styles.named.b]\nstyles = [\"a\"]\n");
+        let err = main.style_chain("rect", false, &["a".into()]).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "got: {err:?}");
+    }
+
+    #[test]
+    fn unknown_named_style_is_reported() {
+        let main = main_toml("[styles.named.a]\ncolor = \"111111\"\n");
+        let err = main
+            .style_chain("rect", false, &["nope".into()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown style `nope`"),
+            "got: {err:?}"
+        );
     }
 
     #[test]

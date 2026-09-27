@@ -58,6 +58,7 @@ fn validate_styles(main: &Main) -> Result<()> {
             &format!("[styles.{ty}]"),
         )?;
         opts::validate_list_markers(table, &format!("[styles.{ty}]"))?;
+        validate_styles_value(table, &format!("[styles.{ty}]"))?;
     }
     for (name, table) in &main.styles.named {
         opts::validate_ctx(
@@ -66,6 +67,19 @@ fn validate_styles(main: &Main) -> Result<()> {
             &format!("[styles.named.{name}]"),
         )?;
         opts::validate_list_markers(table, &format!("[styles.named.{name}]"))?;
+        validate_styles_value(table, &format!("[styles.named.{name}]"))?;
+    }
+    main.validate_style_graph()
+}
+
+/// A bucket's `styles` key must be a string or a list of strings.
+fn validate_styles_value(table: &toml::Table, where_: &str) -> Result<()> {
+    if let Some(v) = table.get("styles")
+        && opts::parse_styles_value(v).is_none()
+    {
+        return Err(miette!(
+            "{where_}: `styles` must be a string or a list of strings"
+        ));
     }
     Ok(())
 }
@@ -108,7 +122,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 main,
                 ty,
                 matches!(ty, "text" | "placeholder"),
-                obj.style.as_deref(),
+                &obj.styles,
                 &obj.opts,
             )?;
             let _ = take_markers(&mut opts);
@@ -323,13 +337,7 @@ fn shape_value(
     if carries_text {
         kind = Kind::Text;
     }
-    let mut merged = merge_opts(
-        main,
-        canon_ty,
-        carries_text,
-        shape.style.as_deref(),
-        &shape.opts,
-    )?;
+    let mut merged = merge_opts(main, canon_ty, carries_text, &shape.styles, &shape.opts)?;
     let (ordered_markers, unordered_markers) = take_markers(&mut merged);
     if carries_text {
         merged
@@ -516,21 +524,10 @@ fn merge_opts(
     main: &Main,
     ty: &str,
     carries_text: bool,
-    style: Option<&str>,
+    styles: &[String],
     local: &toml::Table,
 ) -> Result<toml::Value> {
-    let mut merged = main.type_defaults_with_text(ty, carries_text);
-    if let Some(name) = style
-        && let Some(style_opts) = main.styles.named.get(name)
-    {
-        for (k, v) in style_opts {
-            merged.insert(k.clone(), v.clone());
-        }
-    } else if let Some(name) = style {
-        return Err(miette!(
-            "unknown style `{name}` (no `[styles.named.{name}]` in main.toml)"
-        ));
-    }
+    let mut merged = main.style_chain(ty, carries_text, styles)?;
     for (k, v) in local {
         merged.insert(k.clone(), v.clone());
     }

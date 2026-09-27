@@ -313,6 +313,7 @@ const TEXT_KEYS: &[&str] = &[
     "line_tail",
     "ordered_markers",
     "unordered_markers",
+    "styles",
 ];
 
 /// Shape presets can carry text (rect/ellipse/... with a `text` value), so
@@ -374,6 +375,7 @@ const TEXTSHAPE_KEYS: &[&str] = &[
     "line_tail",
     "ordered_markers",
     "unordered_markers",
+    "styles",
     "angle_range",
     "arc_thickness_ratio",
     "points",
@@ -464,6 +466,7 @@ const STYLE_KEYS: &[&str] = &[
     "line_tail",
     "ordered_markers",
     "unordered_markers",
+    "styles",
     "angle_range",
     "arc_thickness_ratio",
     "points",
@@ -547,6 +550,21 @@ pub const MARKER_PATTERNS: &[(&str, &str)] = &[
     ("I)", "romanUcParenR"),
     ("(I)", "romanUcParenBoth"),
 ];
+
+/// Parse a `styles` value: a scalar string or a list of strings.
+pub fn parse_styles_value(v: &toml::Value) -> Option<Vec<String>> {
+    match v {
+        toml::Value::String(s) => Some(vec![s.clone()]),
+        toml::Value::Array(items) => {
+            let mut out = Vec::new();
+            for i in items {
+                out.push(i.as_str()?.to_string());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
 
 /// Validate the gwen-owned list-marker options inside a style bucket:
 /// `ordered_markers` must be display patterns, `unordered_markers` must be

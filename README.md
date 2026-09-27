@@ -72,7 +72,7 @@ sizing = { type = "contain" }
 [styles.ellipse]     # ...or any shape preset id
 line = { color = "333333", width = 0.5 }
 
-[styles.named.muted] # named style; shapes opt in via style = "muted"
+[styles.named.muted] # named style; shapes opt in via styles = "muted"
 color = "808080"
 italic = true
 ```
@@ -82,12 +82,35 @@ Option keys are snake_case and map to the pptxgenjs camelCase properties
 pptxgenjs accepts can be set.
 
 Precedence when building a shape's options:
-`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < `[styles.named.<name>]` <
+`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < the shape's `styles` <
 the shape's own keys. Shape-preset buckets (`[styles.rect]`, `[styles.ellipse]`,
 ...) may also carry text options (`font_face`, `font_size`, ...), since those
 presets can contain text; shapes that carry text fall back to `[styles.text]`
-for any text option the type bucket doesn't set. A `style = "<name>"` reference
-to a `[styles.named.<name>]` block that doesn't exist is an error.
+for any text option the type bucket doesn't set. A `styles` reference to a
+`[styles.named.<name>]` block that doesn't exist is an error, as is a reference
+cycle.
+
+### Style composition
+
+Named styles compose via a `styles` key on shapes and inside any bucket. The
+value is a scalar or a list, applied in order (later wins); within a container
+the container's own inline options win over what it includes.
+
+```toml
+[styles.named.brand]
+fill = { color = "C7000A" }
+
+[styles.named.dark]
+styles = ["brand"]        # = brand, then dark's own keys override
+color = "111111"
+
+[styles.rect]
+styles = "brand"          # every rect also gets the "brand" named style
+
+[[shapes]]
+type = "text"
+styles = ["brand", "dark"]
+```
 
 `[[sections]]` is required — building without it is an error. A slide listed
 in more than one section is an error; a slide not listed at all is not
@@ -280,7 +303,7 @@ plain integers. Unit-suffixed strings and percentages are also accepted:
 
 Unknown TOML fields (a misspelled table or key such as `[[shaps]]`) and unknown
 pptxgenjs option keys (`fount_size`, a stray key inside `fill`, an unknown
-`style = "<name>"`) are build errors, so typos fail loudly instead of being
+`styles = "<name>"`) are build errors, so typos fail loudly instead of being
 silently ignored.
 
 ## Rendering
