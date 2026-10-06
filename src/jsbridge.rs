@@ -7,7 +7,7 @@
 //! free `JSZip` identifier resolves to the global.
 //!
 //! pptxgenjs registers every part on an internal JSZip object inside `write()`.
-//! JSZip's own zip serialization is unusable under QuickJS — it builds the
+//! JSZip's own zip serialization is unusable under QuickJS - it builds the
 //! archive from JavaScript strings, and QuickJS's UTF-8 string internals break
 //! JSZip's byte-offset accounting (the output is a corrupt archive). So the
 //! bridge intercepts `file`/`folder`, captures the parts, and the host packages
@@ -28,7 +28,7 @@ const BRIDGE: &str = include_str!("js/bridge.js");
 /// bundle's `typeof process` feature-detection takes the browser path.
 ///
 /// pptxgenjs registers parts in the synchronous prefix of `write()` and its
-/// promise yields, so the host only needs to drain microtasks — no timers.
+/// promise yields, so the host only needs to drain microtasks - no timers.
 const SHIMS: &str = r#"
 if (typeof globalThis !== "undefined") {
   globalThis.window = globalThis;
@@ -85,7 +85,7 @@ struct CapturedFile {
 }
 
 /// Render a deck from a spec JSON string (see `render::spec`) and return the
-/// `.pptx` bytes. The spec is plain data — it is `JSON.parse`d and passed to
+/// `.pptx` bytes. The spec is plain data - it is `JSON.parse`d and passed to
 /// pptxgenjs objects; nothing from it is ever evaluated as code.
 pub fn render(spec_json: &str) -> Result<Vec<u8>> {
     let runtime = Runtime::new().map_err(|e| miette::miette!("quickjs runtime: {e}"))?;

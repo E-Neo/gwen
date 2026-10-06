@@ -393,7 +393,7 @@ fn shape_value(
     Ok(Value::Object(value))
 }
 
-/// Build the flat run list for a text shape — pptxgenjs's native text model.
+/// Build the flat run list for a text shape - pptxgenjs's native text model.
 ///
 /// The markdown paragraphs are flattened into one run list; the last run of
 /// every paragraph except the final one carries `breakLine` (pptxgenjs closes

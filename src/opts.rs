@@ -209,6 +209,22 @@ pub fn snake_to_camel(s: &str) -> String {
     out
 }
 
+/// `camelCase -> snake_case` (the DSL form of a preset id or option key).
+pub fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if c.is_ascii_uppercase() {
+            if !out.is_empty() {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Resolve a shape `type` to its canonical pptxgenjs preset id, accepting
 /// snake_case (`round_rect`) or the camelCase preset (`roundRect`).
 pub fn canonical_preset(ty: &str) -> Option<&'static str> {
@@ -256,7 +272,7 @@ pub enum Ctx {
 
 const POSITION: &[&str] = &["x", "y", "w", "h"];
 
-const TEXT_KEYS: &[&str] = &[
+pub const TEXT_KEYS: &[&str] = &[
     "align",
     "bold",
     "break_line",
@@ -318,7 +334,7 @@ const TEXT_KEYS: &[&str] = &[
 
 /// Shape presets can carry text (rect/ellipse/... with a `text` value), so
 /// their option maps accept both shape and text keys.
-const TEXTSHAPE_KEYS: &[&str] = &[
+pub const TEXTSHAPE_KEYS: &[&str] = &[
     "align",
     "bold",
     "break_line",
@@ -382,7 +398,7 @@ const TEXTSHAPE_KEYS: &[&str] = &[
     "shape_name",
 ];
 
-const IMAGE_KEYS: &[&str] = &[
+pub const IMAGE_KEYS: &[&str] = &[
     "alt_text",
     "flip_h",
     "flip_v",
@@ -398,7 +414,7 @@ const IMAGE_KEYS: &[&str] = &[
     "data",
 ];
 
-const BACKGROUND_KEYS: &[&str] = &[
+pub const BACKGROUND_KEYS: &[&str] = &[
     "color",
     "transparency",
     "type",
@@ -477,7 +493,7 @@ const STYLE_KEYS: &[&str] = &[
 ];
 
 /// Nested option objects and their sub-keys (`fill`, `line`, `bullet`, ...).
-const NESTED: &[(&str, &[&str])] = &[
+pub const NESTED: &[(&str, &[&str])] = &[
     ("fill", &["color", "transparency", "type", "alpha"]),
     (
         "line",

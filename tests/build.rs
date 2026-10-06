@@ -529,6 +529,41 @@ fn gwen_new_scaffolds_a_buildable_project() {
     let deck = gwen::build(&dir).unwrap();
     let bytes = std::fs::read(&deck).unwrap();
     assert_eq!(&bytes[0..2], b"PK");
+
+    // `gwen new` writes a SKILL.md DSL reference with valid front-matter.
+    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\n"), "SKILL.md has front-matter");
+    assert!(skill.contains("name: gwen-deck-"), "SKILL.md has a name");
+    assert!(skill.contains("description:"), "SKILL.md has a description");
+    assert!(skill.contains("## Styles"), "SKILL.md has the DSL spec");
+    // The inventory is auto-generated from the library whitelists.
+    assert!(
+        skill.contains("## Supported shapes and options"),
+        "shape section"
+    );
+    assert!(skill.contains("round_rect"), "preset snake form listed");
+    assert!(skill.contains("star5"), "preset listed");
+    assert!(skill.contains("font_face"), "text option listed");
+    assert!(
+        skill.contains("- **Nested objects**"),
+        "nested option group"
+    );
+    assert!(skill.contains("`sizing`"), "image option listed");
+
+    // No em dashes (U+2014) anywhere gwen generates.
+    for rel in [
+        "main.toml",
+        "masters/base.toml",
+        "slides/title.toml",
+        "slides/intro.toml",
+        "SKILL.md",
+    ] {
+        let bytes = std::fs::read(dir.join(rel)).unwrap();
+        assert!(
+            !bytes.windows(3).any(|w| w == b"\xe2\x80\x94"),
+            "em dash in {rel}"
+        );
+    }
 }
 
 /// A fake gwen home containing a `template/` tree.
@@ -591,6 +626,36 @@ fn gwen_new_uses_template() {
         "no built-in slide"
     );
     gwen::build(&dir).unwrap();
+    // Template without a SKILL.md falls back to the default DSL reference.
+    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\n") && skill.contains("## Styles"));
+}
+
+/// A template may ship its own SKILL.md, which is kept verbatim.
+#[test]
+fn template_skill_md_is_kept() {
+    let home = template_home("home-skill");
+    write(
+        &home.join("template").join("SKILL.md"),
+        "# custom skill\n\nkeep me\n",
+    );
+    let dir = tmp("skill-template");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+        "# custom skill\n\nkeep me\n"
+    );
 }
 
 #[test]
@@ -620,6 +685,8 @@ fn gwen_new_falls_back_when_no_template() {
     let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     assert!(main.contains(&format!("title = \"{name}\"")));
+    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\n") && skill.contains("name: gwen-deck-"));
 }
 
 #[test]

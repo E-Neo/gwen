@@ -104,11 +104,11 @@ fn default_theme() -> Theme {
 /// opt-in styles under `[styles.named.<name>]`.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Styles {
-    /// `[styles.<type>]` — `shape`, `text`, `image`, `placeholder`, or a
+    /// `[styles.<type>]` - `shape`, `text`, `image`, `placeholder`, or a
     /// shape preset id.
     #[serde(flatten)]
     pub by_type: BTreeMap<String, Opts>,
-    /// `[styles.named.<name>]` — reusable styles referenced by `style = "<name>"`.
+    /// `[styles.named.<name>]` - reusable styles referenced by `style = "<name>"`.
     #[serde(default)]
     pub named: BTreeMap<String, Opts>,
 }

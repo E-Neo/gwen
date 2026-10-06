@@ -4,12 +4,12 @@ Generate clean PowerPoint decks (`.pptx`) from TOML.
 
 ## How it works
 
-A deck is a directory of TOML files — `main.toml`, `masters/*.toml` and
-`slides/*.toml` — that is the single source of truth. `gwen build` compiles it
+A deck is a directory of TOML files - `main.toml`, `masters/*.toml` and
+`slides/*.toml` - that is the single source of truth. `gwen build` compiles it
 into a JSON spec and renders the deck with the **real pptxgenjs bundle** running
 on an embedded QuickJS runtime (`rquickjs`). The parts pptxgenjs produces are
 packaged into a valid `.pptx` container by gwen itself. gwen only ever calls
-pptxgenjs's public API — it never writes OOXML — and a `node` runtime is not
+pptxgenjs's public API - it never writes OOXML - and a `node` runtime is not
 required.
 
 ## Quick start
@@ -21,12 +21,16 @@ gwen build <deck>    # render <deck>/target/<title>.pptx
 
 `gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
 if set, otherwise `~/.gwen`. If `<home>/template/` is present, the new project
-is copied from it — `template/main.toml` (required, with its
+is copied from it - `template/main.toml` (required, with its
 `[presentation] title` overwritten by the `<deck>` directory name) plus
 `template/masters/`, `template/slides/` and `template/media/` (copied
 recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
+
+Every new project also gets a `SKILL.md` - an agent- and human-readable
+reference to the gwen TOML DSL (a template may ship its own to replace the
+built-in one).
 
 ## The gwen project format
 
@@ -112,13 +116,13 @@ type = "text"
 styles = ["brand", "dark"]
 ```
 
-`[[sections]]` is required — building without it is an error. A slide listed
+`[[sections]]` is required - building without it is an error. A slide listed
 in more than one section is an error; a slide not listed at all is not
 rendered.
 
 ### `masters/<name>.toml`
 
-The master name is the file stem — there is no `title` field. Elements are
+The master name is the file stem - there is no `title` field. Elements are
 `[[shapes]]`, exactly like slides.
 
 ```toml
@@ -169,7 +173,7 @@ hidden = false                      # accepted; not applied (pptxgenjs has no hi
 notes = "presenter notes"
 
 # slide-level keys (master/background/hidden/notes) must come BEFORE the
-# first [[shapes]] — in TOML, keys after a [[shapes]] header belong to the
+# first [[shapes]] - in TOML, keys after a [[shapes]] header belong to the
 # last shape, not the slide.
 
 [[shapes]]
@@ -262,7 +266,7 @@ indent_level = 1
 
 Paragraph options (`bullet`, `indent_level`, `line_spacing`,
 `para_space_before`, ...) are applied to the paragraph's first run. `align` is
-not supported at the paragraph level — pptxgenjs auto-splits paragraphs
+not supported at the paragraph level - pptxgenjs auto-splits paragraphs
 on `align` changes, which clashes with explicit paragraph boundaries; use the
 shape-level `align` instead.
 
@@ -287,8 +291,8 @@ unordered_markers = ["\u25BA", "\u2022"] # bullet runes per level
 - A level with no entry falls back to the last configured marker, else the
   default. These keys are gwen-owned (never passed to pptxgenjs).
 
-Shape preset names are snake_case in the DSL — `round_rect`, `flow_chart_process`,
-`action_button_back_previous` — and are canonicalised to pptxgenjs's camelCase
+Shape preset names are snake_case in the DSL - `round_rect`, `flow_chart_process`,
+`action_button_back_previous` - and are canonicalised to pptxgenjs's camelCase
 (`roundRect`, ...) internally; the camelCase forms still work too.
 
 ### Coordinates
@@ -297,7 +301,7 @@ All `x`/`y`/`w`/`h` values are English Metric Units (EMU) when written as
 plain integers. Unit-suffixed strings and percentages are also accepted:
 
 - `"1in"`, `"2.5cm"`, `"25mm"`, `"72pt"`
-- `"50%"` — relative to the slide width (`x`/`w`) or height (`y`/`h`)
+- `"50%"` - relative to the slide width (`x`/`w`) or height (`y`/`h`)
 
 ### Validation
 
@@ -310,7 +314,7 @@ silently ignored.
 
 `gwen build` turns the project into a JSON spec string (`render.rs`). Inside
 the embedded QuickJS runtime, the bridge parses that string with
-`JSON.parse(specJson)` — it becomes a plain JavaScript **data** object, nothing
-more — and passes it to pptxgenjs's public methods (`defineSlideMaster`,
+`JSON.parse(specJson)` - it becomes a plain JavaScript **data** object, nothing
+more - and passes it to pptxgenjs's public methods (`defineSlideMaster`,
 `addSlide`, `addText`, `addShape`, ...). The spec is data only: nothing from
 your TOML is ever `eval`'d or executed as code in the runtime.

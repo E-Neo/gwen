@@ -61,6 +61,7 @@ fn scaffold_from_template(root: &Path, template: &Path, name: &str) -> Result<()
     let contents = std::fs::read_to_string(&main_src)
         .map_err(|e| miette::miette!("cannot read `{}`: {e}", main_src.display()))?;
     write_file(&root.join("main.toml"), &set_title(&contents, name))?;
+    write_skill(root, Some(template), name)?;
     for sub in ["masters", "slides", "media"] {
         let src = template.join(sub);
         if src.is_dir() {
@@ -78,6 +79,7 @@ fn scaffold_builtin(root: &Path, name: &str) -> Result<()> {
         &root.join("main.toml"),
         &DEFAULT_MAIN.replace("__NAME__", name),
     )?;
+    write_skill(root, None, name)?;
     write_file(&root.join("masters").join("base.toml"), DEFAULT_MASTER)?;
     write_file(&root.join("slides").join("title.toml"), DEFAULT_TITLE)?;
     write_file(&root.join("slides").join("intro.toml"), DEFAULT_INTRO)?;
@@ -164,6 +166,84 @@ fn write_file(path: &Path, contents: &str) -> Result<()> {
         .map_err(|e| miette::miette!("cannot write {}: {e}", path.display()))
 }
 
+/// Write `SKILL.md` into a new project. A template keeps its own `SKILL.md`
+/// when it provides one; otherwise the built-in DSL reference is written.
+fn write_skill(root: &Path, template: Option<&Path>, name: &str) -> Result<()> {
+    let dest = root.join("SKILL.md");
+    if let Some(template) = template {
+        let src = template.join("SKILL.md");
+        if src.is_file() {
+            return std::fs::copy(&src, &dest)
+                .map(|_| ())
+                .map_err(|e| miette::miette!("cannot copy `{}`: {e}", src.display()));
+        }
+    }
+    let skill = DEFAULT_SKILL
+        .replace("__SKILL_NAME__", &skill_name(name))
+        .replace("{{shape_types}}", &shape_types())
+        .replace("{{option_fields}}", &option_fields());
+    write_file(&dest, &skill)
+}
+
+/// All supported shape preset ids as snake_case, sorted, in one paragraph.
+fn shape_types() -> String {
+    let mut ids: Vec<String> = gwen::opts::SHAPE_PRESETS
+        .iter()
+        .map(|p| gwen::opts::camel_to_snake(p))
+        .collect();
+    ids.sort();
+    ids.join(", ")
+}
+
+/// The option key inventory per context, rendered from the whitelists.
+fn option_fields() -> String {
+    let group = |title: &str, keys: Option<&[&str]>| -> String {
+        match keys {
+            Some(keys) => {
+                let list: Vec<&str> = keys.to_vec();
+                format!("- **{title}**: {}", list.join(", "))
+            }
+            None => String::new(),
+        }
+    };
+
+    let nested: Vec<String> = gwen::opts::NESTED
+        .iter()
+        .map(|(name, keys)| format!("`{name}` (`{}`)", keys.join("`, `")))
+        .collect();
+
+    [
+        group("Shape/preset", Some(gwen::opts::TEXTSHAPE_KEYS)),
+        group("Text", Some(gwen::opts::TEXT_KEYS)),
+        group("Image", Some(gwen::opts::IMAGE_KEYS)),
+        group("Background", Some(gwen::opts::BACKGROUND_KEYS)),
+        format!(
+            "- **Nested objects**: {}\n- **Gwen-only keys** (never sent to pptxgenjs): `styles`, `ordered_markers`, `unordered_markers`",
+            nested.join("; ")
+        ),
+    ]
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// Lowercase `name`, spaces/underscores -> `-`, keep `[a-z0-9-]`.
+fn skill_name(name: &str) -> String {
+    let s: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c == '_' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if s.is_empty() { "deck".into() } else { s }
+}
+
 const DEFAULT_MAIN: &str = r##"[presentation]
 title = "__NAME__"
 author = ""
@@ -198,7 +278,7 @@ slides = ["title.toml", "intro.toml"]
 # italic = true
 "##;
 
-const DEFAULT_MASTER: &str = r##"# masters/base.toml — the master name is the file stem.
+const DEFAULT_MASTER: &str = r##"# masters/base.toml - the master name is the file stem.
 
 background = { color = "FFFFFF" }
 slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
@@ -255,6 +335,163 @@ It drives the real pptxgenjs under QuickJS, so everything is
 [standard](https://gitbrent.github.io/PptxGenJS/) PowerPoint.
 """
 font_size = 24
+"##;
+
+/// The `SKILL.md` written into every new project: an agent- and human-readable
+/// reference to the gwen TOML DSL. `__SKILL_NAME__` is replaced with the
+/// project's dir name in the front-matter.
+const DEFAULT_SKILL: &str = r##"---
+name: gwen-deck-__SKILL_NAME__
+description: Editing or building the gwen TOML deck in this directory (main.toml, masters, slides, styles, rich text).
+---
+
+# gwen deck skill
+
+This directory is a **gwen** project: a PowerPoint deck defined by TOML files.
+`gwen build` regenerates `target/<title>.pptx` deterministically from these
+files - edit the TOML, never the `.pptx`. TOML is the single source of truth.
+
+## Layout
+
+```
+deck/
+  main.toml            presentation metadata, theme, sections, styles
+  masters/*.toml       one slide master per file (the file stem is the master name)
+  slides/*.toml        one slide per file
+  media/               images referenced by slides and masters
+```
+
+## main.toml
+
+- `[presentation]` - `title` (output file stem), `author`, `company`,
+  `revision`, `subject`, `rtl_mode`, `width`/`height` (EMU or
+  `"1in"`/`"2.5cm"`/`"25mm"`/`"72pt"`/`"50%"`).
+- `[theme]` - `major_font` / `minor_font` (inherited by heading/body text).
+- `[[sections]]` - **required**; the slide ordering index. Each lists slide
+  files: `slides = ["title.toml", "content.toml"]`. A slide in two sections is
+  an error; a slide in none is not rendered.
+- `[styles.*]` - see below.
+
+## Styles
+
+Precedence when building a shape's options:
+
+```
+[styles.shape] < [styles.text] < [styles.<type>] < shape's own `styles` < shape keys
+```
+
+- `[styles.shape]` is the base for every shape; `[styles.text]` layers onto it
+  for text-carrying shapes (type `text`, or a preset with a text value);
+  `[styles.<type>]` layers per type id (`text`, `image`, `rect`, `ellipse`, ...).
+- `[styles.named.<name>]` defines named styles. Shapes and buckets opt in with a
+  `styles` key that accepts a scalar or a list, applied in order (later wins);
+  named styles may reference other named styles (recursion). A reference to a
+  missing name or a cycle (`a -> b -> a`) is an error. Inside a container its
+  own inline options win over what it includes.
+- Gwen-owned keys (never passed to pptxgenjs): `styles`, `ordered_markers`,
+  `unordered_markers`.
+
+## masters/<name>.toml
+
+The master name is the file stem - no `title` field.
+
+```toml
+background = { color = "FFFFFF" }
+margin = 0.5                       # inches/EMU/array
+slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
+                 font_size = 12, color = "999999", align = "right" }
+
+[[shapes]]
+type = "rect"                       # rect | line | text | image | chart | placeholder
+x = "0.8in"; y = "0.2in"; w = "11.7in"; h = "1in"
+fill = { color = "C7000A" }
+
+[[shapes]]
+type = "placeholder"                # a box slides can fill
+ph_type = "title"                   # title|body|pic|chart|tbl|media
+name = "Title"                      # what slides reference (case-sensitive)
+font_size = 26; color = "FFFFFF"; bold = true
+```
+
+## slides/<name>.toml
+
+Slide-level keys (`master`, `background`, `hidden`, `notes`) must come BEFORE
+the first `[[shapes]]` - in TOML, keys after a `[[shapes]]` header belong to
+the last shape. `hidden` is accepted but not applied (pptxgenjs has no hidden
+slides).
+
+```toml
+master = "brand"
+background = "112233"
+notes = "presenter notes"
+
+[[shapes]]
+type = "text"                       # text | image | a shape preset id
+placeholder = "Title"               # fills the master placeholder (geometry inherited)
+x = "1in"; y = "2.6in"; w = "11.3in"; h = "1in"
+text = "*Welcome to* **gwen**"
+font_size = 44
+
+[[shapes]]
+type = "image"
+src = "media/pixel.png"             # relative to the deck root
+```
+
+A shape preset that carries `text` draws the shape with the text inside it
+(fill/line/font options all apply); equivalently `shape = "rect"` on a text
+shape. `chart`, `table` and `media` types are not supported yet.
+
+## Supported shapes and options
+
+A shape's `type` is `text`, `image`, a master `placeholder`, or any of these
+preset ids (snake_case or camelCase both work):
+`{{shape_types}}`
+For example: `type = "rect"`, `type = "round_rect"`, `type = "star5"`,
+`type = "flow_chart_process"`.
+
+Options are snake_case and mirror pptxgenjs. Per context:
+{{option_fields}}
+
+All shapes also take `x` / `y` / `w` / `h` geometry.
+
+## Rich text
+
+`text` (and `[[shapes.paragraphs]]` text) is markdown:
+
+| Markdown            | Result                                        |
+|---------------------|-----------------------------------------------|
+| `*italic*`          | italic run                                    |
+| `**bold**`          | bold run                                      |
+| `` `code` ``        | plain run                                     |
+| `[text](url)`       | run with a hyperlink                          |
+| single `\n`         | soft line break                               |
+| blank line (`\n\n`) | new paragraph                                 |
+
+`- item` / `1. item` markdown lists become bulleted paragraphs; an item's
+indent level equals its nesting depth (top-level 0, nested = parent + 1).
+Marker styles come from `[styles.*]` `ordered_markers` (patterns like `"1."`,
+`"(1)"`, `"A."`) and `unordered_markers` (unicode runes, e.g. `"\u25BA"`),
+indexed by indent level; missing levels fall back to the last marker, then
+defaults.
+
+## Explicit paragraphs
+
+`[[shapes.paragraphs]]` gives per-paragraph options (`bullet`,
+`indent_level`, `line_spacing`, `para_space_before`, ...). `align` is only
+supported at the shape level.
+
+## Coordinates and naming
+
+All `x`/`y`/`w`/`h` are EMU as integers, or `"1in"`, `"2.5cm"`, `"25mm"`,
+`"72pt"`, `"50%"` strings. Shape preset and marker names are snake_case in the
+DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is `"1."`) and are
+canonicalised to pptxgenjs camelCase internally.
+
+## Validation
+
+Unknown TOML fields or table names, unknown pptxgenjs option keys, unknown
+`styles` references, and style cycles are build errors. Errors are loud -
+read gwen's diagnostics and fix the referenced file/line.
 "##;
 
 #[cfg(test)]

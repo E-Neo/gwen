@@ -1,9 +1,9 @@
-//! gwen — a TOML to PowerPoint generator.
+//! gwen - a TOML to PowerPoint generator.
 //!
 //! A deck is a directory with `main.toml` (presentation/theme/sections/styles),
 //! `masters/*.toml` and `slides/*.toml`. `build` translates them into a spec
 //! and renders the deck with the real pptxgenjs bundle running on an embedded
-//! QuickJS runtime, so the output is pptxgenjs's output — gwen never writes
+//! QuickJS runtime, so the output is pptxgenjs's output - gwen never writes
 //! OOXML itself. See the project README for the full format reference.
 
 pub mod error;
