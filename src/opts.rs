@@ -330,6 +330,7 @@ pub const TEXT_KEYS: &[&str] = &[
     "ordered_markers",
     "unordered_markers",
     "styles",
+    "sizing",
 ];
 
 /// Shape presets can carry text (rect/ellipse/... with a `text` value), so
@@ -396,6 +397,7 @@ pub const TEXTSHAPE_KEYS: &[&str] = &[
     "arc_thickness_ratio",
     "points",
     "shape_name",
+    "sizing",
 ];
 
 pub const IMAGE_KEYS: &[&str] = &[
@@ -412,6 +414,12 @@ pub const IMAGE_KEYS: &[&str] = &[
     "object_name",
     "path",
     "data",
+    "fill",
+    "line",
+    "bullet",
+    "underline",
+    "outline",
+    "glow",
 ];
 
 pub const BACKGROUND_KEYS: &[&str] = &[
@@ -492,59 +500,523 @@ const STYLE_KEYS: &[&str] = &[
     "sizing",
 ];
 
-/// Nested option objects and their sub-keys (`fill`, `line`, `bullet`, ...).
-pub const NESTED: &[(&str, &[&str])] = &[
-    ("fill", &["color", "transparency", "type", "alpha"]),
-    (
-        "line",
-        &[
-            "color",
-            "transparency",
-            "type",
-            "alpha",
-            "width",
-            "dash_type",
-            "begin_arrow_type",
-            "end_arrow_type",
-            "line_dash",
-            "line_head",
-            "line_tail",
-            "pt",
-            "size",
-        ],
-    ),
-    (
-        "shadow",
-        &[
-            "type",
-            "opacity",
-            "blur",
-            "angle",
-            "offset",
-            "color",
-            "rotate_with_shape",
-        ],
-    ),
-    (
-        "bullet",
-        &[
-            "type",
-            "character_code",
-            "indent",
-            "number_type",
-            "number_start_at",
-            "code",
-            "margin_pt",
-            "start_at",
-            "style",
-        ],
-    ),
-    ("sizing", &["type", "w", "h", "x", "y"]),
-    ("hyperlink", &["slide", "url", "tooltip"]),
-    ("underline", &["style", "color"]),
-    ("outline", &["color", "size"]),
-    ("glow", &["color", "opacity", "size"]),
+/// Value kinds for pptxgenjs option values, derived from the vendored `index.d.ts`.
+#[derive(Debug, Clone, Copy)]
+pub enum Kind {
+    /// No value check.
+    Any,
+    Bool,
+    /// Number within an inclusive `[min,max]` range.
+    Num(f64, f64),
+    Str,
+    /// 6-hex color or a pptxgenjs theme color.
+    Color,
+    Enum(&'static [&'static str]),
+    /// A shape preset id (snake or camel).
+    ShapePreset,
+    /// EMU integer, a unit string (`"1cm"`) or a percentage (`"50%"`).
+    Coord,
+    /// A number or a 4-number `[top, right, bottom, left]`.
+    Margin,
+    /// Exactly two numbers within `[min,max]`.
+    Num2(f64, f64),
+    Tables(&'static [(&'static str, Kind)]),
+    /// A table or a string shorthand (`fill`/`line`).
+    ObjOrStr(&'static [(&'static str, Kind)]),
+    /// `true`/`false` or a table (`bullet`/`underline`).
+    BoolOrObj(&'static [(&'static str, Kind)]),
+    /// `true`/`false`, a string shorthand, or a table (`underline`).
+    BoolOrStrOrObj(&'static [(&'static str, Kind)]),
+    TabStops,
+    Points,
+    ArrayOfTables,
+}
+
+const fn num() -> Kind {
+    Kind::Num(f64::NEG_INFINITY, f64::INFINITY)
+}
+const fn rng(lo: f64, hi: f64) -> Kind {
+    Kind::Num(lo, hi)
+}
+
+const HALIGN: &[&str] = &["left", "center", "right", "justify"];
+const VALIGN: &[&str] = &["top", "middle", "bottom"];
+const FIT: &[&str] = &["none", "shrink", "resize"];
+const TEXTDIR: &[&str] = &["horz", "vert", "vert270", "wordArtVert"];
+const SHADOW_TYPE: &[&str] = &["outer", "inner", "none"];
+const FILL_TYPE: &[&str] = &["none", "solid"];
+const LINE_DASH: &[&str] = &[
+    "solid",
+    "dash",
+    "dashDot",
+    "lgDash",
+    "lgDashDot",
+    "lgDashDotDot",
+    "sysDash",
+    "sysDot",
 ];
+const ARROW_TYPE: &[&str] = &["none", "arrow", "diamond", "oval", "stealth", "triangle"];
+const SIZING_TYPE: &[&str] = &["contain", "cover", "crop"];
+const BULLET_TYPE: &[&str] = &["bullet", "number"];
+const TAB_ALIGN: &[&str] = &["l", "r", "ctr", "dec"];
+const THEME_COLORS: &[&str] = &[
+    "tx1", "tx2", "bg1", "bg2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+];
+const UNDERLINE_STYLE: &[&str] = &[
+    "dash",
+    "dashHeavy",
+    "dashLong",
+    "dashLongHeavy",
+    "dbl",
+    "dotDash",
+    "dotDashHeave",
+    "dotDotDash",
+    "dotDotDashHeavy",
+    "dotted",
+    "dottedHeavy",
+    "heavy",
+    "none",
+    "sng",
+    "wavy",
+    "wavyDbl",
+    "wavyHeavy",
+];
+const BULLET_NUMBER_TYPE: &[&str] = &[
+    "alphaLcParenBoth",
+    "alphaLcParenR",
+    "alphaLcPeriod",
+    "alphaUcParenBoth",
+    "alphaUcParenR",
+    "alphaUcPeriod",
+    "arabicParenBoth",
+    "arabicParenR",
+    "arabicPeriod",
+    "arabicPlain",
+    "romanLcParenBoth",
+    "romanLcParenR",
+    "romanLcPeriod",
+    "romanUcParenBoth",
+    "romanUcParenR",
+    "romanUcPeriod",
+];
+const CURVE_TYPE: &[&str] = &["arc", "cubic", "quadratic"];
+
+pub fn fill_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("color", Kind::Color),
+            ("transparency", rng(0.0, 100.0)),
+            ("type", Kind::Enum(FILL_TYPE)),
+            ("alpha", rng(0.0, 100.0)),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn line_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("color", Kind::Color),
+            ("transparency", rng(0.0, 100.0)),
+            ("type", Kind::Enum(FILL_TYPE)),
+            ("alpha", rng(0.0, 100.0)),
+            ("width", num()),
+            ("dash_type", Kind::Enum(LINE_DASH)),
+            ("begin_arrow_type", Kind::Enum(ARROW_TYPE)),
+            ("end_arrow_type", Kind::Enum(ARROW_TYPE)),
+            ("line_dash", Kind::Enum(LINE_DASH)),
+            ("line_head", Kind::Enum(ARROW_TYPE)),
+            ("line_tail", Kind::Enum(ARROW_TYPE)),
+            ("pt", num()),
+            ("size", num()),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn shadow_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("type", Kind::Enum(SHADOW_TYPE)),
+            ("opacity", rng(0.0, 1.0)),
+            ("blur", rng(0.0, 100.0)),
+            ("angle", rng(0.0, 359.0)),
+            ("offset", rng(0.0, 200.0)),
+            ("color", Kind::Color),
+            ("rotate_with_shape", Kind::Bool),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn bullet_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("type", Kind::Enum(BULLET_TYPE)),
+            ("character_code", Kind::Str),
+            ("indent", num()),
+            ("number_type", Kind::Enum(BULLET_NUMBER_TYPE)),
+            ("number_start_at", num()),
+            ("code", Kind::Str),
+            ("margin_pt", num()),
+            ("start_at", num()),
+            ("style", Kind::Str),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn sizing_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("type", Kind::Enum(SIZING_TYPE)),
+            ("w", Kind::Coord),
+            ("h", Kind::Coord),
+            ("x", Kind::Coord),
+            ("y", Kind::Coord),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn hyperlink_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| vec![("slide", num()), ("url", Kind::Str), ("tooltip", Kind::Str)])
+        .as_slice()
+}
+
+pub fn underline_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("style", Kind::Enum(UNDERLINE_STYLE)),
+            ("color", Kind::Color),
+        ]
+    })
+    .as_slice()
+}
+
+pub fn outline_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| vec![("color", Kind::Color), ("size", num())])
+        .as_slice()
+}
+
+pub fn glow_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("color", Kind::Color),
+            ("opacity", rng(0.0, 1.0)),
+            ("size", num()),
+        ]
+    })
+    .as_slice()
+}
+
+/// The value kind for an option key, or `None` to leave the value unchecked.
+fn kind_for(ctx: Ctx, key: &str) -> Option<Kind> {
+    // Background-specific keys.
+    if matches!(ctx, Ctx::Background) {
+        return match key {
+            "color" | "fill" => Some(Kind::Color),
+            "transparency" | "alpha" => Some(rng(0.0, 100.0)),
+            "type" => Some(Kind::Enum(FILL_TYPE)),
+            "path" | "data" | "src" => Some(Kind::Str),
+            _ => Some(Kind::Any),
+        };
+    }
+    let k = match key {
+        "bold" | "italic" | "strike" | "subscript" | "superscript" | "wrap" | "break_line"
+        | "soft_break_before" | "flip_h" | "flip_v" | "rtl_mode" | "auto_fit" | "shrink_text"
+        | "is_text_box" => Kind::Bool,
+        "align" => Kind::Enum(HALIGN),
+        "valign" => Kind::Enum(VALIGN),
+        "fit" => Kind::Enum(FIT),
+        "text_direction" | "vert" => Kind::Enum(TEXTDIR),
+        "shape" => Kind::ShapePreset,
+        "rect_radius" | "arc_thickness_ratio" => rng(0.0, 1.0),
+        "rotate" => rng(-360.0, 360.0),
+        "transparency" => rng(0.0, 100.0),
+        "angle_range" => Kind::Num2(0.0, 359.0),
+        "font_size"
+        | "char_spacing"
+        | "line_spacing"
+        | "line_spacing_multiple"
+        | "indent_level"
+        | "baseline"
+        | "para_space_before"
+        | "para_space_after"
+        | "inset"
+        | "line_size"
+        | "pt"
+        | "size"
+        | "width"
+        | "indent"
+        | "number_start_at"
+        | "margin_pt"
+        | "start_at"
+        | "slide" => num(),
+        "color" | "highlight" => Kind::Color,
+        "font_face" | "lang" | "path" | "data" | "object_name" | "shape_name" | "alt_text"
+        | "character_code" | "code" | "url" | "tooltip" | "placeholder" | "src" | "rounding" => {
+            Kind::Str
+        }
+        "x" | "y" | "w" | "h" => Kind::Coord,
+        "margin" => Kind::Margin,
+        "points" => Kind::Points,
+        "tab_stops" => Kind::TabStops,
+        "fill" => Kind::ObjOrStr(fill_schema()),
+        "line" => Kind::ObjOrStr(line_schema()),
+        "shadow" => Kind::Tables(shadow_schema()),
+        "sizing" => Kind::Tables(sizing_schema()),
+        "hyperlink" => Kind::Tables(hyperlink_schema()),
+        "outline" => Kind::Tables(outline_schema()),
+        "glow" => Kind::Tables(glow_schema()),
+        "bullet" => Kind::BoolOrObj(bullet_schema()),
+        "underline" => Kind::BoolOrStrOrObj(underline_schema()),
+        _ => return None,
+    };
+    Some(k)
+}
+
+fn number_value(v: &toml::Value) -> Option<f64> {
+    match v {
+        toml::Value::Integer(i) => Some(*i as f64),
+        toml::Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+fn is_color(s: &str) -> bool {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    (h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit())) || THEME_COLORS.contains(&s)
+}
+
+fn check_value(kind: Kind, key: &str, value: &toml::Value, where_: &str) -> Result<()> {
+    use toml::Value as V;
+    macro_rules! bad {
+        ($msg:expr) => {
+            return Err(miette!(
+                "{where_}: `{key}` {msg}, got `{value}`",
+                msg = $msg
+            ))
+        };
+    }
+    match kind {
+        Kind::Any => {}
+        Kind::Bool => {
+            if !value.is_bool() {
+                bad!("must be a boolean");
+            }
+        }
+        Kind::Num(lo, hi) => match number_value(value) {
+            Some(n) if n >= lo && n <= hi => {}
+            Some(n) => {
+                return Err(miette!(
+                    "{where_}: `{key}` must be a number in [{lo}, {hi}], got `{n}`"
+                ));
+            }
+            None if lo.is_finite() || hi.is_finite() => {
+                return Err(miette!(
+                    "{where_}: `{key}` must be a number in [{lo}, {hi}], got `{value}`"
+                ));
+            }
+            None => bad!("must be a number"),
+        },
+        Kind::Str => {
+            if !value.is_str() {
+                bad!("must be a string");
+            }
+        }
+        Kind::Color => {
+            if let Some(s) = value.as_str() {
+                if !is_color(s) {
+                    return Err(miette!(
+                        "{where_}: `{key}` must be a 6-digit hex color or a theme color (tx1, accent1, ...)"
+                    ));
+                }
+            } else {
+                bad!("must be a color string");
+            }
+        }
+        Kind::Enum(choices) => {
+            if let Some(s) = value.as_str() {
+                if !choices.contains(&s) {
+                    return Err(miette!(
+                        "{where_}: `{key}` must be one of {}, got `{s}`",
+                        choices.join("|")
+                    ));
+                }
+            } else {
+                bad!("must be one of {}".replace("{}", &choices.join("|")));
+            }
+        }
+        Kind::ShapePreset => {
+            if let Some(s) = value.as_str() {
+                if canonical_preset(s).is_none() {
+                    return Err(miette!(
+                        "{where_}: `{key}` is not a known shape preset, got `{s}`"
+                    ));
+                }
+            } else {
+                bad!("must be a shape preset id");
+            }
+        }
+        Kind::Coord => match value {
+            V::Integer(_) | V::Float(_) => {}
+            V::String(s) => {
+                if crate::units::Coord::Text(s.clone()).emu(0).is_err() {
+                    return Err(miette!(
+                        "{where_}: `{key}` must be an EMU integer, a unit string (\"1cm\") or a percentage"
+                    ));
+                }
+            }
+            _ => bad!("must be a coordinate"),
+        },
+        Kind::Margin => match value {
+            V::Integer(_) | V::Float(_) => {}
+            V::Array(items) if items.len() == 4 => {
+                for i in items {
+                    if number_value(i).is_none() {
+                        bad!("margin array entries must be numbers");
+                    }
+                }
+            }
+            _ => bad!("must be a number or a 4-number margin"),
+        },
+        Kind::Num2(lo, hi) => {
+            if let Some(items) = value.as_array()
+                && items.len() == 2
+            {
+                for i in items {
+                    match number_value(i) {
+                        Some(n) if n >= lo && n <= hi => {}
+                        _ => {
+                            bad!("must be two numbers in [{lo}, {hi}]");
+                        }
+                    }
+                }
+            } else {
+                bad!("must be a two-number array");
+            }
+        }
+        Kind::Tables(schema) => match value {
+            V::Table(t) => validate_object(schema, t, key, where_)?,
+            _ => bad!("must be a table"),
+        },
+        Kind::ObjOrStr(schema) => match value {
+            V::Table(t) => validate_object(schema, t, key, where_)?,
+            V::String(_) => {}
+            _ => bad!("must be a table or a string shorthand"),
+        },
+        Kind::BoolOrObj(schema) => match value {
+            V::Boolean(_) => {}
+            V::Table(t) => validate_object(schema, t, key, where_)?,
+            _ => bad!("must be a boolean or a table"),
+        },
+        Kind::BoolOrStrOrObj(schema) => match value {
+            V::Boolean(_) | V::String(_) => {}
+            V::Table(t) => validate_object(schema, t, key, where_)?,
+            _ => bad!("must be a boolean, a string or a table"),
+        },
+        Kind::TabStops => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| miette!("{where_}: `{key}` must be an array of tables"))?;
+            for v in items {
+                let t = v
+                    .as_table()
+                    .ok_or_else(|| miette!("{where_}: `{key}` entries must be tables"))?;
+                for (k, val) in t {
+                    match k.as_str() {
+                        "position" => check_value(Kind::Coord, "position", val, where_)?,
+                        "alignment" => {
+                            check_value(Kind::Enum(TAB_ALIGN), "alignment", val, where_)?
+                        }
+                        _ => return Err(miette!("{where_}: unknown `{key}` tab stop field `{k}`")),
+                    }
+                }
+            }
+        }
+        Kind::Points => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| miette!("{where_}: `{key}` must be an array of tables"))?;
+            for v in items {
+                let t = v
+                    .as_table()
+                    .ok_or_else(|| miette!("{where_}: `{key}` entries must be tables"))?;
+                for (k, val) in t {
+                    match k.as_str() {
+                        "x" | "y" | "hR" | "wR" | "x1" | "y1" | "x2" | "y2" => {
+                            check_value(Kind::Coord, k, val, where_)?
+                        }
+                        "moveTo" | "close" => check_value(Kind::Bool, k, val, where_)?,
+                        "stAng" | "swAng" => check_value(Kind::Num(-360.0, 360.0), k, val, where_)?,
+                        "curve" => {
+                            let ct = val
+                                .as_table()
+                                .ok_or_else(|| miette!("{where_}: `curve` must be a table"))?;
+                            for (ck, cv) in ct {
+                                match ck.as_str() {
+                                    "type" => {
+                                        check_value(Kind::Enum(CURVE_TYPE), "type", cv, where_)?
+                                    }
+                                    "hR" | "wR" | "x1" | "y1" | "x2" | "y2" => {
+                                        check_value(Kind::Coord, ck, cv, where_)?
+                                    }
+                                    "stAng" | "swAng" => {
+                                        check_value(Kind::Num(-360.0, 360.0), ck, cv, where_)?
+                                    }
+                                    _ => {
+                                        return Err(miette!(
+                                            "{where_}: unknown `points` curve field `{ck}`"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => return Err(miette!("{where_}: unknown `{key}` point field `{k}`")),
+                    }
+                }
+            }
+        }
+        Kind::ArrayOfTables => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| miette!("{where_}: `{key}` must be an array of tables"))?;
+            for v in items {
+                if !v.is_table() {
+                    bad!("entries must be tables");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_object(
+    schema: &[(&'static str, Kind)],
+    table: &toml::Table,
+    object: &str,
+    where_: &str,
+) -> Result<()> {
+    for (k, v) in table {
+        let kind = schema
+            .iter()
+            .find(|(name, _)| *name == k)
+            .map(|(_, k)| *k)
+            .ok_or_else(|| miette!("{where_}: unknown `{object}` option `{k}`"))?;
+        check_value(kind, k, v, where_)?;
+    }
+    Ok(())
+}
 
 /// Ordered-list marker display patterns mapped to pptxgenjs `buAutoNum`
 /// number types. The pattern's counter char is `1`, `a`, `A`, `i` or `I`.
@@ -620,7 +1092,7 @@ pub fn validate_list_markers(table: &toml::Table, where_: &str) -> Result<()> {
 }
 
 /// Validate an option map. A non-table value (e.g. a color shorthand for
-/// `background`) is fine; only table keys are checked.
+/// `background`) is fine; only table keys and their values are checked.
 pub fn validate_ctx(ctx: Ctx, value: &toml::Value, where_: &str) -> Result<()> {
     let Some(table) = value.as_table() else {
         return Ok(());
@@ -636,29 +1108,15 @@ pub fn validate_ctx(ctx: Ctx, value: &toml::Value, where_: &str) -> Result<()> {
     let mut keys: Vec<&str> = keys.to_vec();
     keys.extend(POSITION);
     keys.extend(extra);
-    validate_table(&keys, NESTED, table, where_, label)
-}
-
-fn validate_table(
-    keys: &[&str],
-    nested: &[(&str, &[&str])],
-    table: &toml::Table,
-    where_: &str,
-    label: &str,
-) -> Result<()> {
     for (k, v) in table {
-        if let Some((_, sub)) = nested.iter().find(|(name, _)| name == k) {
-            if let Some(t) = v.as_table() {
-                validate_table(sub, &[], t, where_, k)?;
-            }
-            continue;
+        if !keys.contains(&k.as_str()) {
+            return Err(miette!(
+                "{where_}: unknown {label} option `{k}` (not a pptxgenjs option)"
+            ));
         }
-        if keys.contains(&k.as_str()) {
-            continue;
+        if let Some(kind) = kind_for(ctx, k) {
+            check_value(kind, k, v, where_)?;
         }
-        return Err(miette!(
-            "{where_}: unknown {label} option `{k}` (not a pptxgenjs option)"
-        ));
     }
     Ok(())
 }
@@ -714,5 +1172,89 @@ mod tests {
     fn style_rejects_unknown_keys() {
         ctx(Ctx::Style, "arc_thickness_ratio = 0.5\n").unwrap();
         assert!(ctx(Ctx::Style, "nonsense = true\n").is_err());
+    }
+
+    #[test]
+    fn wrong_value_types_error() {
+        for (s, needle) in [
+            ("rect_radius = \"1cm\"\n", "must be a number in [0, 1]"),
+            ("font_size = \"big\"\n", "must be a number"),
+            ("transparency = \"half\"\n", "must be a number"),
+            ("bold = \"yes\"\n", "must be a boolean"),
+            ("bullet = \"yes\"\n", "must be a boolean or a table"),
+            (
+                "align = \"centr\"\n",
+                "must be one of left|center|right|justify",
+            ),
+            ("fit = \"stretch\"\n", "must be one of"),
+            (
+                "color = \"xyz\"\n",
+                "must be a 6-digit hex color or a theme color",
+            ),
+            (
+                "color = \"zzzzzz\"\n",
+                "must be a 6-digit hex color or a theme color",
+            ),
+            ("margin = \"10\"\n", "must be a number or a 4-number margin"),
+            ("angle_range = [1, 2, 3]\n", "must be a two-number array"),
+            (
+                "shadow = { offset = 999 }\n",
+                "must be a number in [0, 200]",
+            ),
+            (
+                "sizing = { type = \"zoom\" }\n",
+                "must be one of contain|cover|crop",
+            ),
+            ("rotate = 500\n", "must be a number in [-360, 360]"),
+            ("line = { dash_type = \"wavy\" }\n", "dash_type"),
+        ] {
+            let err = ctx(Ctx::TextShape, s).unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "expected `{needle}` in error for {s:?}, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_union_types_pass() {
+        for s in [
+            "x = 1000\n",
+            "x = \"1cm\"\n",
+            "sizing = { w = \"75%\", type = \"contain\" }\n",
+            "color = \"#FF0000\"\n",
+            "color = \"accent1\"\n",
+            "fill = \"FFFF00\"\n",
+            "fill = { color = \"00AAFF\" }\n",
+            "margin = [0.1, 0.1, 0.1, 0.1]\n",
+            "bullet = false\n",
+            "bullet = { type = \"number\", number_type = \"arabicPeriod\" }\n",
+            "underline = \"sng\"\n",
+            "rotate = 180\n",
+            "transparency = 100\n",
+            "rect_radius = 1\n",
+        ] {
+            ctx(Ctx::TextShape, s).unwrap_or_else(|e| panic!("should pass `{s}`: {e:?}"));
+        }
+        ctx(
+            Ctx::TextShape,
+            "points = [{ x = 0, y = 0 }, { close = true }]\n",
+        )
+        .unwrap();
+        ctx(
+            Ctx::Text,
+            "tab_stops = [{ position = 1, alignment = \"ctr\" }]\n",
+        )
+        .unwrap();
+        // Number-currently snake names must be accepted by canonical_preset.
+        ctx(Ctx::Text, "shape = \"round_rect\"\n").unwrap();
+    }
+
+    #[test]
+    fn coord_and_enum_reject_bad_values() {
+        let err = ctx(Ctx::Text, "x = \"nope\"\n").unwrap_err();
+        assert!(err.to_string().contains("EMU integer"));
+        let err = ctx(Ctx::Text, "shape = \"rectt\"\n").unwrap_err();
+        assert!(err.to_string().contains("not a known shape preset"));
     }
 }

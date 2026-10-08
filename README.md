@@ -308,7 +308,11 @@ plain integers. Unit-suffixed strings and percentages are also accepted:
 Unknown TOML fields (a misspelled table or key such as `[[shaps]]`) and unknown
 pptxgenjs option keys (`fount_size`, a stray key inside `fill`, an unknown
 `styles = "<name>"`) are build errors, so typos fail loudly instead of being
-silently ignored.
+silently ignored. Option **values** are validated too: numbers (with their
+documented ranges, e.g. `rect_radius` 0-1, `transparency` 0-100), booleans,
+enum strings (`align`, `fit`, `sizing.type`, ...), colors (6-hex or theme
+names), coordinates (EMU integer, `"1cm"`, or `"50%"`), and nested
+objects/arrays.
 
 ## Rendering
 

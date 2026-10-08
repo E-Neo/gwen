@@ -207,10 +207,23 @@ fn option_fields() -> String {
         }
     };
 
-    let nested: Vec<String> = gwen::opts::NESTED
-        .iter()
-        .map(|(name, keys)| format!("`{name}` (`{}`)", keys.join("`, `")))
-        .collect();
+    let nested: Vec<String> = [
+        ("fill", gwen::opts::fill_schema()),
+        ("line", gwen::opts::line_schema()),
+        ("shadow", gwen::opts::shadow_schema()),
+        ("bullet", gwen::opts::bullet_schema()),
+        ("sizing", gwen::opts::sizing_schema()),
+        ("hyperlink", gwen::opts::hyperlink_schema()),
+        ("underline", gwen::opts::underline_schema()),
+        ("outline", gwen::opts::outline_schema()),
+        ("glow", gwen::opts::glow_schema()),
+    ]
+    .iter()
+    .map(|(name, schema)| {
+        let keys: Vec<&str> = schema.iter().map(|(n, _)| *n).collect();
+        format!("`{name}` (`{}`)", keys.join("`, `"))
+    })
+    .collect();
 
     [
         group("Shape/preset", Some(gwen::opts::TEXTSHAPE_KEYS)),
@@ -490,8 +503,11 @@ canonicalised to pptxgenjs camelCase internally.
 ## Validation
 
 Unknown TOML fields or table names, unknown pptxgenjs option keys, unknown
-`styles` references, and style cycles are build errors. Errors are loud -
-read gwen's diagnostics and fix the referenced file/line.
+`styles` references, and style cycles are build errors. Option **values** are
+type-checked too: numbers (with their documented ranges), booleans, enum
+strings, colors (6-hex or theme names), coordinates (EMU integer, `"1cm"` or
+`"50%"`), and nested objects/arrays are validated. Errors are loud - read
+gwen's diagnostics and fix the referenced file/line.
 "##;
 
 #[cfg(test)]

@@ -863,3 +863,18 @@ fn master_snake_preset_spec_type_is_canonical() {
         "master preset canonicalised in spec"
     );
 }
+
+#[test]
+fn wrong_option_value_type_is_reported() {
+    let dir = sample_project("badvaltype");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\nrect_radius = \"1cm\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("rect_radius") && msg.contains("number"),
+        "expected a rect_radius type error, got: {msg}"
+    );
+}
