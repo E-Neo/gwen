@@ -938,3 +938,73 @@ fn wrong_option_value_type_is_reported() {
         "expected a rect_radius type error, got: {msg}"
     );
 }
+
+#[test]
+fn length_string_margin_is_coerced_to_inches() {
+    let dir = sample_project("lenmargin");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"text\"\nx = \"1.5in\"\ny = \"1.5in\"\nw = \"4in\"\nh = \"1in\"\ntext = \"hi\"\nmargin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][1]["shapes"]
+        .as_array()
+        .unwrap();
+    let text = shapes.iter().find(|s| s["kind"] == "text").unwrap();
+    match &text["margin"] {
+        serde_json::Value::Array(items) => {
+            assert_eq!(items.len(), 4, "margin is a 4-array");
+            for (v, want) in items.iter().zip([0.0512, 0.0984, 0.0512, 0.0984]) {
+                assert!(
+                    (v.as_f64().unwrap() - want).abs() < 0.001,
+                    "margin entry {v} != ~{want} inches"
+                );
+            }
+        }
+        other => panic!("margin not coerced to inches: {other}"),
+    }
+}
+
+#[test]
+fn snake_shape_option_is_canonical_in_spec() {
+    let dir = sample_project("snakeoptshape");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"Box\"\nshape = \"round_rect\"\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][0]["shapes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        shapes[0]["shape"], "roundRect",
+        "snake `shape` option canonicalised in the spec"
+    );
+}
+
+#[test]
+fn bad_value_reports_source_location() {
+    let dir = sample_project("located");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\ntext = \"hi\"\nfont_size = \"big\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("content.toml"),
+        "diagnostic locates the slide file, got: {msg}"
+    );
+    assert!(
+        msg.contains("font_size"),
+        "diagnostic names the option: {msg}"
+    );
+    assert!(
+        msg.contains("must be a number"),
+        "diagnostic explains the failure: {msg}"
+    );
+}

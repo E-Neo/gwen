@@ -515,18 +515,23 @@ supported at the shape level.
 ## Coordinates and naming
 
 All `x`/`y`/`w`/`h` are EMU as integers, or `"1in"`, `"2.5cm"`, `"25mm"`,
-`"72pt"`, `"50%"` strings. Shape preset and marker names are snake_case in the
-DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is `"1."`) and are
-canonicalised to pptxgenjs camelCase internally.
+`"72pt"`, `"50%"` strings. Coordinate-valued options (`margin`, `sizing`'s
+`w`/`h`/`x`/`y`, `tab_stops.position`, `points`) accept the same forms: length
+strings (`"0.13cm"`) are converted to inches, `"50%"` passes through, and bare
+numbers are inches (what pptxgenjs expects). A `margin` is a single value or a
+`[top, right, bottom, left]` array. Shape preset and marker names are
+snake_case in the DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is
+`"1."`) and are canonicalised to pptxgenjs camelCase internally - including the
+`shape` option, so `shape = "round_rect"` works.
 
 ## Validation
 
 Unknown TOML fields or table names, unknown pptxgenjs option keys, unknown
 `styles` references, and style cycles are build errors. Option **values** are
 type-checked too: numbers (with their documented ranges), booleans, enum
-strings, colors (6-hex or theme names), coordinates (EMU integer, `"1cm"` or
-`"50%"`), and nested objects/arrays are validated. Errors are loud - read
-gwen's diagnostics and fix the referenced file/line.
+strings, colors (6-hex or theme names), coordinates (number, `"1cm"` or
+`"50%"`), and nested objects/arrays are validated. Errors report the exact
+`path:line:col` of the offending key, so just fix what gwen points at.
 "##;
 
 #[cfg(test)]

@@ -3,15 +3,128 @@
 //! units pptxgenjs expects) into the JSON spec the embedded bridge renders.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
+use base64::Engine;
 use miette::{Result, miette};
 use serde_json::{Map, Value, json};
+use toml_edit::{Document, InlineTable, Item, Table};
 
 use crate::model::{Kind, Main, Master, Project, Section, Shape, SlideNumber};
 use crate::opts::{self, Ctx};
 use crate::richtext;
 use crate::units::{Coord, EMU_PER_IN};
-use base64::Engine;
+
+/// The typed shape keys that live outside the pptxgenjs option map.
+const SHAPE_SKIP: &[&str] = &[
+    "type",
+    "styles",
+    "text",
+    "paragraphs",
+    "src",
+    "x",
+    "y",
+    "w",
+    "h",
+];
+/// The typed paragraph keys outside the option map.
+const PARA_SKIP: &[&str] = &["text"];
+/// The typed slide-number keys outside the option map.
+const SLIDE_NUMBER_SKIP: &[&str] = &["x", "y", "w", "h"];
+
+/// A parsed deck file backed by a `toml_edit` document, so validation errors
+/// can point at the exact `path:line:col` in the source TOML.
+struct FileSrc {
+    path: String,
+    text: String,
+    doc: Document<String>,
+}
+
+impl FileSrc {
+    fn new(path: PathBuf, text: String) -> Result<FileSrc> {
+        let doc = text
+            .parse::<Document<String>>()
+            .map_err(|e| miette!("cannot parse `{}`: {e}", path.display()))?;
+        Ok(FileSrc {
+            path: path.display().to_string(),
+            text,
+            doc,
+        })
+    }
+
+    fn src(&self) -> opts::Src {
+        opts::Src {
+            path: self.path.clone(),
+            text: self.text.clone(),
+        }
+    }
+
+    fn shapes(&self) -> Vec<Table> {
+        let Some(shapes) = self
+            .doc
+            .as_table()
+            .get("shapes")
+            .and_then(|i| i.as_array_of_tables())
+        else {
+            return Vec::new();
+        };
+        shapes.iter().cloned().collect()
+    }
+
+    fn shape_at(&self, idx: usize) -> Option<&Table> {
+        self.doc
+            .as_table()
+            .get("shapes")
+            .and_then(|i| i.as_array_of_tables())
+            .and_then(|a| a.get(idx))
+    }
+
+    fn paras_for(&self, shape: &Table) -> Vec<Table> {
+        let Some(paras) = shape.get("paragraphs").and_then(|i| i.as_array_of_tables()) else {
+            return Vec::new();
+        };
+        paras.iter().cloned().collect()
+    }
+
+    fn table_of(&self, key: &str) -> Option<Table> {
+        self.doc.as_table().get(key).and_then(|i| match i {
+            Item::Value(toml_edit::Value::InlineTable(it)) => Some(inline_to_table(it)),
+            Item::Table(t) => Some(t.clone()),
+            _ => None,
+        })
+    }
+}
+
+fn inline_to_table(it: &InlineTable) -> Table {
+    let mut t = Table::new();
+    for (k, v) in it.iter() {
+        t.insert(k, Item::Value(v.clone()));
+    }
+    t
+}
+
+/// Per-slide rendering context, bundling the deck-level inputs that every
+/// `shape_value` call needs.
+struct SlideCtx<'a> {
+    project: &'a Project,
+    main: &'a Main,
+    width: i64,
+    height: i64,
+    file: &'a str,
+    file_src: &'a FileSrc,
+}
+
+impl SlideCtx<'_> {
+    fn shape_table(&self, idx: usize) -> Option<&Table> {
+        self.file_src.shape_at(idx)
+    }
+
+    fn paras(&self, idx: usize) -> Vec<Table> {
+        self.shape_table(idx)
+            .map(|t| self.file_src.paras_for(t))
+            .unwrap_or_default()
+    }
+}
 
 /// Build the JSON spec string passed to the pptxgenjs bridge.
 ///
@@ -30,6 +143,15 @@ pub fn spec_json(project: &Project) -> Result<String> {
         .emu(0)
         .map_err(|e| miette!("[presentation].height: {e}"))?;
 
+    let main_raw = std::fs::read_to_string(project.dir.join("main.toml")).map_err(|e| {
+        miette!(
+            "cannot read `{}`: {e}",
+            project.dir.join("main.toml").display()
+        )
+    })?;
+    let main_src = FileSrc::new(project.dir.join("main.toml"), main_raw)?;
+
+    validate_styles_located(&main_src)?;
     validate_styles(main_)?;
 
     let masters = load_masters(project, width, height, main_)?;
@@ -84,6 +206,48 @@ fn validate_styles_value(table: &toml::Table, where_: &str) -> Result<()> {
     Ok(())
 }
 
+/// Located version of `validate_styles`: validate the `[styles.*]` buckets of
+/// `main.toml` against the parsed toml_edit document so diagnostics carry the
+/// exact key/line in `main.toml`.
+fn validate_styles_located(main_src: &FileSrc) -> Result<()> {
+    let Some(styles) = main_src
+        .doc
+        .as_table()
+        .get("styles")
+        .and_then(|i| i.as_table())
+    else {
+        return Ok(());
+    };
+    let src = main_src.src();
+    for (ty, item) in styles.iter() {
+        if ty == "named" {
+            if let Some(named) = item.as_table() {
+                for (name, item) in named.iter() {
+                    let Some(table) = item.as_table() else {
+                        continue;
+                    };
+                    let where_ = format!("[styles.named.{name}]");
+                    validate_source_bucket(Ctx::Style, table, &src, &where_)?;
+                }
+            }
+            continue;
+        }
+        let Some(table) = item.as_table() else {
+            continue;
+        };
+        let canon = opts::canonical_preset(ty).unwrap_or(ty);
+        let ctx = opts::ctx_for_style_type(canon)
+            .ok_or_else(|| miette!("unknown style type `[styles.{ty}]` (not a shape type)"))?;
+        validate_source_bucket(ctx, table, &src, &format!("[styles.{ty}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_source_bucket(ctx: Ctx, table: &Table, src: &opts::Src, where_: &str) -> Result<()> {
+    opts::validate_source(ctx, table, src, where_, &[])?;
+    opts::validate_list_markers_edit(table, src, where_)
+}
+
 fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Result<Vec<Value>> {
     let dir = project.dir.join("masters");
     let mut files: Vec<_> = if dir.is_dir() {
@@ -110,10 +274,13 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             .into_owned();
         let raw = std::fs::read_to_string(entry.path())
             .map_err(|e| miette!("cannot read `{}`: {e}", entry.path().display()))?;
+        let file_src = FileSrc::new(entry.path(), raw.clone())?;
+        let src = file_src.src();
+        let shape_tables = file_src.shapes();
         let master: Master = toml::from_str(&raw)
             .map_err(|e| miette!("cannot parse `{}`: {e}", entry.path().display()))?;
         let mut objects = Vec::new();
-        for obj in &master.shapes {
+        for (idx, obj) in master.shapes.iter().enumerate() {
             let ty = opts::canonical_preset(&obj.ty).unwrap_or(&obj.ty);
             if !matches!(ty, "chart") && opts::ctx_for_style_type(ty).is_none() {
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
@@ -134,7 +301,12 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 _ => Some(Ctx::TextShape),
             };
             if let Some(ctx) = ctx {
-                opts::validate_ctx(ctx, &opts, &format!("master `{stem}` shape `{}`", obj.ty))?;
+                let where_ = format!("master `{stem}` shape `{}`", obj.ty);
+                if let Some(table) = shape_tables.get(idx) {
+                    opts::validate_source(ctx, table, &src, &where_, SHAPE_SKIP)?;
+                }
+                opts::validate_ctx(ctx, &opts, &where_)?;
+                opts::finalize_opts(ctx, &mut opts)?;
             }
             if obj.ty == "placeholder" {
                 placeholder_opts(&mut opts, &stem)?;
@@ -157,7 +329,10 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             objects.push(Value::Object(out));
         }
         let slide_number = match &master.slide_number {
-            Some(sn) => slide_number_value(sn, width, height, &stem)?,
+            Some(sn) => {
+                let table = file_src.table_of("slide_number");
+                slide_number_value(sn, width, height, &stem, &src, table.as_ref())?
+            }
             None => Value::Null,
         };
         out.push(json!({
@@ -204,20 +379,29 @@ fn placeholder_opts(opts: &mut toml::Value, master: &str) -> Result<()> {
 }
 
 /// Convert a master `slide_number` into inches + camelCase options for `defineSlideMaster`.
-fn slide_number_value(sn: &SlideNumber, width: i64, height: i64, master: &str) -> Result<Value> {
-    if !sn.opts.is_empty() {
-        opts::validate_ctx(
-            Ctx::Text,
-            &toml::Value::Table(sn.opts.clone()),
-            &format!("master `{master}` slide_number"),
-        )?;
+fn slide_number_value(
+    sn: &SlideNumber,
+    width: i64,
+    height: i64,
+    master: &str,
+    src: &opts::Src,
+    table: Option<&Table>,
+) -> Result<Value> {
+    let where_ = format!("master `{master}` slide_number");
+    if let Some(table) = table {
+        opts::validate_source(Ctx::Text, table, src, &where_, SLIDE_NUMBER_SKIP)?;
     }
+    if !sn.opts.is_empty() {
+        opts::validate_ctx(Ctx::Text, &toml::Value::Table(sn.opts.clone()), &where_)?;
+    }
+    let mut opts = toml::Value::Table(sn.opts.clone());
+    opts::finalize_opts(Ctx::Text, &mut opts)?;
     let mut out = Map::new();
     out.insert("x".into(), json!(geo(&sn.x, width, "x")?));
     out.insert("y".into(), json!(geo(&sn.y, height, "y")?));
     out.insert("w".into(), json!(geo(&sn.w, width, "w")?));
     out.insert("h".into(), json!(geo(&sn.h, height, "h")?));
-    let opts = to_pptxgen(&toml::Value::Table(sn.opts.clone()));
+    let opts = to_pptxgen(&opts);
     for (k, v) in opts.as_object().unwrap() {
         out.insert(k.clone(), v.clone());
     }
@@ -279,6 +463,7 @@ fn build_slide(
     let path = project.slide_path(file);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| miette!("cannot read `{}`: {e}", path.display()))?;
+    let file_src = FileSrc::new(path.clone(), raw.clone())?;
     let slide: crate::model::Slide =
         toml::from_str(&raw).map_err(|e| miette!("cannot parse `{}`: {e}", path.display()))?;
     if let Some(master) = &slide.master
@@ -303,8 +488,16 @@ fn build_slide(
     }
 
     let mut shapes = Vec::new();
-    for shape in &slide.shapes {
-        shapes.push(shape_value(project, main, width, height, file, shape)?);
+    let slide_ctx = SlideCtx {
+        project,
+        main,
+        width,
+        height,
+        file,
+        file_src: &file_src,
+    };
+    for (idx, shape) in slide.shapes.iter().enumerate() {
+        shapes.push(shape_value(&slide_ctx, shape, idx)?);
     }
 
     Ok(json!({
@@ -316,14 +509,8 @@ fn build_slide(
     }))
 }
 
-fn shape_value(
-    project: &Project,
-    main: &Main,
-    width: i64,
-    height: i64,
-    file: &str,
-    shape: &Shape,
-) -> Result<Value> {
+fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
+    let file = ctx.file;
     let mut kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
     if matches!(kind, Kind::Shape) && !opts::is_shape_type(&shape.ty) {
         return Err(miette!("slide `{file}`: unknown shape type `{}`", shape.ty));
@@ -337,7 +524,37 @@ fn shape_value(
     if carries_text {
         kind = Kind::Text;
     }
-    let mut merged = merge_opts(main, &shape.ty, carries_text, &shape.styles, &shape.opts)?;
+    let octx = match kind {
+        Kind::Text => Ctx::Text,
+        Kind::Image => Ctx::Image,
+        Kind::Shape => Ctx::TextShape,
+    };
+    let where_ = format!("slide `{file}` shape `{}`", shape.ty);
+    let src = ctx.file_src.src();
+    if let Some(table) = ctx.shape_table(idx) {
+        opts::validate_source(octx, table, &src, &where_, SHAPE_SKIP)?;
+    }
+    if matches!(kind, Kind::Text) {
+        let paras = ctx.paras(idx);
+        for (j, _para) in shape.paragraphs.iter().enumerate() {
+            if let Some(table) = paras.get(j) {
+                opts::validate_source(
+                    Ctx::Text,
+                    table,
+                    &src,
+                    &format!("{where_} paragraph"),
+                    PARA_SKIP,
+                )?;
+            }
+        }
+    }
+    let mut merged = merge_opts(
+        ctx.main,
+        &shape.ty,
+        carries_text,
+        &shape.styles,
+        &shape.opts,
+    )?;
     let (ordered_markers, unordered_markers) = take_markers(&mut merged);
     if carries_text {
         merged
@@ -345,23 +562,15 @@ fn shape_value(
             .unwrap()
             .insert("shape".into(), toml::Value::String(canon_ty.to_string()));
     }
-    let ctx = match kind {
-        Kind::Text => Ctx::Text,
-        Kind::Image => Ctx::Image,
-        Kind::Shape => Ctx::TextShape,
-    };
-    opts::validate_ctx(
-        ctx,
-        &merged,
-        &format!("slide `{file}` shape `{}`", shape.ty),
-    )?;
+    opts::validate_ctx(octx, &merged, &where_)?;
+    opts::finalize_opts(octx, &mut merged)?;
     let opts = to_pptxgen(&merged);
 
     let mut value = Map::new();
-    value.insert("x".into(), json!(geo(&shape.x, width, "x")?));
-    value.insert("y".into(), json!(geo(&shape.y, height, "y")?));
-    value.insert("w".into(), json!(geo(&shape.w, width, "w")?));
-    value.insert("h".into(), json!(geo(&shape.h, height, "h")?));
+    value.insert("x".into(), json!(geo(&shape.x, ctx.width, "x")?));
+    value.insert("y".into(), json!(geo(&shape.y, ctx.height, "y")?));
+    value.insert("w".into(), json!(geo(&shape.w, ctx.width, "w")?));
+    value.insert("h".into(), json!(geo(&shape.h, ctx.height, "h")?));
     match kind {
         Kind::Text => {
             value.insert("kind".into(), json!("text"));
@@ -375,7 +584,7 @@ fn shape_value(
         }
         Kind::Image => {
             value.insert("kind".into(), json!("image"));
-            for (k, v) in image_value(project, file, shape)?.as_object().unwrap() {
+            for (k, v) in image_value(ctx.project, file, shape)?.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }
             for (k, v) in opts.as_object().unwrap() {
@@ -446,7 +655,9 @@ fn runs_value(
     }
     let mut groups: Vec<Group> = Vec::new();
     for para in &paragraphs {
-        let para_opts = to_pptxgen(&toml::Value::Table(para.opts.clone()));
+        let mut para_value = toml::Value::Table(para.opts.clone());
+        opts::finalize_opts(Ctx::Text, &mut para_value)?;
+        let para_opts = to_pptxgen(&para_value);
         let para_opts = para_opts
             .as_object()
             .unwrap()

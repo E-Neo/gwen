@@ -8,6 +8,8 @@
 
 use miette::{Result, miette};
 
+use toml_edit::Value;
+
 /// The pptxgenjs `ShapeType` preset ids (from the vendored `index.d.ts`
 /// `SHAPE_NAME`), used to validate shape `type` and `[styles.<type>]` keys.
 pub const SHAPE_PRESETS: &[&str] = &[
@@ -881,14 +883,19 @@ fn check_value(kind: Kind, key: &str, value: &toml::Value, where_: &str) -> Resu
         },
         Kind::Margin => match value {
             V::Integer(_) | V::Float(_) => {}
-            V::Array(items) if items.len() == 4 => {
-                for i in items {
-                    if number_value(i).is_none() {
-                        bad!("margin array entries must be numbers");
-                    }
+            V::String(s) => {
+                if crate::units::Coord::Text(s.to_string()).inches(0).is_err() {
+                    return Err(miette!(
+                        "{where_}: `{key}` must be a number, a length string or a percentage"
+                    ));
                 }
             }
-            _ => bad!("must be a number or a 4-number margin"),
+            V::Array(items) if items.len() == 4 => {
+                for i in items {
+                    check_value(Kind::Coord, key, i, where_)?;
+                }
+            }
+            _ => bad!("must be a number, a length, or a 4-value margin"),
         },
         Kind::Num2(lo, hi) => {
             if let Some(items) = value.as_array()
@@ -1091,20 +1098,70 @@ pub fn validate_list_markers(table: &toml::Table, where_: &str) -> Result<()> {
     Ok(())
 }
 
+/// Located version of `validate_list_markers`, over a source toml_edit table.
+pub fn validate_list_markers_edit(table: &toml_edit::Table, src: &Src, where_: &str) -> Result<()> {
+    if let Some(item) = table.get("ordered_markers") {
+        let Some(arr) = item.as_value().and_then(Value::as_array) else {
+            return Err(located(
+                item.span(),
+                src,
+                format!("{where_}: `ordered_markers` must be an array of marker patterns"),
+            ));
+        };
+        for v in arr.iter() {
+            let s = v.as_str().ok_or_else(|| {
+                located(
+                    v.span(),
+                    src,
+                    format!("{where_}: `ordered_markers` entries must be strings"),
+                )
+            })?;
+            if !MARKER_PATTERNS.iter().any(|(p, _)| *p == s) {
+                return Err(located(
+                    v.span(),
+                    src,
+                    format!(
+                        "{where_}: unknown ordered marker `{s}` (use e.g. \"1.\", \"(1)\", \"A.\")"
+                    ),
+                ));
+            }
+        }
+    }
+    if let Some(item) = table.get("unordered_markers") {
+        let Some(arr) = item.as_value().and_then(Value::as_array) else {
+            return Err(located(
+                item.span(),
+                src,
+                format!("{where_}: `unordered_markers` must be an array of bullet characters"),
+            ));
+        };
+        for v in arr.iter() {
+            let s = v.as_str().ok_or_else(|| {
+                located(
+                    v.span(),
+                    src,
+                    format!("{where_}: `unordered_markers` entries must be strings"),
+                )
+            })?;
+            if s.chars().count() != 1 {
+                return Err(located(
+                    v.span(),
+                    src,
+                    format!("{where_}: `unordered_markers` entry `{s}` must be a single character"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate an option map. A non-table value (e.g. a color shorthand for
 /// `background`) is fine; only table keys and their values are checked.
 pub fn validate_ctx(ctx: Ctx, value: &toml::Value, where_: &str) -> Result<()> {
     let Some(table) = value.as_table() else {
         return Ok(());
     };
-    let (keys, label, extra): (&[&str], &str, &[&str]) = match ctx {
-        Ctx::Text => (TEXT_KEYS, "text", &[]),
-        Ctx::Placeholder => (TEXT_KEYS, "placeholder", &["name", "ph_type"]),
-        Ctx::TextShape => (TEXTSHAPE_KEYS, "shape", &[]),
-        Ctx::Image => (IMAGE_KEYS, "image", &[]),
-        Ctx::Background => (BACKGROUND_KEYS, "background", &[]),
-        Ctx::Style => (STYLE_KEYS, "style", &[]),
-    };
+    let (keys, label, extra) = ctx_parts(ctx);
     let mut keys: Vec<&str> = keys.to_vec();
     keys.extend(POSITION);
     keys.extend(extra);
@@ -1119,6 +1176,510 @@ pub fn validate_ctx(ctx: Ctx, value: &toml::Value, where_: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ctx_parts(
+    ctx: Ctx,
+) -> (
+    &'static [&'static str],
+    &'static str,
+    &'static [&'static str],
+) {
+    match ctx {
+        Ctx::Text => (TEXT_KEYS, "text", &[]),
+        Ctx::Placeholder => (TEXT_KEYS, "placeholder", &["name", "ph_type"]),
+        Ctx::TextShape => (TEXTSHAPE_KEYS, "shape", &[]),
+        Ctx::Image => (IMAGE_KEYS, "image", &[]),
+        Ctx::Background => (BACKGROUND_KEYS, "background", &[]),
+        Ctx::Style => (STYLE_KEYS, "style", &[]),
+    }
+}
+
+/// A parsed source TOML file, used to render diagnostics that point at the
+/// exact `path:line:col` of a misconfiguration.
+pub struct Src {
+    pub path: String,
+    pub text: String,
+}
+
+/// Build a located miette diagnostic. When a byte span into `src` is known the
+/// error carries the source file plus a label; otherwise it degrades to the
+/// plain `where_` message.
+fn located(span: Option<std::ops::Range<usize>>, src: &Src, msg: String) -> miette::Report {
+    let mut diag = miette::MietteDiagnostic::new(msg);
+    if let Some(sp) = span {
+        diag = diag.and_label(miette::LabeledSpan::at(sp, "here"));
+        return miette::Report::new(diag)
+            .with_source_code(miette::NamedSource::new(src.path.clone(), src.text.clone()));
+    }
+    miette::Report::new(diag)
+}
+
+/// Validate the option map of a single source table (a shape, a paragraph, a
+/// style bucket, ...) against the effective pptxgenjs context, producing
+/// diagnostics that carry the exact `path:line:col` of a bad key or value.
+/// `skip` names the typed keys that live outside the option map (`type`,
+/// `styles`, `text`, `src`, `x`, `y`, `w`, `h`, `paragraphs`).
+pub fn validate_source(
+    ctx: Ctx,
+    table: &toml_edit::Table,
+    src: &Src,
+    where_: &str,
+    skip: &[&str],
+) -> Result<()> {
+    let (keys, label, extra) = ctx_parts(ctx);
+    let mut keys: Vec<&str> = keys.to_vec();
+    keys.extend(POSITION);
+    keys.extend(extra);
+    for (k, item) in table.iter() {
+        if skip.contains(&k) {
+            continue;
+        }
+        let Some(v) = item.as_value() else {
+            continue;
+        };
+        if !keys.contains(&k) {
+            return Err(located(
+                item.span(),
+                src,
+                format!("{where_}: unknown {label} option `{k}` (not a pptxgenjs option)"),
+            ));
+        }
+        if let Some(kind) = kind_for(ctx, k) {
+            check_value_edit(kind, k, v, src, where_)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_value_edit(
+    kind: Kind,
+    key: &str,
+    value: &toml_edit::Value,
+    src: &Src,
+    where_: &str,
+) -> Result<()> {
+    use toml_edit::Value as V;
+    macro_rules! bad {
+        ($msg:expr) => {
+            return Err(located(
+                value.span(),
+                src,
+                format!("{where_}: `{key}` {msg}, got `{value}`", msg = $msg),
+            ))
+        };
+    }
+    match kind {
+        Kind::Any => {}
+        Kind::Bool => {
+            if !value.is_bool() {
+                bad!("must be a boolean");
+            }
+        }
+        Kind::Num(lo, hi) => match number_value_edit(value) {
+            Some(n) if n >= lo && n <= hi => {}
+            Some(n) => {
+                return Err(located(
+                    value.span(),
+                    src,
+                    format!("{where_}: `{key}` must be a number in [{lo}, {hi}], got `{n}`"),
+                ));
+            }
+            None if lo.is_finite() || hi.is_finite() => {
+                return Err(located(
+                    value.span(),
+                    src,
+                    format!("{where_}: `{key}` must be a number in [{lo}, {hi}], got `{value}`"),
+                ));
+            }
+            None => bad!("must be a number"),
+        },
+        Kind::Str => {
+            if !value.is_str() {
+                bad!("must be a string");
+            }
+        }
+        Kind::Color => {
+            if let Some(s) = value.as_str() {
+                if !is_color(s) {
+                    return Err(located(
+                        value.span(),
+                        src,
+                        format!(
+                            "{where_}: `{key}` must be a 6-digit hex color or a theme color (tx1, accent1, ...)"
+                        ),
+                    ));
+                }
+            } else {
+                bad!("must be a color string");
+            }
+        }
+        Kind::Enum(choices) => {
+            if let Some(s) = value.as_str() {
+                if !choices.contains(&s) {
+                    return Err(located(
+                        value.span(),
+                        src,
+                        format!(
+                            "{where_}: `{key}` must be one of {}, got `{s}`",
+                            choices.join("|")
+                        ),
+                    ));
+                }
+            } else {
+                bad!("must be one of {}".replace("{}", &choices.join("|")));
+            }
+        }
+        Kind::ShapePreset => {
+            if let Some(s) = value.as_str() {
+                if canonical_preset(s).is_none() {
+                    return Err(located(
+                        value.span(),
+                        src,
+                        format!("{where_}: `{key}` is not a known shape preset, got `{s}`"),
+                    ));
+                }
+            } else {
+                bad!("must be a shape preset id");
+            }
+        }
+        Kind::Coord => match value {
+            V::Integer(_) | V::Float(_) => {}
+            V::String(s) => {
+                if crate::units::Coord::Text(s.value().clone()).emu(0).is_err() {
+                    return Err(located(
+                        value.span(),
+                        src,
+                        format!(
+                            "{where_}: `{key}` must be a number, a length string (\"1cm\") or a percentage"
+                        ),
+                    ));
+                }
+            }
+            _ => bad!("must be a coordinate"),
+        },
+        Kind::Margin => match value {
+            V::Integer(_) | V::Float(_) => {}
+            V::String(s) => {
+                if crate::units::Coord::Text(s.value().clone())
+                    .inches(0)
+                    .is_err()
+                {
+                    return Err(located(
+                        value.span(),
+                        src,
+                        format!(
+                            "{where_}: `{key}` must be a number, a length string or a percentage"
+                        ),
+                    ));
+                }
+            }
+            V::Array(items) if items.len() == 4 => {
+                for i in items {
+                    check_value_edit(Kind::Coord, key, i, src, where_)?;
+                }
+            }
+            _ => bad!("must be a number, a length, or a 4-value margin"),
+        },
+        Kind::Num2(lo, hi) => {
+            if let Some(items) = value.as_array()
+                && items.len() == 2
+            {
+                for i in items {
+                    match number_value_edit(i) {
+                        Some(n) if n >= lo && n <= hi => {}
+                        _ => {
+                            bad!("must be two numbers in [{lo}, {hi}]");
+                        }
+                    }
+                }
+            } else {
+                bad!("must be a two-number array");
+            }
+        }
+        Kind::Tables(schema) => match value {
+            V::InlineTable(t) => validate_object_edit(schema, t, key, src, where_)?,
+            _ => bad!("must be a table"),
+        },
+        Kind::ObjOrStr(schema) => match value {
+            V::InlineTable(t) => validate_object_edit(schema, t, key, src, where_)?,
+            V::String(_) => {}
+            _ => bad!("must be a table or a string shorthand"),
+        },
+        Kind::BoolOrObj(schema) => match value {
+            V::Boolean(_) => {}
+            V::InlineTable(t) => validate_object_edit(schema, t, key, src, where_)?,
+            _ => bad!("must be a boolean or a table"),
+        },
+        Kind::BoolOrStrOrObj(schema) => match value {
+            V::Boolean(_) | V::String(_) => {}
+            V::InlineTable(t) => validate_object_edit(schema, t, key, src, where_)?,
+            _ => bad!("must be a boolean, a string or a table"),
+        },
+        Kind::TabStops => {
+            let items = value.as_array().ok_or_else(|| {
+                located(
+                    value.span(),
+                    src,
+                    format!("{where_}: `{key}` must be an array of tables"),
+                )
+            })?;
+            for v in items {
+                let t = v.as_inline_table().ok_or_else(|| {
+                    located(
+                        v.span(),
+                        src,
+                        format!("{where_}: `{key}` entries must be tables"),
+                    )
+                })?;
+                for (k, val) in t.iter() {
+                    match k {
+                        "position" => check_value_edit(Kind::Coord, "position", val, src, where_)?,
+                        "alignment" => {
+                            check_value_edit(Kind::Enum(TAB_ALIGN), "alignment", val, src, where_)?
+                        }
+                        _ => {
+                            return Err(located(
+                                val.span(),
+                                src,
+                                format!("{where_}: unknown `{key}` tab stop field `{k}`"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Kind::Points => {
+            let items = value.as_array().ok_or_else(|| {
+                located(
+                    value.span(),
+                    src,
+                    format!("{where_}: `{key}` must be an array of tables"),
+                )
+            })?;
+            for v in items {
+                let t = v.as_inline_table().ok_or_else(|| {
+                    located(
+                        v.span(),
+                        src,
+                        format!("{where_}: `{key}` entries must be tables"),
+                    )
+                })?;
+                for (k, val) in t.iter() {
+                    match k {
+                        "x" | "y" | "hR" | "wR" | "x1" | "y1" | "x2" | "y2" => {
+                            check_value_edit(Kind::Coord, k, val, src, where_)?
+                        }
+                        "moveTo" | "close" => check_value_edit(Kind::Bool, k, val, src, where_)?,
+                        "stAng" | "swAng" => {
+                            check_value_edit(Kind::Num(-360.0, 360.0), k, val, src, where_)?
+                        }
+                        "curve" => {
+                            let ct = val.as_inline_table().ok_or_else(|| {
+                                located(
+                                    val.span(),
+                                    src,
+                                    format!("{where_}: `curve` must be a table"),
+                                )
+                            })?;
+                            for (ck, cv) in ct.iter() {
+                                match ck {
+                                    "type" => check_value_edit(
+                                        Kind::Enum(CURVE_TYPE),
+                                        "type",
+                                        cv,
+                                        src,
+                                        where_,
+                                    )?,
+                                    "hR" | "wR" | "x1" | "y1" | "x2" | "y2" => {
+                                        check_value_edit(Kind::Coord, ck, cv, src, where_)?
+                                    }
+                                    "stAng" | "swAng" => check_value_edit(
+                                        Kind::Num(-360.0, 360.0),
+                                        ck,
+                                        cv,
+                                        src,
+                                        where_,
+                                    )?,
+                                    _ => {
+                                        return Err(located(
+                                            cv.span(),
+                                            src,
+                                            format!(
+                                                "{where_}: unknown `points` curve field `{ck}`"
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(located(
+                                val.span(),
+                                src,
+                                format!("{where_}: unknown `{key}` point field `{k}`"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Kind::ArrayOfTables => {
+            let items = value.as_array().ok_or_else(|| {
+                located(
+                    value.span(),
+                    src,
+                    format!("{where_}: `{key}` must be an array of tables"),
+                )
+            })?;
+            for v in items {
+                if !v.is_inline_table() {
+                    bad!("entries must be tables");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_object_edit(
+    schema: &[(&'static str, Kind)],
+    table: &toml_edit::InlineTable,
+    object: &str,
+    src: &Src,
+    where_: &str,
+) -> Result<()> {
+    for (k, v) in table.iter() {
+        let kind = schema
+            .iter()
+            .find(|(name, _)| *name == k)
+            .map(|(_, k)| *k)
+            .ok_or_else(|| {
+                located(
+                    v.span(),
+                    src,
+                    format!("{where_}: unknown `{object}` option `{k}`"),
+                )
+            })?;
+        check_value_edit(kind, k, v, src, where_)?;
+    }
+    Ok(())
+}
+
+fn number_value_edit(v: &toml_edit::Value) -> Option<f64> {
+    match v {
+        toml_edit::Value::Integer(i) => Some(*i.value() as f64),
+        toml_edit::Value::Float(f) => Some(*f.value()),
+        _ => None,
+    }
+}
+
+/// Convert coordinate option values into the units pptxgenjs expects and
+/// canonicalise `shape` preset ids. Runs after validation, over a merged
+/// option table: bare numbers are already inches (pptxgenjs-native) and `%`
+/// pass through, so only unit-length strings (`"0.13cm"`, `"1in"`, ...) are
+/// converted. `shape = "round_rect"` becomes `roundRect`.
+pub fn finalize_opts(ctx: Ctx, value: &mut toml::Value) -> Result<()> {
+    let Some(table) = value.as_table_mut() else {
+        return Ok(());
+    };
+    let keys: Vec<String> = table.keys().cloned().collect();
+    for k in keys {
+        if k == "shape"
+            && let Some(s) = table.get_mut(&k).and_then(|v| v.as_str())
+            && let Some(canon) = canonical_preset(s)
+        {
+            table.insert(k.clone(), toml::Value::String(canon.to_string()));
+        }
+        let Some(item) = table.get_mut(&k) else {
+            continue;
+        };
+        let Some(kind) = kind_for(ctx, &k) else {
+            continue;
+        };
+        match kind {
+            Kind::Coord => coerce_len(item),
+            Kind::Margin => coerce_margin(item),
+            Kind::Tables(schema)
+            | Kind::ObjOrStr(schema)
+            | Kind::BoolOrObj(schema)
+            | Kind::BoolOrStrOrObj(schema) => {
+                if let Some(t) = item.as_table_mut() {
+                    for (name, ikind) in schema {
+                        if matches!(ikind, Kind::Coord)
+                            && let Some(iv) = t.get_mut(*name)
+                        {
+                            coerce_len(iv);
+                        }
+                    }
+                }
+            }
+            Kind::TabStops => {
+                if let Some(items) = item.as_array_mut() {
+                    for it in items.iter_mut() {
+                        if let Some(t) = it.as_table_mut()
+                            && let Some(p) = t.get_mut("position")
+                        {
+                            coerce_len(p);
+                        }
+                    }
+                }
+            }
+            Kind::Points => {
+                if let Some(items) = item.as_array_mut() {
+                    for it in items.iter_mut() {
+                        let Some(t) = it.as_table_mut() else {
+                            continue;
+                        };
+                        let keys: Vec<String> = t.keys().cloned().collect();
+                        for pk in keys {
+                            if matches!(
+                                pk.as_str(),
+                                "x" | "y" | "hR" | "wR" | "x1" | "y1" | "x2" | "y2"
+                            ) {
+                                if let Some(pv) = t.get_mut(&pk) {
+                                    coerce_len(pv);
+                                }
+                            } else if pk == "curve"
+                                && let Some(ct) = t.get_mut("curve").and_then(|c| c.as_table_mut())
+                            {
+                                for ck in ct.keys().cloned().collect::<Vec<_>>() {
+                                    if !matches!(ck.as_str(), "type" | "stAng" | "swAng")
+                                        && let Some(cv) = ct.get_mut(&ck)
+                                    {
+                                        coerce_len(cv);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn coerce_len(v: &mut toml::Value) {
+    if let toml::Value::String(s) = v {
+        if s.trim_end().ends_with('%') {
+            return;
+        }
+        if let Ok(inches) = crate::units::Coord::Text(s.clone()).inches(0) {
+            *v = toml::Value::Float(inches);
+        }
+    }
+}
+
+fn coerce_margin(v: &mut toml::Value) {
+    if let toml::Value::Array(items) = v {
+        for i in items {
+            coerce_len(i);
+        }
+    } else {
+        coerce_len(v);
+    }
 }
 
 #[cfg(test)]
@@ -1195,7 +1756,14 @@ mod tests {
                 "color = \"zzzzzz\"\n",
                 "must be a 6-digit hex color or a theme color",
             ),
-            ("margin = \"10\"\n", "must be a number or a 4-number margin"),
+            (
+                "margin = [1, 2, 3, 4, 5]\n",
+                "must be a number, a length, or a 4-value margin",
+            ),
+            (
+                "margin = \"nope\"\n",
+                "must be a number, a length string or a percentage",
+            ),
             ("angle_range = [1, 2, 3]\n", "must be a two-number array"),
             (
                 "shadow = { offset = 999 }\n",
@@ -1227,6 +1795,8 @@ mod tests {
             "fill = \"FFFF00\"\n",
             "fill = { color = \"00AAFF\" }\n",
             "margin = [0.1, 0.1, 0.1, 0.1]\n",
+            "margin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n",
+            "margin = \"0.13cm\"\n",
             "bullet = false\n",
             "bullet = { type = \"number\", number_type = \"arabicPeriod\" }\n",
             "underline = \"sng\"\n",
@@ -1256,5 +1826,92 @@ mod tests {
         assert!(err.to_string().contains("EMU integer"));
         let err = ctx(Ctx::Text, "shape = \"rectt\"\n").unwrap_err();
         assert!(err.to_string().contains("not a known shape preset"));
+    }
+
+    #[test]
+    fn finalize_converts_coords_and_canonicalises_shape() {
+        let t = toml::from_str::<toml::Table>(
+            "margin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n\
+             sizing = { w = \"1cm\", h = \"75%\", type = \"contain\" }\n\
+             tab_stops = [{ position = \"1in\", alignment = \"ctr\" }]\n\
+             points = [{ x = \"1cm\", y = 1, close = false }]\n\
+             shape = \"round_rect\"\n",
+        )
+        .unwrap();
+        let mut value = toml::Value::Table(t);
+        finalize_opts(Ctx::TextShape, &mut value).unwrap();
+        let t = value.as_table().unwrap();
+
+        // Unit lengths are converted to inches; numbers stay as native inches.
+        if let Some(toml::Value::Array(items)) = t.get("margin") {
+            let vals: Vec<f64> = items
+                .iter()
+                .map(|v| {
+                    v.as_float()
+                        .unwrap_or_else(|| v.as_integer().unwrap() as f64)
+                })
+                .collect();
+            for (got, want) in vals.iter().zip([0.0512, 0.0984, 0.0512, 0.0984]) {
+                assert!((got - want).abs() < 0.001, "margin entry {got} != ~{want}");
+            }
+        } else {
+            panic!("margin should be coerceable");
+        }
+        // `%` passes through untouched.
+        assert_eq!(t["sizing"]["h"].as_str(), Some("75%"));
+        assert!((t["sizing"]["w"].as_float().unwrap() - 0.3937).abs() < 0.001);
+        // tab_stops.position inches.
+        assert!((t["tab_stops"][0]["position"].as_float().unwrap() - 1.0).abs() < 1e-9);
+        // points coords inches; numbers and booleans untouched.
+        assert!((t["points"][0]["x"].as_float().unwrap() - 0.3937).abs() < 0.001);
+        assert_eq!(t["points"][0]["y"].as_integer(), Some(1));
+        assert_eq!(t["points"][0]["close"].as_bool(), Some(false));
+        // shape snake_case canonicalised.
+        assert_eq!(t["shape"].as_str(), Some("roundRect"));
+    }
+
+    #[test]
+    fn located_errors_carry_file_and_span() {
+        let text = "[[shapes]]\ntype = \"text\"\ntext = \"hi\"\nmargin = [\"nope\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n";
+        let doc: toml_edit::Document<String> = text.parse().unwrap();
+        let table = doc
+            .as_table()
+            .get("shapes")
+            .and_then(|i| i.as_array_of_tables())
+            .and_then(|a| a.get(0))
+            .cloned()
+            .unwrap();
+        let src = Src {
+            path: "slides/a.toml".into(),
+            text: text.into(),
+        };
+        let err = validate_source(
+            Ctx::Text,
+            &table,
+            &src,
+            "slide `a.toml` shape `text`",
+            &[
+                "type",
+                "styles",
+                "text",
+                "paragraphs",
+                "src",
+                "x",
+                "y",
+                "w",
+                "h",
+            ],
+        )
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("slides/a.toml"),
+            "diagnostic mentions the file: {msg}"
+        );
+        assert!(msg.contains("margin"), "diagnostic mentions the key: {msg}");
+        assert!(
+            msg.contains("a length string"),
+            "diagnostic explains the bad value: {msg}"
+        );
     }
 }
