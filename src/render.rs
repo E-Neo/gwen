@@ -120,7 +120,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             }
             let mut opts = merge_opts(
                 main,
-                ty,
+                &obj.ty,
                 matches!(ty, "text" | "placeholder"),
                 &obj.styles,
                 &obj.opts,
@@ -140,7 +140,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 placeholder_opts(&mut opts, &stem)?;
             }
             let mut out = Map::new();
-            out.insert("type".into(), json!(obj.ty));
+            out.insert("type".into(), json!(ty));
             out.insert("x".into(), json!(geo(&obj.x, width, "x")?));
             out.insert("y".into(), json!(geo(&obj.y, height, "y")?));
             out.insert("w".into(), json!(geo(&obj.w, width, "w")?));
@@ -337,7 +337,7 @@ fn shape_value(
     if carries_text {
         kind = Kind::Text;
     }
-    let mut merged = merge_opts(main, canon_ty, carries_text, &shape.styles, &shape.opts)?;
+    let mut merged = merge_opts(main, &shape.ty, carries_text, &shape.styles, &shape.opts)?;
     let (ordered_markers, unordered_markers) = take_markers(&mut merged);
     if carries_text {
         merged
@@ -384,7 +384,7 @@ fn shape_value(
         }
         Kind::Shape => {
             value.insert("kind".into(), json!("shape"));
-            value.insert("type".into(), json!(shape.ty));
+            value.insert("type".into(), json!(canon_ty));
             for (k, v) in opts.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }

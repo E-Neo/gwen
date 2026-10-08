@@ -791,3 +791,75 @@ text = "**Box**"
     );
     assert!(xml.contains("<a:t>Box</a:t>"), "text inside renders");
 }
+
+#[test]
+fn snake_case_preset_renders_canonical_prst() {
+    let dir = sample_project("snakeprst");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(
+        xml.contains("prst=\"roundRect\""),
+        "canonical preset in XML"
+    );
+    assert!(!xml.contains("round_rect"), "no snake preset leaks");
+}
+
+#[test]
+fn snake_case_style_bucket_applies() {
+    let dir = sample_project("snakebucket");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = format!("{main}\n[styles.round_rect]\nfill = {{ color = \"112233\" }}\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("112233"), "styles.round_rect fill applied");
+    assert!(xml.contains("prst=\"roundRect\""));
+}
+
+#[test]
+fn camel_case_style_bucket_still_applies() {
+    let dir = sample_project("camelbucket");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = format!("{main}\n[styles.roundRect]\nfill = {{ color = \"445566\" }}\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("445566"), "styles.roundRect fill applied");
+}
+
+#[test]
+fn master_snake_preset_spec_type_is_canonical() {
+    let dir = sample_project("mastersnake");
+    write(
+        &dir.join("masters").join("brand.toml"),
+        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+    );
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"hi\"\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let masters = spec["masters"].as_array().unwrap();
+    let obj = &masters[0]["objects"][0];
+    assert_eq!(
+        obj["type"], "roundRect",
+        "master preset canonicalised in spec"
+    );
+}
