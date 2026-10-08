@@ -530,25 +530,32 @@ fn gwen_new_scaffolds_a_buildable_project() {
     let bytes = std::fs::read(&deck).unwrap();
     assert_eq!(&bytes[0..2], b"PK");
 
-    // `gwen new` writes a SKILL.md DSL reference with valid front-matter.
-    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+    // `gwen new` writes a project-level skill with valid front-matter.
+    let skill_dir = dir.join(".agents").join("skills").join("gwen");
+    let skill = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
     assert!(skill.starts_with("---\n"), "SKILL.md has front-matter");
-    assert!(skill.contains("name: gwen-deck-"), "SKILL.md has a name");
+    assert!(skill.contains("name: gwen"), "SKILL.md has the gwen name");
     assert!(skill.contains("description:"), "SKILL.md has a description");
-    assert!(skill.contains("## Styles"), "SKILL.md has the DSL spec");
-    // The inventory is auto-generated from the library whitelists.
     assert!(
-        skill.contains("## Supported shapes and options"),
+        skill.contains("## Quick rules"),
+        "SKILL.md has the quick rules"
+    );
+    assert!(
+        skill.contains("references/toml-dsl.md"),
+        "SKILL.md points at the DSL spec"
+    );
+    // The inventory is auto-generated from the library whitelists.
+    let spec = std::fs::read_to_string(skill_dir.join("references").join("toml-dsl.md")).unwrap();
+    assert!(
+        spec.contains("## Supported shapes and options"),
         "shape section"
     );
-    assert!(skill.contains("round_rect"), "preset snake form listed");
-    assert!(skill.contains("star5"), "preset listed");
-    assert!(skill.contains("font_face"), "text option listed");
-    assert!(
-        skill.contains("- **Nested objects**"),
-        "nested option group"
-    );
-    assert!(skill.contains("`sizing`"), "image option listed");
+    assert!(spec.contains("round_rect"), "preset snake form listed");
+    assert!(spec.contains("star5"), "preset listed");
+    assert!(spec.contains("font_face"), "text option listed");
+    assert!(spec.contains("- **Nested objects**"), "nested option group");
+    assert!(spec.contains("`sizing`"), "image option listed");
+    assert!(!dir.join("SKILL.md").exists(), "no root SKILL.md anymore");
 
     // No em dashes (U+2014) anywhere gwen generates.
     for rel in [
@@ -556,7 +563,8 @@ fn gwen_new_scaffolds_a_buildable_project() {
         "masters/base.toml",
         "slides/title.toml",
         "slides/intro.toml",
-        "SKILL.md",
+        ".agents/skills/gwen/SKILL.md",
+        ".agents/skills/gwen/references/toml-dsl.md",
     ] {
         let bytes = std::fs::read(dir.join(rel)).unwrap();
         assert!(
@@ -626,18 +634,26 @@ fn gwen_new_uses_template() {
         "no built-in slide"
     );
     gwen::build(&dir).unwrap();
-    // Template without a SKILL.md falls back to the default DSL reference.
-    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
-    assert!(skill.starts_with("---\n") && skill.contains("## Styles"));
+    // Template without a skill falls back to the default project skill.
+    let skill_dir = dir.join(".agents").join("skills").join("gwen");
+    let skill = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\n") && skill.contains("name: gwen"));
+    assert!(skill_dir.join("references").join("toml-dsl.md").is_file());
 }
 
-/// A template may ship its own SKILL.md, which is kept verbatim.
+/// A template may ship its own `.agents/skills/*`; they are copied verbatim
+/// alongside the generated `gwen` skill.
 #[test]
-fn template_skill_md_is_kept() {
+fn template_extra_skill_is_kept() {
     let home = template_home("home-skill");
     write(
-        &home.join("template").join("SKILL.md"),
-        "# custom skill\n\nkeep me\n",
+        &home
+            .join("template")
+            .join(".agents")
+            .join("skills")
+            .join("foo")
+            .join("SKILL.md"),
+        "---\nname: foo\ndescription: A custom skill\n---\n# foo\n\nkeep me\n",
     );
     let dir = tmp("skill-template");
     let _ = std::fs::remove_dir_all(&dir);
@@ -652,9 +668,47 @@ fn template_skill_md_is_kept() {
         "gwen new failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
-        "# custom skill\n\nkeep me\n"
+    assert!(
+        dir.join(".agents")
+            .join("skills")
+            .join("foo")
+            .join("SKILL.md")
+            .is_file()
+    );
+    assert!(
+        dir.join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md")
+            .is_file()
+    );
+}
+
+/// The `gwen` skill name is reserved; a template shipping one is an error.
+#[test]
+fn template_gwen_skill_is_reserved() {
+    let home = template_home("home-reserved");
+    write(
+        &home
+            .join("template")
+            .join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md"),
+        "---\nname: gwen\ndescription: nope\n---\n",
+    );
+    let dir = tmp("skill-reserved");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "gwen new should fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("reserved"),
+        "stderr should mention the reserved name"
     );
 }
 
@@ -685,8 +739,14 @@ fn gwen_new_falls_back_when_no_template() {
     let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     assert!(main.contains(&format!("title = \"{name}\"")));
-    let skill = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
-    assert!(skill.starts_with("---\n") && skill.contains("name: gwen-deck-"));
+    let skill = std::fs::read_to_string(
+        dir.join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md"),
+    )
+    .unwrap();
+    assert!(skill.starts_with("---\n") && skill.contains("name: gwen"));
 }
 
 #[test]

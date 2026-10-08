@@ -28,9 +28,11 @@ recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
 
-Every new project also gets a `SKILL.md` - an agent- and human-readable
-reference to the gwen TOML DSL (a template may ship its own to replace the
-built-in one).
+Every new project also gets a project-level skill at
+`.agents/skills/gwen/` - an agent- and human-readable reference to the gwen
+TOML DSL (`SKILL.md` overview + `references/toml-dsl.md` full specification).
+A template may ship extra skills under its own `.agents/skills/`, copied
+verbatim; the `gwen` skill name itself is reserved.
 
 ## The gwen project format
 
