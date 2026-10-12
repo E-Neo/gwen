@@ -15,8 +15,9 @@ required.
 ## Quick start
 
 ```sh
-gwen new <deck>      # scaffold a project
-gwen build <deck>    # render <deck>/target/<title>.pptx
+gwen new <deck>          # scaffold a project
+gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
+gwen build <deck>        # render <deck>/target/<title>.pptx
 ```
 
 `gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
@@ -32,7 +33,22 @@ Every new project also gets a project-level skill at
 `.agents/skills/gwen/` - an agent- and human-readable reference to the gwen
 TOML DSL (`SKILL.md` overview + `references/toml-dsl.md` full specification).
 A template may ship extra skills under its own `.agents/skills/`, copied
-verbatim; the `gwen` skill name itself is reserved.
+verbatim; the `gwen` skill name itself is reserved. Every project is also
+given a `.gitignore` that ignores `target/`.
+
+## Importing a `.pptx`
+
+`gwen new <deck> --pptx deck.pptx` creates a project whose content comes from
+an existing PowerPoint package instead of the template/built-in scaffold: the
+template's skills are still copied, but its `masters/`, `slides/`, `media/`
+and `main.toml` are replaced by the imported deck. It recovers the slide size,
+theme fonts, `[[sections]]` order, one master file per slide layout, shapes
+(geometry, rotation, fills, lines, shadows), text as markdown (`**bold**`,
+`*italic*`, `[links](url)`, line breaks, bullets), images (copied into
+`media/`), hyperlinks and notes. Groups are flattened recursively; charts,
+tables, gradients and per-run font/colour differences are dropped with a
+warning, and the result is a starting point to edit, not a byte-identical
+copy - `gwen build` of the imported project produces a fresh, valid deck.
 
 ## The gwen project format
 

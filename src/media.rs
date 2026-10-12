@@ -126,19 +126,16 @@ fn bmp_aspect(b: &[u8]) -> Option<f64> {
 /// stripped when both parse.
 fn svg_aspect(text: &str) -> Option<f64> {
     use quick_xml::events::Event;
-    let mut reader = quick_xml::Reader::from_str(text);
+    let mut reader = quick_xml::Reader::from_reader(text.as_bytes());
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let name = e.name();
-                let name = name.as_ref();
-                let local = name
-                    .iter()
-                    .rposition(|&c| c == b':')
-                    .map_or(name, |p| &name[p + 1..]);
-                if local != b"svg" {
+                let qname = e.name();
+                let name = qname.as_ref();
+                let local = name.rfind(':').map_or(name, |p| &name[p + 1..]);
+                if local != "svg" {
                     buf.clear();
                     continue;
                 }
@@ -148,15 +145,14 @@ fn svg_aspect(text: &str) -> Option<f64> {
                 for attr in e.attributes() {
                     let Ok(attr) = attr else { continue };
                     let key = attr.key.as_ref();
-                    let key = key
-                        .iter()
-                        .rposition(|&c| c == b':')
-                        .map_or(key, |p| &key[p + 1..]);
-                    let value = attr.decode_and_unescape_value(reader.decoder()).ok()?;
+                    let key = key.rfind(':').map_or(key, |p| &key[p + 1..]);
+                    let value = attr
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .ok()?;
                     match key {
-                        b"viewBox" => viewbox = parse_viewbox(&value),
-                        b"width" => width = parse_number(&value),
-                        b"height" => height = parse_number(&value),
+                        "viewBox" => viewbox = parse_viewbox(&value),
+                        "width" => width = parse_number(&value),
+                        "height" => height = parse_number(&value),
                         _ => {}
                     }
                 }

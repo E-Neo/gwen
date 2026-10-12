@@ -590,6 +590,12 @@ fn gwen_new_scaffolds_a_buildable_project() {
     assert!(spec.contains("- **Nested objects**"), "nested option group");
     assert!(spec.contains("`sizing`"), "image option listed");
     assert!(!dir.join("SKILL.md").exists(), "no root SKILL.md anymore");
+    // `gwen new` writes a .gitignore ignoring target/.
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+        "target/\n",
+        "builtin scaffold writes .gitignore"
+    );
 
     // No em dashes (U+2014) anywhere gwen generates.
     for rel in [
@@ -1149,4 +1155,359 @@ fn image_sizing_disables_derivation() {
         "sizing present means no derivation (h stays 0), got {}",
         img["h"]
     );
+}
+
+#[test]
+fn import_roundtrips_a_built_pptx() {
+    let dir = sample_project("improundtrip");
+    let out = gwen::build(&dir).unwrap();
+    let imported = tmp("imported");
+    gwen::import_pptx(&out, &imported, None).unwrap();
+
+    assert!(imported.join("main.toml").is_file());
+    let main = std::fs::read_to_string(imported.join("main.toml")).unwrap();
+    assert!(main.contains("[[sections]]"), "sections present");
+    assert!(
+        !main.contains("ppt/slides/"),
+        "sections reference file names, not package paths: {main}"
+    );
+
+    // media files are copied.
+    let media: Vec<_> = std::fs::read_dir(imported.join("media"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(!media.is_empty(), "media copied");
+
+    // Round-trip: the imported project parses, renders a spec and rebuilds.
+    let project = gwen::model::Project::load(&imported).unwrap();
+    gwen::render::spec_json(&project).unwrap();
+    let rebuilt = gwen::build(&imported).unwrap();
+    assert!(rebuilt.is_file(), "imported project rebuilds");
+
+    // Markdown emphasis survived the run -> markdown -> run round-trip.
+    let all = std::fs::read_dir(imported.join("slides"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        all.contains("**") || all.contains("*"),
+        "markdown emphasis preserved in imported slides: {all}"
+    );
+}
+
+#[test]
+fn gwen_new_pptx_cli() {
+    let dir = sample_project("newpptx");
+    let out = gwen::build(&dir).unwrap();
+    let deck = tmp("new-pptx").join("deck");
+    let res = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(&deck)
+        .arg("--pptx")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        res.status.success(),
+        "gwen new --pptx failed: {}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    // Content comes from the pptx.
+    assert!(deck.join("main.toml").is_file());
+    assert!(deck.join("slides").is_dir());
+    assert!(deck.join("masters").is_dir());
+    // `gwen new` semantics: title is the directory name.
+    let main = std::fs::read_to_string(deck.join("main.toml")).unwrap();
+    let name = deck.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        main.contains(&format!("title = \"{name}\"")),
+        "title = dir name: {main}"
+    );
+    // The project skill is generated like any other `gwen new`.
+    assert!(
+        deck.join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md")
+            .is_file(),
+        "project skill generated"
+    );
+    // target/ is git-ignored.
+    assert_eq!(
+        std::fs::read_to_string(deck.join(".gitignore")).unwrap(),
+        "target/\n"
+    );
+    gwen::build(&deck).unwrap();
+}
+
+/// `gwen new --pptx` copies the template's skills but not its slides/masters/
+/// media - those come from the pptx.
+#[test]
+fn gwen_new_pptx_with_template_copies_skills_not_content() {
+    let home = template_home("home-pptx");
+    write(
+        &home
+            .join("template")
+            .join(".agents")
+            .join("skills")
+            .join("foo")
+            .join("SKILL.md"),
+        "---\nname: foo\ndescription: A custom skill\n---\n# foo\n",
+    );
+    let dir = sample_project("pptximp");
+    let out = gwen::build(&dir).unwrap();
+    let deck = tmp("new-pptx-template").join("deck");
+    let res = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("new")
+        .arg(&deck)
+        .arg("--pptx")
+        .arg(&out)
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        res.status.success(),
+        "gwen new --pptx (with template) failed: {}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    // Template skills copied.
+    assert!(
+        deck.join(".agents")
+            .join("skills")
+            .join("foo")
+            .join("SKILL.md")
+            .is_file(),
+        "template extra skill copied"
+    );
+    assert!(
+        deck.join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md")
+            .is_file(),
+        "gwen skill generated"
+    );
+    // Template content NOT copied - slides come from the imported pptx.
+    assert!(
+        !deck.join("slides").join("a.toml").is_file(),
+        "template slide not copied"
+    );
+    assert!(
+        deck.join("slides").is_dir() && !deck.join("masters").join("a.toml").exists(),
+        "content comes from the pptx import"
+    );
+    gwen::build(&deck).unwrap();
+}
+
+/// A layout's picture must be resolved against the layout's own rels, not the
+/// master's - otherwise its rId may map to a non-media part and produce a
+/// bogus `src = "media/slideLayout1.xml"`.
+#[test]
+fn import_layout_picture_uses_layout_rels() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Rect 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:pic><p:nvPicPr><p:cNvPr id="2" name="Logo" descr="logo"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+<p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.png"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+        entry("ppt/media/logo.png", &pixel_png()),
+    ]);
+    let pptx = tmp("layout-pic");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("layout-pic-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+
+    // The layout's picture resolves to the real media file, never to an .xml part.
+    let master_toml =
+        std::fs::read_to_string(imported.join("masters").join("slideLayout1.toml")).unwrap();
+    assert!(
+        master_toml.contains("src = \"media/logo.png\""),
+        "layout pic resolved against the layout rels, got: {master_toml}"
+    );
+    assert!(
+        !master_toml.contains(".xml"),
+        "no XML part referenced as media: {master_toml}"
+    );
+    assert!(
+        imported.join("media").join("logo.png").is_file(),
+        "the real media file was copied"
+    );
+    gwen::build(&imported).unwrap();
+}
+
+/// Import fidelity: a nested `<a:ln><a:solidFill><a:srgbClr .../></a:solidFill></a:ln>`
+/// colour, the `<a:latin>` font of a run and a page-number `<a:fld>`, and a
+/// slide placeholder inheriting geometry from its layout.
+#[test]
+fn import_imports_line_color_font_and_placeholder_geometry() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Page Number"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum"/></p:nvPr></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="5000000" y="6400000"/><a:ext cx="914400" cy="274320"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="{ABC}" type="slidenum"><a:rPr lang="en-US" sz="974" dirty="0"><a:solidFill><a:srgbClr val="1D1D1B"/></a:solidFill><a:latin typeface="Arial" charset="-122"/></a:rPr><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="3" name="Line"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+<p:spPr><a:xfrm><a:off x="1029918" y="1349255"/><a:ext cx="885967" cy="0"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="28575"><a:solidFill><a:srgbClr val="C7000B"/></a:solidFill></a:ln></p:spPr></p:cxnSp>
+<p:sp><p:nvSpPr><p:cNvPr id="4" name="Title Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100000" y="200000"/><a:ext cx="500000" cy="300000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="5" name="Title Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="918916" y="630373"/><a:ext cx="1147485" cy="653509"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="3636" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Microsoft YaHei" charset="-122"/></a:rPr><a:t>标题</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="标题 2"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+<p:spPr/>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" dirty="0"/><a:t>欢迎</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+    ]);
+    let pptx = tmp("fidelity");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("fidelity-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+
+    let master_toml =
+        std::fs::read_to_string(imported.join("masters").join("slideLayout1.toml")).unwrap();
+    // The connector's line colour (nested in solidFill) survives.
+    assert!(
+        master_toml.contains("color = \"C7000B\"") && master_toml.contains("width = 2.25"),
+        "connector line colour imported: {master_toml}"
+    );
+    // The page-number field keeps its size and font.
+    assert!(
+        master_toml.contains("font_size = 9.74") && master_toml.contains("font_face = \"Arial\""),
+        "page-number field font imported: {master_toml}"
+    );
+    // A run's <a:latin> font and size land as shape-level opts.
+    assert!(
+        master_toml.contains("font_size = 36.36")
+            && master_toml.contains("font_face = \"Microsoft YaHei\""),
+        "latin font imported: {master_toml}"
+    );
+
+    // The slide placeholder inherits the layout placeholder's geometry.
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1")).unwrap();
+    assert!(
+        slide_toml.contains("x = 100000")
+            && slide_toml.contains("y = 200000")
+            && slide_toml.contains("w = 500000")
+            && slide_toml.contains("h = 300000"),
+        "slide placeholder inherits layout geometry: {slide_toml}"
+    );
+    assert!(
+        slide_toml.contains("欢迎"),
+        "slide text present: {slide_toml}"
+    );
+    gwen::build(&imported).unwrap();
 }

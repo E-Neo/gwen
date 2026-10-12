@@ -30,11 +30,32 @@ pub fn template_dir() -> Option<PathBuf> {
 }
 
 /// Scaffold a new project into `root` (which must not exist yet). `name` is
-/// the directory name, written into `[presentation] title`.
-pub fn scaffold(root: &Path, name: &str, no_template: bool) -> Result<()> {
+/// the directory name, written into `[presentation] title`. When `pptx` is
+/// given, masters/slides/media (and main.toml) are imported from that file
+/// instead of copied from the template/built-in; the skills and .gitignore are
+/// still created as usual.
+pub fn scaffold(root: &Path, name: &str, no_template: bool, pptx: Option<&Path>) -> Result<()> {
     create_dir(root)?;
-    if !no_template && let Some(template) = template_dir() {
+    let template = (!no_template).then(template_dir).flatten();
+    if let Some(pptx) = pptx {
+        scaffold_project_skill(root, template.as_deref(), name)?;
+        gwen::import_pptx(pptx, root, Some(name))?;
+        write_gitignore(root)?;
+        eprintln!(
+            "created project `{}` from `{}`",
+            root.display(),
+            pptx.display()
+        );
+        eprintln!(
+            "  edit {}/main.toml and slides/*.toml, then run `gwen build {}`",
+            root.display(),
+            root.display()
+        );
+        return Ok(());
+    }
+    if let Some(template) = template {
         scaffold_from_template(root, &template, name)?;
+        write_gitignore(root)?;
         eprintln!(
             "created project `{}` from template `{}`",
             root.display(),
@@ -47,7 +68,30 @@ pub fn scaffold(root: &Path, name: &str, no_template: bool) -> Result<()> {
         );
         return Ok(());
     }
-    scaffold_builtin(root, name)
+    scaffold_builtin(root, name)?;
+    write_gitignore(root)
+}
+
+/// Write (or append to) the project `.gitignore` so `target/` is ignored.
+fn write_gitignore(root: &Path) -> Result<()> {
+    let path = root.join(".gitignore");
+    if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| miette::miette!("cannot read `{}`: {e}", path.display()))?;
+        if contents.lines().any(|l| l.trim() == "target/") {
+            return Ok(());
+        }
+        let mut out = contents;
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("target/\n");
+        std::fs::write(&path, out)
+            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))
+    } else {
+        std::fs::write(&path, "target/\n")
+            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))
+    }
 }
 
 fn scaffold_from_template(root: &Path, template: &Path, name: &str) -> Result<()> {

@@ -31,6 +31,10 @@ enum Commands {
         /// Ignore the user template and use the built-in scaffold.
         #[arg(long)]
         no_template: bool,
+        /// Import masters/slides/media (and main.toml) from this `.pptx`
+        /// instead of the template/built-in scaffold.
+        #[arg(long)]
+        pptx: Option<String>,
     },
     /// Build `target/<title>.pptx` from a project.
     Build {
@@ -46,7 +50,8 @@ fn main() -> miette::Result<()> {
         Commands::New {
             project,
             no_template,
-        } => new_project(&project, no_template),
+            pptx,
+        } => new_project(&project, no_template, pptx.as_deref()),
         Commands::Build { project } => {
             let out = gwen::build(Path::new(&project))?;
             eprintln!("built {}", out.display());
@@ -55,14 +60,20 @@ fn main() -> miette::Result<()> {
     }
 }
 
-fn new_project(project: &str, no_template: bool) -> Result<()> {
+fn new_project(project: &str, no_template: bool, pptx: Option<&str>) -> Result<()> {
     let root = Path::new(project);
     if root.exists() {
         return Err(miette::miette!("`{project}` already exists"));
+    }
+    if let Some(pptx) = pptx {
+        let src = Path::new(pptx);
+        if !src.is_file() {
+            return Err(miette::miette!("`{pptx}` is not a file"));
+        }
     }
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| project.to_string());
-    scaffold::scaffold(root, &name, no_template)
+    scaffold::scaffold(root, &name, no_template, pptx.map(Path::new))
 }

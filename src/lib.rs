@@ -7,6 +7,7 @@
 //! OOXML itself. See the project README for the full format reference.
 
 pub mod error;
+pub mod import;
 pub mod jsbridge;
 pub mod media;
 pub mod model;
@@ -15,6 +16,8 @@ pub mod render;
 pub mod richtext;
 pub mod units;
 pub mod zip;
+
+pub use crate::import::import_pptx;
 
 use std::path::Path;
 
