@@ -8,6 +8,7 @@
 
 pub mod error;
 pub mod jsbridge;
+pub mod media;
 pub mod model;
 pub mod opts;
 pub mod render;

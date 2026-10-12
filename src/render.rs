@@ -3,7 +3,7 @@
 //! units pptxgenjs expects) into the JSON spec the embedded bridge renders.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use miette::{Result, miette};
@@ -293,6 +293,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 &obj.opts,
             )?;
             let _ = take_markers(&mut opts);
+            let where_ = format!("master `{stem}` shape `{}`", obj.ty);
             let ctx = match ty {
                 "text" => Some(Ctx::Text),
                 "placeholder" => Some(Ctx::Placeholder),
@@ -301,7 +302,6 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 _ => Some(Ctx::TextShape),
             };
             if let Some(ctx) = ctx {
-                let where_ = format!("master `{stem}` shape `{}`", obj.ty);
                 if let Some(table) = shape_tables.get(idx) {
                     opts::validate_source(ctx, table, &src, &where_, SHAPE_SKIP)?;
                 }
@@ -315,8 +315,22 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             out.insert("type".into(), json!(ty));
             out.insert("x".into(), json!(geo(&obj.x, width, "x")?));
             out.insert("y".into(), json!(geo(&obj.y, height, "y")?));
-            out.insert("w".into(), json!(geo(&obj.w, width, "w")?));
-            out.insert("h".into(), json!(geo(&obj.h, height, "h")?));
+            let (w_in, h_in) = if ty == "image" {
+                let sizing = opts.as_table().is_some_and(|t| t.contains_key("sizing"));
+                image_box(
+                    &obj.w,
+                    &obj.h,
+                    (width, height),
+                    sizing,
+                    obj.src.as_deref(),
+                    &project.dir,
+                    &where_,
+                )?
+            } else {
+                (geo(&obj.w, width, "w")?, geo(&obj.h, height, "h")?)
+            };
+            out.insert("w".into(), json!(w_in));
+            out.insert("h".into(), json!(h_in));
             out.insert("text".into(), json!(obj.text));
             out.insert("options".into(), to_pptxgen(&opts));
             if obj.ty == "image"
@@ -569,8 +583,25 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
     let mut value = Map::new();
     value.insert("x".into(), json!(geo(&shape.x, ctx.width, "x")?));
     value.insert("y".into(), json!(geo(&shape.y, ctx.height, "y")?));
-    value.insert("w".into(), json!(geo(&shape.w, ctx.width, "w")?));
-    value.insert("h".into(), json!(geo(&shape.h, ctx.height, "h")?));
+    let (w_in, h_in) = if matches!(kind, Kind::Image) {
+        let sizing = merged.as_table().is_some_and(|t| t.contains_key("sizing"));
+        image_box(
+            &shape.w,
+            &shape.h,
+            (ctx.width, ctx.height),
+            sizing,
+            shape.src.as_deref(),
+            &ctx.project.dir,
+            &where_,
+        )?
+    } else {
+        (
+            geo(&shape.w, ctx.width, "w")?,
+            geo(&shape.h, ctx.height, "h")?,
+        )
+    };
+    value.insert("w".into(), json!(w_in));
+    value.insert("h".into(), json!(h_in));
     match kind {
         Kind::Text => {
             value.insert("kind".into(), json!("text"));
@@ -722,7 +753,8 @@ fn media_data(project: &Project, src: &str) -> Result<(String, &'static str)> {
     let path = project.dir.join(src);
     let bytes =
         std::fs::read(&path).map_err(|e| miette!("cannot read image `{}`: {e}", path.display()))?;
-    let mime = mime_for(src)?;
+    let mime = crate::media::mime_for(src)
+        .map_err(|e| miette!("cannot read image `{}`: {e}", path.display()))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok((format!("data:{mime};base64,{encoded}"), mime))
 }
@@ -859,16 +891,38 @@ fn resolve_sections(project: &Project) -> Result<Vec<Section>> {
     Ok(project.main.sections.clone())
 }
 
-fn mime_for(filename: &str) -> Result<&'static str> {
-    let ext = filename.rsplit('.').next().unwrap_or("");
-    match ext.to_ascii_lowercase().as_str() {
-        "png" => Ok("image/png"),
-        "jpg" | "jpeg" => Ok("image/jpeg"),
-        "gif" => Ok("image/gif"),
-        "bmp" => Ok("image/bmp"),
-        "tif" | "tiff" => Ok("image/tiff"),
-        "svg" => Ok("image/svg+xml"),
-        other => Err(miette!("unsupported image extension `.{other}`")),
+/// The `w`/`h` box (inches) for an image shape. When no `sizing` option is
+/// set and exactly one of `w`/`h` is given, the other dimension is derived
+/// from the source image's intrinsic aspect ratio; neither given is an error.
+/// With `sizing` (or both dimensions), values pass through as today.
+fn image_box(
+    w: &Option<Coord>,
+    h: &Option<Coord>,
+    slide: (i64, i64),
+    sizing: bool,
+    src: Option<&str>,
+    project_dir: &Path,
+    where_: &str,
+) -> Result<(f64, f64)> {
+    if sizing || (w.is_some() && h.is_some()) {
+        return Ok((geo(w, slide.0, "w")?, geo(h, slide.1, "h")?));
+    }
+    let src = src.ok_or_else(|| miette!("{where_}: image shape needs `src`"))?;
+    match (w, h) {
+        (None, None) => Err(miette!("{where_}: image `{src}` needs `w` or `h`")),
+        (Some(_), None) => {
+            let w_in = geo(w, slide.0, "w")?;
+            let aspect = crate::media::image_aspect(&project_dir.join(src))
+                .map_err(|e| miette!("{where_}: {e}"))?;
+            Ok((w_in, w_in / aspect))
+        }
+        (None, Some(_)) => {
+            let h_in = geo(h, slide.1, "h")?;
+            let aspect = crate::media::image_aspect(&project_dir.join(src))
+                .map_err(|e| miette!("{where_}: {e}"))?;
+            Ok((h_in * aspect, h_in))
+        }
+        (Some(_), Some(_)) => unreachable!(),
     }
 }
 

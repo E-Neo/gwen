@@ -8,8 +8,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::Engine;
+use flate2::Compression;
 use flate2::read::DeflateDecoder;
-use std::io::Read;
+use flate2::write::DeflateEncoder;
+use std::io::{Read, Write};
 
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -34,6 +36,38 @@ fn pixel_png() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
         .unwrap()
+}
+
+/// A minimal, valid RGB PNG of the given pixel dimensions.
+fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+    fn chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(12 + data.len());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        let mut body = Vec::with_capacity(4 + data.len());
+        body.extend_from_slice(tag);
+        body.extend_from_slice(data);
+        out.extend_from_slice(&crc32fast::hash(&body).to_be_bytes());
+        out
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    out.extend_from_slice(&chunk(b"IHDR", &ihdr));
+    let mut raw = Vec::with_capacity(h as usize * (1 + w as usize * 3));
+    for _ in 0..h {
+        raw.push(0);
+        raw.extend(std::iter::repeat_n(0u8, w as usize * 3));
+    }
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(&raw).unwrap();
+    out.extend_from_slice(&chunk(b"IDAT", &enc.finish().unwrap()));
+    out.extend_from_slice(&chunk(b"IEND", &[]));
+    out
 }
 
 /// A minimal TOML project: one master, two slides, one image.
@@ -1006,5 +1040,113 @@ fn bad_value_reports_source_location() {
     assert!(
         msg.contains("must be a number"),
         "diagnostic explains the failure: {msg}"
+    );
+}
+
+#[test]
+fn image_w_only_derives_height_from_aspect() {
+    let dir = sample_project("imgwonly");
+    std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][1]["shapes"]
+        .as_array()
+        .unwrap();
+    let img = shapes.iter().find(|s| s["kind"] == "image").unwrap();
+    assert!((img["w"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+    assert!(
+        (img["h"].as_f64().unwrap() - 1.0).abs() < 1e-9,
+        "h derived from a 2:1 image, got {}",
+        img["h"]
+    );
+}
+
+#[test]
+fn image_h_only_derives_width_from_aspect() {
+    let dir = sample_project("imghonly");
+    std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nh = \"1in\"\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][1]["shapes"]
+        .as_array()
+        .unwrap();
+    let img = shapes.iter().find(|s| s["kind"] == "image").unwrap();
+    assert!(
+        (img["w"].as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "w derived from a 2:1 image, got {}",
+        img["w"]
+    );
+    assert!((img["h"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn image_needs_w_or_h() {
+    let dir = sample_project("imgneither");
+    std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("needs `w` or"),
+        "expected a missing-dimension error, got: {err:?}"
+    );
+}
+
+#[test]
+fn image_aspect_from_svg_viewbox() {
+    let dir = sample_project("imgsvg");
+    write(
+        &dir.join("media").join("logo.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 100\"><rect width=\"200\" height=\"100\"/></svg>\n",
+    );
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"image\"\nsrc = \"media/logo.svg\"\nx = \"1in\"\ny = \"1in\"\nw = \"4in\"\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][1]["shapes"]
+        .as_array()
+        .unwrap();
+    let img = shapes.iter().find(|s| s["kind"] == "image").unwrap();
+    assert!(
+        (img["h"].as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "svg viewBox aspect applied, got {}",
+        img["h"]
+    );
+}
+
+#[test]
+fn image_sizing_disables_derivation() {
+    let dir = sample_project("imgsizing");
+    std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nsizing = { type = \"cover\" }\n",
+    );
+    let project = gwen::model::Project::load(&dir).unwrap();
+    let spec: serde_json::Value =
+        serde_json::from_str(&gwen::render::spec_json(&project).unwrap()).unwrap();
+    let shapes = spec["sections"][0]["slides"][1]["shapes"]
+        .as_array()
+        .unwrap();
+    let img = shapes.iter().find(|s| s["kind"] == "image").unwrap();
+    assert!(
+        img["h"].as_f64().unwrap() == 0.0,
+        "sizing present means no derivation (h stays 0), got {}",
+        img["h"]
     );
 }

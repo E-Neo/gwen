@@ -519,7 +519,11 @@ All `x`/`y`/`w`/`h` are EMU as integers, or `"1in"`, `"2.5cm"`, `"25mm"`,
 `w`/`h`/`x`/`y`, `tab_stops.position`, `points`) accept the same forms: length
 strings (`"0.13cm"`) are converted to inches, `"50%"` passes through, and bare
 numbers are inches (what pptxgenjs expects). A `margin` is a single value or a
-`[top, right, bottom, left]` array. Shape preset and marker names are
+`[top, right, bottom, left]` array. An `image` shape may give only `w` or only
+`h` (when no `sizing` option is set): the missing dimension is derived from the
+source image's intrinsic aspect ratio (PNG/JPEG/GIF/BMP headers, or the SVG
+`viewBox`/`width`/`height`), so `w = "4in"` on a 2:1 image renders `4in x 2in`.
+Shape preset and marker names are
 snake_case in the DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is
 `"1."`) and are canonicalised to pptxgenjs camelCase internally - including the
 `shape` option, so `shape = "round_rect"` works.
