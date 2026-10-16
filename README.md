@@ -259,6 +259,17 @@ Equivalently, a text shape can draw a preset explicitly with `shape = "rect"`.
 A single `\n` becomes a soft line break (pptxgenjs `softBreakBefore`); a blank
 line starts a new paragraph. `  \n` (a hard break) behaves like a soft break.
 
+A `<span class="name">` applies a `[styles.named.name]` to the runs it wraps -
+e.g. `black with <span class="red">**bold and red**</span>` colours that run
+red *and* bolds it. The span is transparent to markdown, so
+`**<span class="red">bold</span>**` works too; `class="a b"` merges styles in
+order (later wins). A span style may only set run options (`color`,
+`highlight`, `font_face`, `font_size`, `bold`, `italic`, `underline`,
+`strike`, `superscript`, `subscript`, `char_spacing`, `baseline`, `lang`,
+`rtl_mode`); anything else, an unknown class, or unbalanced `<span>`/`</span>`
+tags are build errors pointing at the offending line. Use `\<span` to write a
+literal angle bracket.
+
 ### Explicit paragraphs
 
 For per-paragraph options use `[[shapes.paragraphs]]`; `text` is then ignored.

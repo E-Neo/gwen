@@ -230,6 +230,11 @@ struct Ptx {
     /// Per layout: placeholder identity -> geometry, for slide placeholders
     /// that inherit their position from the layout.
     layout_ph_geo: HashMap<String, PhGeo>,
+    /// Generated `[styles.named.runN]` styles for per-run text formatting,
+    /// referenced by `<span class="runN">` in imported slide text.
+    run_styles: BTreeMap<String, toml::Table>,
+    /// Canonical run-option key -> generated style name.
+    style_names: HashMap<String, String>,
     warnings: Vec<String>,
 }
 
@@ -259,6 +264,8 @@ pub fn import_pptx(pptx: &Path, out: &Path, title: Option<&str>) -> Result<PathB
         used_media: BTreeSet::new(),
         master_files: Vec::new(),
         layout_ph_geo: HashMap::new(),
+        run_styles: BTreeMap::new(),
+        style_names: HashMap::new(),
         warnings: Vec::new(),
     };
 
@@ -335,7 +342,15 @@ pub fn import_pptx(pptx: &Path, out: &Path, title: Option<&str>) -> Result<PathB
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "deck".into())
     });
-    let main = main_toml(&title, width, height, &major_font, &minor_font, &sections);
+    let main = main_toml(
+        &title,
+        width,
+        height,
+        &major_font,
+        &minor_font,
+        &sections,
+        &ptx.run_styles,
+    );
     std::fs::write(out_dir.join("main.toml"), main)
         .map_err(|e| miette!("cannot write main.toml: {e}"))?;
     std::fs::create_dir_all(out_dir.join("masters"))
@@ -802,7 +817,7 @@ fn parse_sp(
         text_direction,
         margin,
     } = tx_body
-        .map(|t| parse_text_body(ptx, rels, t))
+        .map(|t| parse_text_body(ptx, rels, t, is_master))
         .unwrap_or_default();
     // Master/layout placeholder prompts ("Click to edit title", ...) are
     // boilerplate, not real content.
@@ -1068,7 +1083,12 @@ struct TextOut {
     margin: Option<Vec<f64>>,
 }
 
-fn parse_text_body(ptx: &mut Ptx, rels: &HashMap<String, String>, body: &XNode) -> TextOut {
+fn parse_text_body(
+    ptx: &mut Ptx,
+    rels: &HashMap<String, String>,
+    body: &XNode,
+    is_master: bool,
+) -> TextOut {
     let body_pr = body.child("bodyPr");
     let valign = body_pr.and_then(|b| b.attr("anchor")).map(anchor_to_valign);
     let text_direction = body_pr
@@ -1100,7 +1120,7 @@ fn parse_text_body(ptx: &mut Ptx, rels: &HashMap<String, String>, body: &XNode) 
     let mut ff_conflict = false;
 
     for p in body.children("p") {
-        let (md, opts) = parse_paragraph(ptx, rels, p);
+        let (md, opts) = parse_paragraph(ptx, rels, p, is_master);
         paragraphs.push(T::Table({
             let mut t = toml::Table::new();
             t.insert("text".into(), T::String(md));
@@ -1109,44 +1129,49 @@ fn parse_text_body(ptx: &mut Ptx, rels: &HashMap<String, String>, body: &XNode) 
             }
             t
         }));
-        // Aggregate run font props (from both `<a:r>` runs and `<a:fld>`
-        // fields - the slide-number placeholder is a field) for shape-level
-        // opts; props no run sets fall back to the default run props
-        // (`pPr/defRPr`, then `lstStyle/defPPr/defRPr`).
-        let (mut fs, mut co, mut ff) = (None, None, None);
-        for r in p.children("r").chain(p.children("fld")) {
-            if let Some(rpr) = r.child("rPr") {
-                let (sz, run_color, run_face) = run_props(rpr);
-                agg_num(&mut fs, &mut fs_conflict, sz);
-                agg_str(&mut co, &mut c_conflict, run_color);
-                agg_str(&mut ff, &mut ff_conflict, run_face);
-            }
-        }
-        if fs.is_none() || co.is_none() || ff.is_none() {
-            let def = p
-                .child("pPr")
-                .and_then(|pp| pp.child("defRPr"))
-                .or_else(|| {
-                    body.child("lstStyle")
-                        .and_then(|l| l.child("defPPr"))
-                        .and_then(|d| d.child("defRPr"))
-                });
-            if let Some(def) = def {
-                let (sz, run_color, run_face) = run_props(def);
-                if fs.is_none() {
+        // Masters pass their text raw, so per-run formatting is aggregated to
+        // shape-level opts; slides keep it per run via `<span>` styles and
+        // skip this aggregation.
+        if is_master {
+            // Aggregate run font props (from both `<a:r>` runs and `<a:fld>`
+            // fields - the slide-number placeholder is a field) for
+            // shape-level opts; props no run sets fall back to the default
+            // run props (`pPr/defRPr`, then `lstStyle/defPPr/defRPr`).
+            let (mut fs, mut co, mut ff) = (None, None, None);
+            for r in p.children("r").chain(p.children("fld")) {
+                if let Some(rpr) = r.child("rPr") {
+                    let (sz, run_color, run_face) = run_props(rpr);
                     agg_num(&mut fs, &mut fs_conflict, sz);
-                }
-                if co.is_none() {
                     agg_str(&mut co, &mut c_conflict, run_color);
-                }
-                if ff.is_none() {
                     agg_str(&mut ff, &mut ff_conflict, run_face);
                 }
             }
+            if fs.is_none() || co.is_none() || ff.is_none() {
+                let def = p
+                    .child("pPr")
+                    .and_then(|pp| pp.child("defRPr"))
+                    .or_else(|| {
+                        body.child("lstStyle")
+                            .and_then(|l| l.child("defPPr"))
+                            .and_then(|d| d.child("defRPr"))
+                    });
+                if let Some(def) = def {
+                    let (sz, run_color, run_face) = run_props(def);
+                    if fs.is_none() {
+                        agg_num(&mut fs, &mut fs_conflict, sz);
+                    }
+                    if co.is_none() {
+                        agg_str(&mut co, &mut c_conflict, run_color);
+                    }
+                    if ff.is_none() {
+                        agg_str(&mut ff, &mut ff_conflict, run_face);
+                    }
+                }
+            }
+            agg_num(&mut font_size, &mut fs_conflict, fs);
+            agg_str(&mut color, &mut c_conflict, co);
+            agg_str(&mut font_face, &mut ff_conflict, ff);
         }
-        agg_num(&mut font_size, &mut fs_conflict, fs);
-        agg_str(&mut color, &mut c_conflict, co);
-        agg_str(&mut font_face, &mut ff_conflict, ff);
     }
     if fs_conflict {
         ptx.warn("inconsistent run font sizes approximated by the first");
@@ -1237,6 +1262,7 @@ fn parse_paragraph(
     ptx: &mut Ptx,
     rels: &HashMap<String, String>,
     p: &XNode,
+    is_master: bool,
 ) -> (String, toml::Table) {
     let mut md = String::new();
     let mut opts = toml::Table::new();
@@ -1279,7 +1305,7 @@ fn parse_paragraph(
     }
     for el in &p.children {
         match el.name.as_str() {
-            "r" => md.push_str(&parse_run(ptx, rels, el)),
+            "r" => md.push_str(&parse_run(ptx, rels, el, is_master)),
             "br" => md.push('\n'),
             "fld" => {
                 if let Some(t) = el.child("t") {
@@ -1292,7 +1318,7 @@ fn parse_paragraph(
     (guard_list_start(&md), opts)
 }
 
-fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String {
+fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode, is_master: bool) -> String {
     let rpr = r.child("rPr");
     let bold = rpr
         .and_then(|p| p.attr("b"))
@@ -1304,7 +1330,7 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String
         .unwrap_or(false);
     let text = r.child("t").map(|t| t.text.clone()).unwrap_or_default();
     let escaped = escape_markdown(&text);
-    let seg = match (bold, italic) {
+    let mut seg = match (bold, italic) {
         (true, true) => format!("***{escaped}***"),
         (true, false) => format!("**{escaped}**"),
         (false, true) => format!("*{escaped}*"),
@@ -1316,11 +1342,74 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String
         .and_then(|id| rels.get(id).cloned())
     {
         if url.starts_with("http") {
-            return format!("[{seg}]({url})");
+            seg = format!("[{seg}]({url})");
+        } else {
+            ptx.warn("slide-internal text hyperlink dropped");
         }
-        ptx.warn("slide-internal text hyperlink dropped");
+    }
+    // Slide text keeps per-run formatting via `<span class="runN">` styles;
+    // masters pass their text raw and drop it here.
+    if !is_master {
+        let opts = run_style_opts(rpr);
+        if !opts.is_empty() {
+            let class = span_class(ptx, &opts);
+            seg = format!("<span class=\"{class}\">{seg}</span>");
+        }
     }
     seg
+}
+
+/// The non-markdown run options (`color`, `font_face`, `font_size`,
+/// `underline`, ...) of an `<a:rPr>`, for a `<span class="runN">` style.
+fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
+    let mut t = toml::Table::new();
+    let Some(rpr) = rpr else {
+        return t;
+    };
+    if let Some(c) = run_color(rpr) {
+        t.insert("color".into(), T::String(c));
+    }
+    if let Some(s) = rpr.attr("sz").and_then(|v| v.parse::<f64>().ok()) {
+        t.insert("font_size".into(), T::Float(s / 100.0));
+    }
+    if let Some(face) = ["latin", "ea", "cs"]
+        .iter()
+        .find_map(|el| rpr.child(el).and_then(|f| f.attr("typeface")))
+    {
+        t.insert("font_face".into(), T::String(face.to_string()));
+    }
+    if let Some(u) = rpr.attr("u").filter(|u| *u != "none") {
+        t.insert("underline".into(), T::String(u.to_string()));
+    }
+    if let Some(s) = rpr.attr("strike").filter(|s| *s != "none") {
+        t.insert("strike".into(), T::String(s.to_string()));
+    }
+    if let Some(h) = rpr.child("highlight").and_then(color_of) {
+        t.insert("highlight".into(), T::String(h));
+    }
+    if let Some(l) = rpr.attr("lang") {
+        t.insert("lang".into(), T::String(l.to_string()));
+    }
+    if rpr.attr("rtl").is_some_and(|v| v == "1") {
+        t.insert("rtl_mode".into(), T::Boolean(true));
+    }
+    if let Some(base) = rpr.attr("baseline").and_then(|v| v.parse::<i64>().ok()) {
+        let key = if base > 0 { "superscript" } else { "subscript" };
+        t.insert(key.into(), T::Boolean(true));
+    }
+    t
+}
+
+/// Register (or look up) the `[styles.named.runN]` style for a run-option set.
+fn span_class(ptx: &mut Ptx, opts: &toml::Table) -> String {
+    let key = toml::to_string(opts).unwrap_or_default();
+    if let Some(name) = ptx.style_names.get(&key) {
+        return name.clone();
+    }
+    let name = format!("run{}", ptx.run_styles.len() + 1);
+    ptx.style_names.insert(key, name.clone());
+    ptx.run_styles.insert(name.clone(), opts.clone());
+    name
 }
 
 /// Escape characters that could change markdown meaning when the run is plain.
@@ -1465,6 +1554,7 @@ fn main_toml(
     major_font: &str,
     minor_font: &str,
     sections: &[(String, Vec<String>)],
+    run_styles: &BTreeMap<String, toml::Table>,
 ) -> String {
     let mut root = toml::Table::new();
     let mut pres = toml::Table::new();
@@ -1489,6 +1579,16 @@ fn main_toml(
         })
         .collect();
     root.insert("sections".into(), T::Array(secs));
+    if !run_styles.is_empty() {
+        let named: toml::Table = run_styles
+            .iter()
+            .map(|(name, table)| (name.clone(), T::Table(table.clone())))
+            .collect();
+        root.insert(
+            "styles".into(),
+            T::Table(toml::Table::from_iter([("named".into(), T::Table(named))])),
+        );
+    }
     toml::to_string(&T::Table(root)).unwrap_or_default()
 }
 

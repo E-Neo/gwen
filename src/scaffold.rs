@@ -550,6 +550,16 @@ Marker styles come from `[styles.*]` `ordered_markers` (patterns like `"1."`,
 indexed by indent level; missing levels fall back to the last marker, then
 defaults.
 
+A `<span class="name">` applies a `[styles.named.name]` to the runs it wraps:
+`black with <span class="red">**bold and red**</span>` makes the inner run
+bold and red. The span is transparent to markdown, so both
+`<span class="red">**bold**</span>` and `**<span class="red">bold</span>**`
+work; `class="a b"` merges styles in order (later wins). A span style may
+only use run options (`color`, `highlight`, `font_face`, `font_size`, `bold`,
+`italic`, `underline`, `strike`, `superscript`, `subscript`, `char_spacing`,
+`baseline`, `lang`, `rtl_mode`); other keys, an unknown class, or unbalanced
+tags are build errors. Use `\<span` to write a literal angle bracket.
+
 ## Explicit paragraphs
 
 `[[shapes.paragraphs]]` gives per-paragraph options (`bullet`,

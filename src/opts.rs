@@ -1205,7 +1205,7 @@ pub struct Src {
 /// Build a located miette diagnostic. When a byte span into `src` is known the
 /// error carries the source file plus a label; otherwise it degrades to the
 /// plain `where_` message.
-fn located(span: Option<std::ops::Range<usize>>, src: &Src, msg: String) -> miette::Report {
+pub fn located(span: Option<std::ops::Range<usize>>, src: &Src, msg: String) -> miette::Report {
     let mut diag = miette::MietteDiagnostic::new(msg);
     if let Some(sp) = span {
         diag = diag.and_label(miette::LabeledSpan::at(sp, "here"));

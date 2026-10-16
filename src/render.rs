@@ -607,7 +607,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
             value.insert("kind".into(), json!("text"));
             value.insert(
                 "runs".into(),
-                runs_value(shape, file, &ordered_markers, &unordered_markers)?,
+                runs_value(ctx, idx, shape, &ordered_markers, &unordered_markers)?,
             );
             for (k, v) in opts.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
@@ -633,6 +633,31 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
     Ok(Value::Object(value))
 }
 
+/// A located diagnostic for a rich-text parse error, pointing at the `text`
+/// value in the source slide file (`para_idx == usize::MAX` means the shape's
+/// `text` shorthand, otherwise a `[[shapes.paragraphs]]` entry).
+fn text_error(
+    file_src: &FileSrc,
+    idx: usize,
+    para_idx: usize,
+    where_: &str,
+    msg: String,
+) -> miette::Report {
+    let span = file_src.shape_at(idx).and_then(|shape| {
+        if para_idx == usize::MAX {
+            shape.get("text").and_then(|t| t.span())
+        } else {
+            shape
+                .get("paragraphs")
+                .and_then(|p| p.as_array_of_tables())
+                .and_then(|a| a.get(para_idx))
+                .and_then(|t| t.get("text"))
+                .and_then(|t| t.span())
+        }
+    });
+    opts::located(span, &file_src.src(), format!("{where_}: {msg}"))
+}
+
 /// Build the flat run list for a text shape - pptxgenjs's native text model.
 ///
 /// The markdown paragraphs are flattened into one run list; the last run of
@@ -647,37 +672,53 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
 /// Text is `[[paragraphs]]` if given, else the `text` shorthand, else one
 /// empty run so `addText` always has content.
 fn runs_value(
+    ctx: &SlideCtx,
+    idx: usize,
     shape: &Shape,
-    file: &str,
     ordered_markers: &[String],
     unordered_markers: &[String],
 ) -> Result<Value> {
     struct Para<'a> {
         text: &'a str,
         opts: &'a toml::Table,
+        index: usize,
     }
     let mut paragraphs: Vec<Para> = Vec::new();
     let empty = toml::Table::new();
     if !shape.paragraphs.is_empty() {
-        for para in &shape.paragraphs {
+        for (j, para) in shape.paragraphs.iter().enumerate() {
             if !para.opts.is_empty() {
                 opts::validate_ctx(
                     Ctx::Text,
                     &toml::Value::Table(para.opts.clone()),
-                    &format!("slide `{file}` shape `{}` paragraph", shape.ty),
+                    &format!("slide `{}` shape `{}` paragraph", ctx.file, shape.ty),
                 )?;
             }
             paragraphs.push(Para {
                 text: &para.text,
                 opts: &para.opts,
+                index: j,
             });
         }
     } else if let Some(text) = &shape.text {
-        paragraphs.push(Para { text, opts: &empty });
+        paragraphs.push(Para {
+            text,
+            opts: &empty,
+            index: usize::MAX,
+        });
     }
     if paragraphs.is_empty() {
         return Ok(Value::Array(vec![json!({ "text": "" })]));
     }
+
+    let where_ = |index: usize| -> String {
+        if index == usize::MAX {
+            format!("slide `{}` shape `{}`", ctx.file, shape.ty)
+        } else {
+            format!("slide `{}` shape `{}` paragraph", ctx.file, shape.ty)
+        }
+    };
+    let styles = &ctx.main.styles.named;
 
     // Flatten markdown paragraphs to runs, remembering paragraph boundaries.
     struct Group {
@@ -696,7 +737,12 @@ fn runs_value(
             .filter(|(k, _)| k.as_str() != "align")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Map<_, _>>();
-        for runs in richtext::parse_paragraphs(para.text, ordered_markers, unordered_markers) {
+        for runs in
+            richtext::parse_paragraphs(para.text, ordered_markers, unordered_markers, styles)
+                .map_err(|msg| {
+                    text_error(ctx.file_src, idx, para.index, &where_(para.index), msg)
+                })?
+        {
             groups.push(Group {
                 runs,
                 opts: para_opts.clone(),
