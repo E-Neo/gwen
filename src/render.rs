@@ -2,7 +2,7 @@
 //! defaults/styles/options, parse rich text, normalise everything to the
 //! units pptxgenjs expects) into the JSON spec the embedded bridge renders.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -292,7 +292,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 &obj.styles,
                 &obj.opts,
             )?;
-            let _ = take_markers(&mut opts);
+            let (ordered_markers, unordered_markers) = take_markers(&mut opts);
             let where_ = format!("master `{stem}` shape `{}`", obj.ty);
             let ctx = match ty {
                 "text" => Some(Ctx::Text),
@@ -331,7 +331,48 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             };
             out.insert("w".into(), json!(w_in));
             out.insert("h".into(), json!(h_in));
-            out.insert("text".into(), json!(obj.text));
+            if matches!(ty, "text" | "placeholder") {
+                // Master/placeholder text gets the same markdown + `<span>`
+                // run treatment as slide text.
+                let mut paragraphs: Vec<TextPara> = Vec::new();
+                let empty = toml::Table::new();
+                if !obj.paragraphs.is_empty() {
+                    for (j, para) in obj.paragraphs.iter().enumerate() {
+                        if !para.opts.is_empty() {
+                            opts::validate_ctx(
+                                Ctx::Text,
+                                &toml::Value::Table(para.opts.clone()),
+                                &format!("{where_} paragraph"),
+                            )?;
+                        }
+                        paragraphs.push(TextPara {
+                            text: &para.text,
+                            opts: &para.opts,
+                            index: j,
+                        });
+                    }
+                } else if let Some(text) = &obj.text {
+                    paragraphs.push(TextPara {
+                        text,
+                        opts: &empty,
+                        index: usize::MAX,
+                    });
+                }
+                out.insert(
+                    "runs".into(),
+                    flatten_runs(
+                        &paragraphs,
+                        &ordered_markers,
+                        &unordered_markers,
+                        &main.styles.named,
+                        &file_src,
+                        idx,
+                        &where_,
+                    )?,
+                );
+            } else {
+                out.insert("text".into(), json!(obj.text));
+            }
             out.insert("options".into(), to_pptxgen(&opts));
             if obj.ty == "image"
                 && let Some(src) = &obj.src
@@ -658,7 +699,17 @@ fn text_error(
     opts::located(span, &file_src.src(), format!("{where_}: {msg}"))
 }
 
-/// Build the flat run list for a text shape - pptxgenjs's native text model.
+/// One text paragraph handed to the shared run builder: `index == usize::MAX`
+/// marks the shape's `text` shorthand (so span errors point at the right
+/// value), otherwise it's the `[[shapes.paragraphs]]` entry index.
+struct TextPara<'a> {
+    text: &'a str,
+    opts: &'a toml::Table,
+    index: usize,
+}
+
+/// Build the flat run list for text - pptxgenjs's native text model. Shared by
+/// slide text and master/placeholder text so they behave identically.
 ///
 /// The markdown paragraphs are flattened into one run list; the last run of
 /// every paragraph except the final one carries `breakLine` (pptxgenjs closes
@@ -667,66 +718,30 @@ fn text_error(
 /// single `\n` already became a `softBreakBefore` run. `align` is dropped from
 /// paragraph options because pptxgenjs auto-splits paragraphs on `align`
 /// changes, which would double-split with `breakLine`; use the shape-level
-/// `align` instead.
-///
-/// Text is `[[paragraphs]]` if given, else the `text` shorthand, else one
-/// empty run so `addText` always has content.
-fn runs_value(
-    ctx: &SlideCtx,
-    idx: usize,
-    shape: &Shape,
+/// `align` instead. Empty input yields one empty run so `addText`/masters
+/// always have content.
+fn flatten_runs(
+    paragraphs: &[TextPara<'_>],
     ordered_markers: &[String],
     unordered_markers: &[String],
+    styles: &BTreeMap<String, toml::Table>,
+    file_src: &FileSrc,
+    idx: usize,
+    base_where: &str,
 ) -> Result<Value> {
-    struct Para<'a> {
-        text: &'a str,
-        opts: &'a toml::Table,
-        index: usize,
-    }
-    let mut paragraphs: Vec<Para> = Vec::new();
-    let empty = toml::Table::new();
-    if !shape.paragraphs.is_empty() {
-        for (j, para) in shape.paragraphs.iter().enumerate() {
-            if !para.opts.is_empty() {
-                opts::validate_ctx(
-                    Ctx::Text,
-                    &toml::Value::Table(para.opts.clone()),
-                    &format!("slide `{}` shape `{}` paragraph", ctx.file, shape.ty),
-                )?;
-            }
-            paragraphs.push(Para {
-                text: &para.text,
-                opts: &para.opts,
-                index: j,
-            });
-        }
-    } else if let Some(text) = &shape.text {
-        paragraphs.push(Para {
-            text,
-            opts: &empty,
-            index: usize::MAX,
-        });
-    }
-    if paragraphs.is_empty() {
-        return Ok(Value::Array(vec![json!({ "text": "" })]));
-    }
-
     let where_ = |index: usize| -> String {
         if index == usize::MAX {
-            format!("slide `{}` shape `{}`", ctx.file, shape.ty)
+            base_where.to_string()
         } else {
-            format!("slide `{}` shape `{}` paragraph", ctx.file, shape.ty)
+            format!("{base_where} paragraph")
         }
     };
-    let styles = &ctx.main.styles.named;
-
-    // Flatten markdown paragraphs to runs, remembering paragraph boundaries.
     struct Group {
         runs: Vec<richtext::Run>,
         opts: serde_json::Map<String, Value>,
     }
     let mut groups: Vec<Group> = Vec::new();
-    for para in &paragraphs {
+    for para in paragraphs {
         let mut para_value = toml::Value::Table(para.opts.clone());
         opts::finalize_opts(Ctx::Text, &mut para_value)?;
         let para_opts = to_pptxgen(&para_value);
@@ -739,9 +754,7 @@ fn runs_value(
             .collect::<Map<_, _>>();
         for runs in
             richtext::parse_paragraphs(para.text, ordered_markers, unordered_markers, styles)
-                .map_err(|msg| {
-                    text_error(ctx.file_src, idx, para.index, &where_(para.index), msg)
-                })?
+                .map_err(|msg| text_error(file_src, idx, para.index, &where_(para.index), msg))?
         {
             groups.push(Group {
                 runs,
@@ -776,6 +789,50 @@ fn runs_value(
         }
     }
     Ok(Value::Array(runs))
+}
+
+/// Build the run list for a slide text shape.
+fn runs_value(
+    ctx: &SlideCtx,
+    idx: usize,
+    shape: &Shape,
+    ordered_markers: &[String],
+    unordered_markers: &[String],
+) -> Result<Value> {
+    let mut paragraphs: Vec<TextPara> = Vec::new();
+    let empty = toml::Table::new();
+    if !shape.paragraphs.is_empty() {
+        for (j, para) in shape.paragraphs.iter().enumerate() {
+            if !para.opts.is_empty() {
+                opts::validate_ctx(
+                    Ctx::Text,
+                    &toml::Value::Table(para.opts.clone()),
+                    &format!("slide `{}` shape `{}` paragraph", ctx.file, shape.ty),
+                )?;
+            }
+            paragraphs.push(TextPara {
+                text: &para.text,
+                opts: &para.opts,
+                index: j,
+            });
+        }
+    } else if let Some(text) = &shape.text {
+        paragraphs.push(TextPara {
+            text,
+            opts: &empty,
+            index: usize::MAX,
+        });
+    }
+    let base_where = format!("slide `{}` shape `{}`", ctx.file, shape.ty);
+    flatten_runs(
+        &paragraphs,
+        ordered_markers,
+        unordered_markers,
+        &ctx.main.styles.named,
+        ctx.file_src,
+        idx,
+        &base_where,
+    )
 }
 
 /// Load + base64-encode a media file referenced by an image shape.

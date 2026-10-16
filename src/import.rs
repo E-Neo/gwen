@@ -817,7 +817,7 @@ fn parse_sp(
         text_direction,
         margin,
     } = tx_body
-        .map(|t| parse_text_body(ptx, rels, t, is_master))
+        .map(|t| parse_text_body(ptx, rels, t))
         .unwrap_or_default();
     // Master/layout placeholder prompts ("Click to edit title", ...) are
     // boilerplate, not real content.
@@ -1083,12 +1083,7 @@ struct TextOut {
     margin: Option<Vec<f64>>,
 }
 
-fn parse_text_body(
-    ptx: &mut Ptx,
-    rels: &HashMap<String, String>,
-    body: &XNode,
-    is_master: bool,
-) -> TextOut {
+fn parse_text_body(ptx: &mut Ptx, rels: &HashMap<String, String>, body: &XNode) -> TextOut {
     let body_pr = body.child("bodyPr");
     let valign = body_pr.and_then(|b| b.attr("anchor")).map(anchor_to_valign);
     let text_direction = body_pr
@@ -1112,15 +1107,9 @@ fn parse_text_body(
     });
 
     let mut paragraphs: Vec<toml::Value> = Vec::new();
-    let mut font_size: Option<f64> = None;
-    let mut color: Option<String> = None;
-    let mut font_face: Option<String> = None;
-    let mut fs_conflict = false;
-    let mut c_conflict = false;
-    let mut ff_conflict = false;
 
     for p in body.children("p") {
-        let (md, opts) = parse_paragraph(ptx, rels, p, is_master);
+        let (md, opts) = parse_paragraph(ptx, rels, p);
         paragraphs.push(T::Table({
             let mut t = toml::Table::new();
             t.insert("text".into(), T::String(md));
@@ -1129,61 +1118,6 @@ fn parse_text_body(
             }
             t
         }));
-        // Masters pass their text raw, so per-run formatting is aggregated to
-        // shape-level opts; slides keep it per run via `<span>` styles and
-        // skip this aggregation.
-        if is_master {
-            // Aggregate run font props (from both `<a:r>` runs and `<a:fld>`
-            // fields - the slide-number placeholder is a field) for
-            // shape-level opts; props no run sets fall back to the default
-            // run props (`pPr/defRPr`, then `lstStyle/defPPr/defRPr`).
-            let (mut fs, mut co, mut ff) = (None, None, None);
-            for r in p.children("r").chain(p.children("fld")) {
-                if let Some(rpr) = r.child("rPr") {
-                    let (sz, run_color, run_face) = run_props(rpr);
-                    agg_num(&mut fs, &mut fs_conflict, sz);
-                    agg_str(&mut co, &mut c_conflict, run_color);
-                    agg_str(&mut ff, &mut ff_conflict, run_face);
-                }
-            }
-            if fs.is_none() || co.is_none() || ff.is_none() {
-                let def = p
-                    .child("pPr")
-                    .and_then(|pp| pp.child("defRPr"))
-                    .or_else(|| {
-                        body.child("lstStyle")
-                            .and_then(|l| l.child("defPPr"))
-                            .and_then(|d| d.child("defRPr"))
-                    });
-                if let Some(def) = def {
-                    let (sz, run_color, run_face) = run_props(def);
-                    if fs.is_none() {
-                        agg_num(&mut fs, &mut fs_conflict, sz);
-                    }
-                    if co.is_none() {
-                        agg_str(&mut co, &mut c_conflict, run_color);
-                    }
-                    if ff.is_none() {
-                        agg_str(&mut ff, &mut ff_conflict, run_face);
-                    }
-                }
-            }
-            agg_num(&mut font_size, &mut fs_conflict, fs);
-            agg_str(&mut color, &mut c_conflict, co);
-            agg_str(&mut font_face, &mut ff_conflict, ff);
-        }
-    }
-    if fs_conflict {
-        ptx.warn("inconsistent run font sizes approximated by the first");
-        font_size = None;
-    }
-    if c_conflict {
-        ptx.warn("inconsistent run colours approximated by the first");
-        color = None;
-    }
-    if ff_conflict {
-        ptx.warn("inconsistent run fonts approximated by the first");
-        font_face = None;
     }
 
     // If every paragraph is plain, use the `text` shorthand instead.
@@ -1202,9 +1136,9 @@ fn parse_text_body(
     TextOut {
         text,
         paragraphs,
-        font_size,
-        color,
-        font_face,
+        font_size: None,
+        color: None,
+        font_face: None,
         valign,
         text_direction,
         margin,
@@ -1224,45 +1158,10 @@ fn run_color(rpr: &XNode) -> Option<String> {
     rpr.child("solidFill").and_then(color_of)
 }
 
-/// The `(font_size, color, font_face)` of a run or default-run-props element.
-fn run_props(rpr: &XNode) -> (Option<f64>, Option<String>, Option<String>) {
-    let size = rpr
-        .attr("sz")
-        .and_then(|v| v.parse::<f64>().ok())
-        .map(|v| v / 100.0);
-    let color = run_color(rpr);
-    let font_face = ["latin", "ea", "cs"]
-        .iter()
-        .find_map(|el| rpr.child(el).and_then(|f| f.attr("typeface")))
-        .map(String::from);
-    (size, color, font_face)
-}
-
-fn agg_num(cur: &mut Option<f64>, conflict: &mut bool, v: Option<f64>) {
-    if let Some(v) = v {
-        match *cur {
-            None => *cur = Some(v),
-            Some(prev) if (prev - v).abs() > 1e-6 => *conflict = true,
-            _ => {}
-        }
-    }
-}
-
-fn agg_str(cur: &mut Option<String>, conflict: &mut bool, v: Option<String>) {
-    if let Some(v) = v {
-        match cur {
-            None => *cur = Some(v),
-            Some(prev) if *prev != v => *conflict = true,
-            _ => {}
-        }
-    }
-}
-
 fn parse_paragraph(
     ptx: &mut Ptx,
     rels: &HashMap<String, String>,
     p: &XNode,
-    is_master: bool,
 ) -> (String, toml::Table) {
     let mut md = String::new();
     let mut opts = toml::Table::new();
@@ -1305,20 +1204,15 @@ fn parse_paragraph(
     }
     for el in &p.children {
         match el.name.as_str() {
-            "r" => md.push_str(&parse_run(ptx, rels, el, is_master)),
+            "r" | "fld" => md.push_str(&parse_run(ptx, rels, el)),
             "br" => md.push('\n'),
-            "fld" => {
-                if let Some(t) = el.child("t") {
-                    md.push_str(&escape_markdown(t.text.trim()));
-                }
-            }
             _ => {}
         }
     }
     (guard_list_start(&md), opts)
 }
 
-fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode, is_master: bool) -> String {
+fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String {
     let rpr = r.child("rPr");
     let bold = rpr
         .and_then(|p| p.attr("b"))
@@ -1330,11 +1224,28 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode, is_master
         .unwrap_or(false);
     let text = r.child("t").map(|t| t.text.clone()).unwrap_or_default();
     let escaped = escape_markdown(&text);
-    let mut seg = match (bold, italic) {
-        (true, true) => format!("***{escaped}***"),
-        (true, false) => format!("**{escaped}**"),
-        (false, true) => format!("*{escaped}*"),
-        (false, false) => escaped,
+    // Bold/italic markers must hug non-whitespace: `**Copyright©2021 **` has its
+    // closing `**` preceded by a space, which CommonMark treats as literal `*`.
+    // Move the run's leading/trailing whitespace outside the markers.
+    let lead_end = escaped
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(escaped.len());
+    let trail_start = escaped
+        .rfind(|c: char| !c.is_whitespace())
+        .map(|i| i + escaped[i..].chars().next().unwrap().len_utf8())
+        .unwrap_or(0);
+    let mut seg = if escaped[lead_end..trail_start].is_empty() {
+        escaped
+    } else {
+        let lead = &escaped[..lead_end];
+        let core = &escaped[lead_end..trail_start];
+        let trail = &escaped[trail_start..];
+        match (bold, italic) {
+            (true, true) => format!("{lead}***{core}***{trail}"),
+            (true, false) => format!("{lead}**{core}**{trail}"),
+            (false, true) => format!("{lead}*{core}*{trail}"),
+            (false, false) => escaped,
+        }
     };
     if let Some(url) = rpr
         .and_then(|p| p.child("hlinkClick"))
@@ -1347,14 +1258,12 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode, is_master
             ptx.warn("slide-internal text hyperlink dropped");
         }
     }
-    // Slide text keeps per-run formatting via `<span class="runN">` styles;
-    // masters pass their text raw and drop it here.
-    if !is_master {
-        let opts = run_style_opts(rpr);
-        if !opts.is_empty() {
-            let class = span_class(ptx, &opts);
-            seg = format!("<span class=\"{class}\">{seg}</span>");
-        }
+    // Keep per-run formatting (colour, font, size, ...) via
+    // `<span class="runN">` styles, for slides and masters alike.
+    let opts = run_style_opts(rpr);
+    if !opts.is_empty() {
+        let class = span_class(ptx, &opts);
+        seg = format!("<span class=\"{class}\">{seg}</span>");
     }
     seg
 }
@@ -1387,15 +1296,15 @@ fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
     if let Some(h) = rpr.child("highlight").and_then(color_of) {
         t.insert("highlight".into(), T::String(h));
     }
-    if let Some(l) = rpr.attr("lang") {
-        t.insert("lang".into(), T::String(l.to_string()));
-    }
-    if rpr.attr("rtl").is_some_and(|v| v == "1") {
-        t.insert("rtl_mode".into(), T::Boolean(true));
-    }
+    // lang/rtl_mode are per-run metadata with no visual effect; skipping them
+    // keeps the generated styles meaningful.
     if let Some(base) = rpr.attr("baseline").and_then(|v| v.parse::<i64>().ok()) {
-        let key = if base > 0 { "superscript" } else { "subscript" };
-        t.insert(key.into(), T::Boolean(true));
+        // `baseline="0"` is the normal baseline (emitted on most runs); only a
+        // non-zero value means superscript (positive) or subscript (negative).
+        if base != 0 {
+            let key = if base > 0 { "superscript" } else { "subscript" };
+            t.insert(key.into(), T::Boolean(true));
+        }
     }
     t
 }

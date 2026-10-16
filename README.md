@@ -245,7 +245,8 @@ Equivalently, a text shape can draw a preset explicitly with `shape = "rect"`.
 
 ### Rich text
 
-`text` (and each `[[shapes.paragraphs]]` entry) is parsed by `pulldown-cmark`:
+`text` (and each `[[shapes.paragraphs]]` entry) is parsed by `pulldown-cmark` -
+for slides **and** masters/placeholders alike:
 
 | Markdown            | Result                                          |
 |---------------------|-------------------------------------------------|

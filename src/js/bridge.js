@@ -60,6 +60,28 @@
     return out;
   }
 
+  // pptxgenjs's text model: addText / master text takes a flat run list;
+  // paragraph boundaries are `breakLine` run options and soft breaks are
+  // `softBreakBefore` (pptxgenjs renders both, not us).
+  function buildRuns(runList) {
+    var runs = [];
+    for (var ri = 0; ri < runList.length; ri++) {
+      var r = runList[ri];
+      var ro = {};
+      for (var rk in r) {
+        if (rk === "text") {
+          continue;
+        }
+        if (r[rk] === null || r[rk] === undefined || r[rk] === false) {
+          continue;
+        }
+        ro[rk] = r[rk];
+      }
+      runs.push({ text: r.text, options: ro });
+    }
+    return runs;
+  }
+
   function renderSlide(p, s, sectionTitle) {
     var opts = {};
     if (s.master) {
@@ -78,24 +100,7 @@
     for (var hi = 0; hi < s.shapes.length; hi++) {
       var sh = s.shapes[hi];
       if (sh.kind === "text") {
-        // pptxgenjs's text model: addText takes a flat run list; paragraph
-        // boundaries are `breakLine` run options and soft breaks are
-        // `softBreakBefore` (pptxgenjs renders both, not us).
-        var runs = [];
-        for (var ri = 0; ri < sh.runs.length; ri++) {
-          var r = sh.runs[ri];
-          var ro = {};
-          for (var rk in r) {
-            if (rk === "text") {
-              continue;
-            }
-            if (r[rk] === null || r[rk] === undefined || r[rk] === false) {
-              continue;
-            }
-            ro[rk] = r[rk];
-          }
-          runs.push({ text: r.text, options: ro });
-        }
+        var runs = buildRuns(sh.runs);
         slide.addText(runs, optOf(sh));
       } else if (sh.kind === "shape") {
         slide.addShape(sh.type, optOf(sh));
@@ -138,8 +143,10 @@
           combined.data = o.data;
         }
         if (o.type === "text" || o.type === "placeholder") {
-          // defineSlideMaster text/placeholder objects are `{ text, options }`.
-          obj[o.type] = { text: o.text || "", options: combined };
+          // Master text/placeholder objects accept the same flat run list as
+          // slides (markdown + `<span>` spans); plain string as a fallback.
+          var text = o.runs ? buildRuns(o.runs) : (o.text || "");
+          obj[o.type] = { text: text, options: combined };
         } else {
           obj[o.type] = combined;
         }

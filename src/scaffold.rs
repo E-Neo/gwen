@@ -532,7 +532,9 @@ All shapes also take `x` / `y` / `w` / `h` geometry.
 
 ## Rich text
 
-`text` (and `[[shapes.paragraphs]]` text) is markdown:
+`text` (and `[[shapes.paragraphs]]` text) is markdown - for slides **and**
+masters/placeholders alike (master and placeholder text get the same run
+treatment as slide text):
 
 | Markdown            | Result                                        |
 |---------------------|-----------------------------------------------|

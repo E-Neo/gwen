@@ -1484,16 +1484,21 @@ fn import_imports_line_color_font_and_placeholder_geometry() {
         master_toml.contains("color = \"C7000B\"") && master_toml.contains("width = 2.25"),
         "connector line colour imported: {master_toml}"
     );
-    // The page-number field keeps its size and font.
+    // The page-number field and the run's <a:latin> font become named run
+    // styles in main.toml, referenced by spans in the master text.
+    let main_toml = std::fs::read_to_string(imported.join("main.toml")).unwrap();
     assert!(
-        master_toml.contains("font_size = 9.74") && master_toml.contains("font_face = \"Arial\""),
-        "page-number field font imported: {master_toml}"
+        main_toml.contains("font_size = 9.74") && main_toml.contains("font_face = \"Arial\""),
+        "page-number field font style: {main_toml}"
     );
-    // A run's <a:latin> font and size land as shape-level opts.
     assert!(
-        master_toml.contains("font_size = 36.36")
-            && master_toml.contains("font_face = \"Microsoft YaHei\""),
-        "latin font imported: {master_toml}"
+        main_toml.contains("font_size = 36.36")
+            && main_toml.contains("font_face = \"Microsoft YaHei\""),
+        "latin font style: {main_toml}"
+    );
+    assert!(
+        master_toml.contains("<span class=\"run"),
+        "master text uses spans: {master_toml}"
     );
 
     // The slide placeholder inherits the layout placeholder's geometry.
@@ -1538,6 +1543,52 @@ fn span_renders_per_run_color() {
     assert_eq!(runs[1]["bold"], true);
     assert_eq!(runs[1]["color"], "FF0000");
     assert_eq!(runs[1]["fontSize"], 24);
+}
+
+/// Master text gets the same markdown + `<span>` run treatment as slide text:
+/// `**bold**` and `<span class="red">` render as runs in the master.
+#[test]
+fn master_rich_text_renders_runs() {
+    let dir = sample_project("mrich");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = format!("{main}\n[styles.named.red]\ncolor = \"FF0000\"\n");
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("masters").join("brand.toml"),
+        r#"background = { color = "FFFFFF" }
+
+[[shapes]]
+type = "text"
+x = "1in"
+y = "0.2in"
+w = "8in"
+h = "0.5in"
+text = "Master **bold** and <span class=\"red\">red</span>"
+"#,
+    );
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"4in\"\nw = \"4in\"\nh = \"1in\"\ntext = \"ok\"\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut found = false;
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).unwrap();
+        let name = f.name().map(|c| c.into_owned()).unwrap_or_default();
+        if !name.ends_with(".xml") {
+            continue;
+        }
+        let mut s = String::new();
+        use std::io::Read;
+        f.read_to_string(&mut s).unwrap();
+        if s.contains("Master ") && s.contains("<a:t>bold</a:t>") && s.contains("FF0000") {
+            assert!(s.contains("b=\"1\""), "master bold run");
+            found = true;
+        }
+    }
+    assert!(found, "master text rendered with bold + red runs");
 }
 
 /// An unknown span class is a build error pointing at the text line.
@@ -1639,6 +1690,187 @@ fn import_emits_span_run_styles() {
     assert!(
         slide_toml.contains("<span class=\"run2\">blue</span>"),
         "blue run wrapped in a span: {slide_toml}"
+    );
+    gwen::build(&imported).unwrap();
+}
+
+/// A bold run ending in a space must import as bold markdown whose closing
+/// `**` still parses - not as literal asterisks.
+#[test]
+fn import_bold_run_with_trailing_space_renders_bold() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100000" y="200000"/><a:ext cx="500000" cy="300000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p>
+<a:r><a:rPr lang="en-US" sz="850" b="1" dirty="0"><a:solidFill><a:srgbClr val="1D1D1B"/></a:solidFill><a:latin typeface="Arial" charset="-122"/></a:rPr><a:t>Copyright©2021 </a:t></a:r>
+</a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+    ]);
+    let pptx = tmp("boldspace");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("boldspace-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+
+    // The imported text must be a bold span with the space tucked outside the
+    // `**` markers so the build renders bold, never literal asterisks.
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1")).unwrap();
+    assert!(
+        slide_toml.contains("**Copyright©2021** "),
+        "trailing space moved outside the markers: {slide_toml}"
+    );
+    let out = gwen::build(&imported).unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut found = false;
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).unwrap();
+        let name = f.name().map(|c| c.into_owned()).unwrap_or_default();
+        if !name.ends_with(".xml") {
+            continue;
+        }
+        let mut s = String::new();
+        use std::io::Read;
+        f.read_to_string(&mut s).unwrap();
+        if s.contains("Copyright") {
+            let i = s.find("Copyright").unwrap();
+            let ctx = &s[i.saturating_sub(300)..(i + 300).min(s.len())];
+            assert!(ctx.contains("b=\"1\""), "copyright run is bold: {ctx}");
+            assert!(!ctx.contains("**"), "no literal asterisks: {ctx}");
+            found = true;
+        }
+    }
+    assert!(found, "copyright text present in output");
+}
+
+/// OOXML `baseline="0"` is the normal baseline; it must not become subscript.
+#[test]
+fn import_baseline_zero_not_subscript() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100000" y="200000"/><a:ext cx="500000" cy="300000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p>
+<a:r><a:rPr lang="en-US" sz="1000" baseline="0" dirty="0"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:latin typeface="Arial" charset="-122"/></a:rPr><a:t>plain</a:t></a:r>
+</a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+    ]);
+    let pptx = tmp("baseline");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("baseline-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+    let main = std::fs::read_to_string(imported.join("main.toml")).unwrap();
+    assert!(
+        !main.contains("subscript"),
+        "baseline=0 must not produce subscript: {main}"
+    );
+    assert!(
+        main.contains("color = \"FF0000\""),
+        "style has the colour: {main}"
     );
     gwen::build(&imported).unwrap();
 }
