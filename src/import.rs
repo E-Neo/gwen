@@ -20,6 +20,58 @@ const EMU_PER_IN: f64 = 914_400.0;
 /// position they inherit from the layout.
 type PhGeo = HashMap<String, (i64, i64, i64, i64)>;
 
+/// A theme's resolved `<a:clrScheme>` colours and `<a:fontScheme>` typefaces,
+/// used to turn OOXML scheme references (`tx1`, `+mn-lt`, ...) into concrete
+/// hex colours and real font names.
+#[derive(Debug, Default)]
+struct ThemeInfo {
+    /// Scheme colour name (`tx1`, `dk1`, `accent1`, ...) -> hex.
+    colors: HashMap<String, String>,
+    /// OOXML theme font token (`+mn-lt`, `+mj-ea`, ...) -> typeface.
+    fonts: HashMap<String, String>,
+}
+
+fn parse_theme(xml: &XNode) -> ThemeInfo {
+    let elements = xml.child("themeElements");
+    let mut info = ThemeInfo::default();
+    if let Some(cs) = elements.and_then(|e| e.child("clrScheme")) {
+        for child in &cs.children {
+            let hex = child
+                .child("srgbClr")
+                .and_then(|c| c.attr("val"))
+                .or_else(|| child.child("sysClr").and_then(|c| c.attr("lastClr")))
+                .map(|c| c.to_ascii_uppercase());
+            if let Some(hex) = hex {
+                info.colors.insert(child.name.clone(), hex);
+            }
+        }
+        // The text/background scheme names alias the dark/light colours.
+        for (alias, target) in [
+            ("tx1", "dk1"),
+            ("tx2", "dk2"),
+            ("bg1", "lt1"),
+            ("bg2", "lt2"),
+        ] {
+            if let Some(hex) = info.colors.get(target) {
+                info.colors.insert(alias.into(), hex.clone());
+            }
+        }
+    }
+    if let Some(fs) = elements.and_then(|e| e.child("fontScheme")) {
+        for (node, prefix) in [(fs.child("majorFont"), "j"), (fs.child("minorFont"), "n")] {
+            if let Some(node) = node {
+                for (script, tag) in [("latin", "lt"), ("ea", "ea"), ("cs", "cs")] {
+                    if let Some(face) = node.child(script).and_then(|f| f.attr("typeface")) {
+                        info.fonts
+                            .insert(format!("+m{prefix}-{tag}"), face.to_string());
+                    }
+                }
+            }
+        }
+    }
+    info
+}
+
 /// A parsed XML element: local (namespace-stripped) name, raw attribute keys,
 /// child elements and accumulated text.
 #[derive(Debug, Clone)]
@@ -235,6 +287,13 @@ struct Ptx {
     run_styles: BTreeMap<String, toml::Table>,
     /// Canonical run-option key -> generated style name.
     style_names: HashMap<String, String>,
+    /// Parsed themes: theme part path -> resolved scheme colours/fonts.
+    themes: BTreeMap<String, ThemeInfo>,
+    /// Layout part -> the theme part its master uses.
+    layout_themes: HashMap<String, String>,
+    /// The theme part of the file currently being parsed, so `schemeClr` and
+    /// `+m…` font tokens resolve against the right theme.
+    current_theme: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -266,12 +325,23 @@ pub fn import_pptx(pptx: &Path, out: &Path, title: Option<&str>) -> Result<PathB
         layout_ph_geo: HashMap::new(),
         run_styles: BTreeMap::new(),
         style_names: HashMap::new(),
+        themes: BTreeMap::new(),
+        layout_themes: HashMap::new(),
+        current_theme: None,
         warnings: Vec::new(),
     };
-
+    let mut themes = BTreeMap::new();
+    for (part, bytes) in &ptx.parts {
+        if part.starts_with("ppt/theme/")
+            && let Ok(xml) = parse_xml(bytes)
+        {
+            themes.insert(part.clone(), parse_theme(&xml));
+        }
+    }
+    ptx.themes = themes;
     let pres = parse_xml(&ptx.parts[&pres_part])?;
     let (width, height) = slide_size(&pres);
-    let (major_font, minor_font) = theme_fonts(&mut ptx);
+    let (major_font, minor_font) = theme_fonts(&ptx);
     let slide_order = slide_order(&mut ptx, &pres);
 
     // Slide file names first, so [[sections]] can reference them.
@@ -317,7 +387,12 @@ pub fn import_pptx(pptx: &Path, out: &Path, title: Option<&str>) -> Result<PathB
             .as_deref()
             .and_then(|l| ptx.layout_ph_geo.get(l))
             .cloned();
+        ptx.current_theme = layout
+            .as_deref()
+            .and_then(|l| ptx.layout_themes.get(l))
+            .cloned();
         let shapes = shapes_of_raw(&mut ptx, &rels, &slide, false, layout_ph.as_ref())?;
+        ptx.current_theme = None;
         let notes = notes_of(&mut ptx, &rels);
         let filename = slide_names
             .get(slide_part)
@@ -398,23 +473,16 @@ fn slide_size(pres: &XNode) -> (i64, i64) {
     (width, height)
 }
 
-fn theme_fonts(ptx: &mut Ptx) -> (String, String) {
-    let theme = ptx
-        .rels
-        .values()
-        .find(|t| t.starts_with("ppt/theme/"))
-        .and_then(|t| ptx.parts.get(t.as_str()))
-        .and_then(|b| parse_xml(b).ok());
-    let font = |el: &str| {
-        theme
-            .as_ref()
-            .and_then(|t| t.child(el))
-            .and_then(|f| f.child("latin"))
-            .and_then(|l| l.attr("typeface"))
-            .unwrap_or("Calibri")
-            .to_string()
+fn theme_fonts(ptx: &Ptx) -> (String, String) {
+    let theme_part = ptx.rels.values().find(|t| t.starts_with("ppt/theme/"));
+    let fonts = theme_part.and_then(|t| ptx.themes.get(t)).map(|t| &t.fonts);
+    let font = |token: &str| {
+        fonts
+            .and_then(|f| f.get(token))
+            .cloned()
+            .unwrap_or_else(|| "Calibri".into())
     };
-    (font("majorFont"), font("minorFont"))
+    (font("+mj-lt"), font("+mn-lt"))
 }
 
 /// Slide part names in `sldIdLst` order.
@@ -510,6 +578,11 @@ fn layout_masters(ptx: &mut Ptx) -> Result<HashMap<String, String>> {
         };
         let master = parse_xml(&bytes)?;
         let mrels = rels_of(&ptx.parts, &master_part)?;
+        let master_theme = mrels
+            .values()
+            .find(|t| t.starts_with("ppt/theme/"))
+            .cloned();
+        ptx.current_theme = master_theme.clone();
         for layout in mrels
             .values()
             .filter(|t| t.starts_with("ppt/slideLayouts/"))
@@ -517,6 +590,9 @@ fn layout_masters(ptx: &mut Ptx) -> Result<HashMap<String, String>> {
             let Some(lbytes) = ptx.parts.get(layout.as_str()).cloned() else {
                 continue;
             };
+            if let Some(theme) = &master_theme {
+                ptx.layout_themes.insert(layout.clone(), theme.clone());
+            }
             let lrels = rels_of(&ptx.parts, layout)?;
             let layout_doc = parse_xml(&lbytes)?;
             let mut shapes = Vec::new();
@@ -836,8 +912,8 @@ fn parse_sp(
         flip_h,
         flip_v,
         fill: parse_fill(sp_pr.unwrap_or(sp), ptx),
-        line: parse_line(sp_pr.unwrap_or(sp)),
-        shadow: parse_shadow(sp_pr.unwrap_or(sp)),
+        line: parse_line(sp_pr.unwrap_or(sp), ptx),
+        shadow: parse_shadow(sp_pr.unwrap_or(sp), ptx),
         text,
         paragraphs,
         font_size,
@@ -910,7 +986,7 @@ fn parse_pic(ptx: &mut Ptx, rels: &HashMap<String, String>, pic: &XNode) -> Opti
         flip_v,
         fill: None,
         line: None,
-        shadow: parse_shadow(sp_pr.unwrap_or(pic)),
+        shadow: parse_shadow(sp_pr.unwrap_or(pic), ptx),
         text: None,
         paragraphs: Vec::new(),
         font_size: None,
@@ -940,7 +1016,7 @@ fn parse_cxn(ptx: &mut Ptx, cxn: &XNode) -> Option<ShapeOut> {
         flip_h,
         flip_v,
         fill: None,
-        line: parse_line(sp_pr.unwrap_or(cxn)),
+        line: parse_line(sp_pr.unwrap_or(cxn), ptx),
         shadow: None,
         text: None,
         paragraphs: Vec::new(),
@@ -967,7 +1043,7 @@ fn parse_cxn(ptx: &mut Ptx, cxn: &XNode) -> Option<ShapeOut> {
 
 fn parse_fill(sp_pr: &XNode, ptx: &mut Ptx) -> Option<toml::Value> {
     if let Some(sf) = sp_pr.child("solidFill") {
-        if let Some(c) = color_of(sf) {
+        if let Some(c) = color_of(ptx, sf) {
             return Some(T::Table(toml::Table::from_iter([(
                 "color".into(),
                 T::String(c),
@@ -992,13 +1068,13 @@ fn parse_fill(sp_pr: &XNode, ptx: &mut Ptx) -> Option<toml::Value> {
     None
 }
 
-fn parse_line(sp_pr: &XNode) -> Option<toml::Value> {
+fn parse_line(sp_pr: &XNode, ptx: &Ptx) -> Option<toml::Value> {
     let ln = sp_pr.child("ln")?;
     let mut t = toml::Table::new();
     if let Some(w) = ln.attr("w").and_then(|v| v.parse::<f64>().ok()) {
         t.insert("width".into(), T::Float(w / 12_700.0));
     }
-    if let Some(c) = color_of(ln) {
+    if let Some(c) = color_of(ptx, ln) {
         t.insert("color".into(), T::String(c));
     }
     if ln.child("noFill").is_some() {
@@ -1010,11 +1086,11 @@ fn parse_line(sp_pr: &XNode) -> Option<toml::Value> {
     Some(T::Table(t))
 }
 
-fn parse_shadow(sp_pr: &XNode) -> Option<toml::Value> {
+fn parse_shadow(sp_pr: &XNode, ptx: &Ptx) -> Option<toml::Value> {
     let sh = sp_pr.child("effectLst")?.child("outerShdw")?;
     let mut t = toml::Table::new();
     t.insert("type".into(), T::String("outer".into()));
-    if let Some(c) = color_of(sh) {
+    if let Some(c) = color_of(ptx, sh) {
         t.insert("color".into(), T::String(c));
     }
     let f = |name: &str, div: f64| {
@@ -1044,20 +1120,27 @@ fn parse_shadow(sp_pr: &XNode) -> Option<toml::Value> {
 /// `srgbClr` hex or `schemeClr` theme colour (mapped to gwen's theme names),
 /// found either directly on the node or inside a `solidFill` child (as in
 /// `<a:ln><a:solidFill><a:srgbClr .../></a:solidFill></a:ln>`).
-fn color_of(node: &XNode) -> Option<String> {
+fn color_of(ptx: &Ptx, node: &XNode) -> Option<String> {
     let direct = |n: &XNode| -> Option<String> {
         if let Some(c) = n.child("srgbClr").and_then(|c| c.attr("val")) {
             return Some(c.to_ascii_uppercase());
         }
         if let Some(c) = n.child("schemeClr").and_then(|c| c.attr("val")) {
-            return scheme_color(c);
+            return scheme_color(ptx, c);
         }
         None
     };
     direct(node).or_else(|| node.child("solidFill").and_then(direct))
 }
 
-fn scheme_color(c: &str) -> Option<String> {
+/// Resolve an OOXML scheme colour name to a hex from the active theme.
+fn scheme_color(ptx: &Ptx, c: &str) -> Option<String> {
+    if let Some(theme) = ptx.current_theme.as_ref().and_then(|t| ptx.themes.get(t))
+        && let Some(hex) = theme.colors.get(c)
+    {
+        return Some(hex.clone());
+    }
+    // No theme part (defensive, malformed file): keep the theme name.
     match c {
         "lt1" => Some("bg1".into()),
         "lt2" => Some("bg2".into()),
@@ -1154,8 +1237,8 @@ fn anchor_to_valign(a: &str) -> String {
     }
 }
 
-fn run_color(rpr: &XNode) -> Option<String> {
-    rpr.child("solidFill").and_then(color_of)
+fn run_color(ptx: &Ptx, rpr: &XNode) -> Option<String> {
+    rpr.child("solidFill").and_then(|sf| color_of(ptx, sf))
 }
 
 fn parse_paragraph(
@@ -1260,7 +1343,7 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String
     }
     // Keep per-run formatting (colour, font, size, ...) via
     // `<span class="runN">` styles, for slides and masters alike.
-    let opts = run_style_opts(rpr);
+    let opts = run_style_opts(ptx, rpr);
     if !opts.is_empty() {
         let class = span_class(ptx, &opts);
         seg = format!("<span class=\"{class}\">{seg}</span>");
@@ -1270,12 +1353,12 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String
 
 /// The non-markdown run options (`color`, `font_face`, `font_size`,
 /// `underline`, ...) of an `<a:rPr>`, for a `<span class="runN">` style.
-fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
+fn run_style_opts(ptx: &Ptx, rpr: Option<&XNode>) -> toml::Table {
     let mut t = toml::Table::new();
     let Some(rpr) = rpr else {
         return t;
     };
-    if let Some(c) = run_color(rpr) {
+    if let Some(c) = run_color(ptx, rpr) {
         t.insert("color".into(), T::String(c));
     }
     if let Some(s) = rpr.attr("sz").and_then(|v| v.parse::<f64>().ok()) {
@@ -1284,8 +1367,9 @@ fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
     if let Some(face) = ["latin", "ea", "cs"]
         .iter()
         .find_map(|el| rpr.child(el).and_then(|f| f.attr("typeface")))
+        && let Some(face) = resolve_font(ptx, face)
     {
-        t.insert("font_face".into(), T::String(face.to_string()));
+        t.insert("font_face".into(), T::String(face));
     }
     if let Some(u) = rpr.attr("u").filter(|u| *u != "none") {
         t.insert("underline".into(), T::String(u.to_string()));
@@ -1293,7 +1377,7 @@ fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
     if let Some(s) = rpr.attr("strike").filter(|s| *s != "none") {
         t.insert("strike".into(), T::String(s.to_string()));
     }
-    if let Some(h) = rpr.child("highlight").and_then(color_of) {
+    if let Some(h) = rpr.child("highlight").and_then(|h| color_of(ptx, h)) {
         t.insert("highlight".into(), T::String(h));
     }
     // lang/rtl_mode are per-run metadata with no visual effect; skipping them
@@ -1307,6 +1391,20 @@ fn run_style_opts(rpr: Option<&XNode>) -> toml::Table {
         }
     }
     t
+}
+
+/// Resolve an OOXML theme font token (`+mn-lt`, `+mj-ea`, ...) to the theme's
+/// actual typeface; a plain font name passes through.
+fn resolve_font(ptx: &Ptx, face: &str) -> Option<String> {
+    if face.starts_with("+m") {
+        return ptx
+            .current_theme
+            .as_ref()
+            .and_then(|t| ptx.themes.get(t))
+            .and_then(|th| th.fonts.get(face))
+            .cloned();
+    }
+    Some(face.to_string())
 }
 
 /// Register (or look up) the `[styles.named.runN]` style for a run-option set.

@@ -1874,3 +1874,107 @@ fn import_baseline_zero_not_subscript() {
     );
     gwen::build(&imported).unwrap();
 }
+
+/// Scheme colour references and theme font tokens resolve against the master's
+/// theme: `schemeClr val="tx1"` -> dk1 hex, `latin typeface="+mn-lt"` -> the
+/// minor latin font.
+#[test]
+fn import_resolves_theme_colors_and_fonts() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let theme = r##"<?xml version="1.0"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<a:themeElements>
+<a:clrScheme>
+<a:dk1><a:srgbClr val="1D1D1A"/></a:dk1>
+<a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+<a:dk2><a:srgbClr val="000000"/></a:dk2>
+<a:lt2><a:srgbClr val="FFFFFF"/></a:lt2>
+<a:accent1><a:srgbClr val="C7000A"/></a:accent1>
+</a:clrScheme>
+<a:fontScheme>
+<a:majorFont><a:latin typeface="Arial Black"/></a:majorFont>
+<a:minorFont><a:latin typeface="Arial"/></a:minorFont>
+</a:fontScheme>
+</a:themeElements>
+</a:theme>"##;
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100000" y="200000"/><a:ext cx="500000" cy="300000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p>
+<a:r><a:rPr lang="en-US" sz="1000" dirty="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt" charset="-122"/></a:rPr><a:t>hello</a:t></a:r>
+</a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+        entry("ppt/theme/theme1.xml", theme.as_bytes()),
+    ]);
+    let pptx = tmp("themere");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("themere-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+    let main = std::fs::read_to_string(imported.join("main.toml")).unwrap();
+    assert!(
+        main.contains("color = \"1D1D1A\""),
+        "schemeClr tx1 resolved to dk1 hex: {main}"
+    );
+    assert!(
+        main.contains("font_face = \"Arial\""),
+        "+mn-lt resolved to the minor latin font: {main}"
+    );
+    assert!(
+        !main.contains("tx1") && !main.contains("+mn-lt"),
+        "no raw theme tokens left: {main}"
+    );
+    gwen::build(&imported).unwrap();
+}
