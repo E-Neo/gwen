@@ -641,7 +641,7 @@ fn slide_name(part: &str, cname: &str, used: &mut BTreeSet<String>) -> String {
     } else {
         sanitize(cname)
     };
-    unique_name(&base, used)
+    format!("{}.toml", unique_name(&base, used))
 }
 
 fn sanitize(s: &str) -> String {

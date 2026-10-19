@@ -1502,7 +1502,7 @@ fn import_imports_line_color_font_and_placeholder_geometry() {
     );
 
     // The slide placeholder inherits the layout placeholder's geometry.
-    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1")).unwrap();
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1.toml")).unwrap();
     assert!(
         slide_toml.contains("x = 100000")
             && slide_toml.contains("y = 200000")
@@ -1682,7 +1682,7 @@ fn import_emits_span_run_styles() {
     assert!(main.contains("[styles.named.run2]"), "run style 2: {main}");
     assert!(main.contains("color = \"FF0000\""), "run1 colour: {main}");
     assert!(main.contains("color = \"0000FF\""), "run2 colour: {main}");
-    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1")).unwrap();
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1.toml")).unwrap();
     assert!(
         slide_toml.contains("<span class=\"run1\">red</span>"),
         "red run wrapped in a span: {slide_toml}"
@@ -1766,7 +1766,7 @@ fn import_bold_run_with_trailing_space_renders_bold() {
 
     // The imported text must be a bold span with the space tucked outside the
     // `**` markers so the build renders bold, never literal asterisks.
-    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1")).unwrap();
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1.toml")).unwrap();
     assert!(
         slide_toml.contains("**Copyright©2021** "),
         "trailing space moved outside the markers: {slide_toml}"
