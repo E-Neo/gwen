@@ -1978,3 +1978,84 @@ fn import_resolves_theme_colors_and_fonts() {
     );
     gwen::build(&imported).unwrap();
 }
+
+/// A run whose text is whitespace-only (e.g. a spacer run "<a:t> </a:t>")
+/// must not panic the importer - it becomes a plain space, no markers.
+#[test]
+fn import_whitespace_only_run_does_not_panic() {
+    fn entry(name: &str, data: &[u8]) -> gwen::zip::Entry {
+        gwen::zip::Entry {
+            name: name.into(),
+            data: data.to_vec(),
+            dir: false,
+        }
+    }
+    let pres = r##"<?xml version="1.0"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:sldMasterIdLst><p:sldMasterId id="1" r:id="rId1"/></p:sldMasterIdLst>
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>"##;
+    let pres_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"##;
+    let master = r##"<?xml version="1.0"?>
+<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Master"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldMaster>"##;
+    let master_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let layout = r##"<?xml version="1.0"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Layout"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld></p:sldLayout>"##;
+    let layout_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"##;
+    let slide = r##"<?xml version="1.0"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld name="Slide 1"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100000" y="200000"/><a:ext cx="500000" cy="300000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p>
+<a:r><a:rPr lang="en-US" sz="1000" b="1" dirty="0"/><a:t> </a:t></a:r>
+</a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"##;
+    let slide_rels = r##"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"##;
+    let zip_bytes = gwen::zip::write(&[
+        entry("ppt/presentation.xml", pres.as_bytes()),
+        entry("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes()),
+        entry("ppt/slideMasters/slideMaster1.xml", master.as_bytes()),
+        entry(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            master_rels.as_bytes(),
+        ),
+        entry("ppt/slideLayouts/slideLayout1.xml", layout.as_bytes()),
+        entry(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            layout_rels.as_bytes(),
+        ),
+        entry("ppt/slides/slide1.xml", slide.as_bytes()),
+        entry("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+    ]);
+    let pptx = tmp("wspacerun");
+    std::fs::write(pptx.join("t.pptx"), &zip_bytes).unwrap();
+    let imported = tmp("wspacerun-out").join("deck");
+    gwen::import_pptx(&pptx.join("t.pptx"), &imported, None).unwrap();
+    let slide_toml = std::fs::read_to_string(imported.join("slides").join("Slide_1.toml")).unwrap();
+    assert!(
+        slide_toml.contains(" </span>"),
+        "whitespace-only run kept as a plain space: {slide_toml}"
+    );
+    assert!(
+        !slide_toml.contains("**"),
+        "no emphasis markers around a bare space: {slide_toml}"
+    );
+    gwen::build(&imported).unwrap();
+}

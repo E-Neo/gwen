@@ -1309,17 +1309,16 @@ fn parse_run(ptx: &mut Ptx, rels: &HashMap<String, String>, r: &XNode) -> String
     let escaped = escape_markdown(&text);
     // Bold/italic markers must hug non-whitespace: `**Copyright©2021 **` has its
     // closing `**` preceded by a space, which CommonMark treats as literal `*`.
-    // Move the run's leading/trailing whitespace outside the markers.
-    let lead_end = escaped
-        .find(|c: char| !c.is_whitespace())
-        .unwrap_or(escaped.len());
-    let trail_start = escaped
-        .rfind(|c: char| !c.is_whitespace())
-        .map(|i| i + escaped[i..].chars().next().unwrap().len_utf8())
-        .unwrap_or(0);
-    let mut seg = if escaped[lead_end..trail_start].is_empty() {
+    // Move the run's leading/trailing whitespace outside the markers; a
+    // whitespace-only (or empty) run gets no markers at all.
+    let mut seg = if escaped.trim().is_empty() {
         escaped
     } else {
+        let lead_end = escaped.find(|c: char| !c.is_whitespace()).unwrap();
+        let trail_start = escaped
+            .rfind(|c: char| !c.is_whitespace())
+            .map(|i| i + escaped[i..].chars().next().unwrap().len_utf8())
+            .unwrap();
         let lead = &escaped[..lead_end];
         let core = &escaped[lead_end..trail_start];
         let trail = &escaped[trail_start..];
