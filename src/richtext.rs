@@ -77,14 +77,16 @@ fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     }
 }
 
-/// A span tag seen in the markdown: `<span class="...">` or `</span>`.
+/// An inline tag seen in the markdown: a gwen `<span class="...">`, a closing
+/// `</span>`, or a line break `<br>`.
 enum SpanOp {
     Open(String),
     Close,
+    Break,
 }
 
-/// Classify an inline-HTML event: a gwen text `<span>` (with its classes) or
-/// a closing tag; anything else is left alone.
+/// Classify an inline-HTML event: a gwen text `<span>` (with its classes), a
+/// closing tag, or `<br>`; anything else is left alone.
 fn parse_span_tag(h: &str) -> Option<SpanOp> {
     let t = h.trim();
     let lower = t.to_ascii_lowercase();
@@ -94,6 +96,12 @@ fn parse_span_tag(h: &str) -> Option<SpanOp> {
     if lower.starts_with("<span") {
         let classes = extract_class(t)?;
         return Some(SpanOp::Open(classes.to_string()));
+    }
+    if let Some(rest) = lower.strip_prefix("<br") {
+        // `<br>`, `<br/>`, `<br />`, `<br ...>` - a line break.
+        if rest.starts_with('>') || rest.starts_with("/>") || rest.trim_start().starts_with('/') {
+            return Some(SpanOp::Break);
+        }
     }
     None
 }
@@ -238,6 +246,20 @@ fn flush(
     paragraphs.push(runs);
 }
 
+/// A run that renders an empty line (used for hard line breaks).
+fn empty_break_run() -> Run {
+    Run {
+        text: String::new(),
+        bold: false,
+        italic: false,
+        soft_break_before: Some(true),
+        hyperlink: None,
+        bullet: None,
+        indent_level: None,
+        options: BTreeMap::new(),
+    }
+}
+
 /// Parse markdown-flavoured `text` into a list of paragraphs, each a list of
 /// runs. `ordered_markers`/`unordered_markers` are the per-indent-level
 /// display patterns for ordered lists and bullet characters for unordered
@@ -286,8 +308,12 @@ pub fn parse_paragraphs(
         });
     };
 
-    // Buffered soft break between runs (dropped at a paragraph end).
-    let mut pending_break = false;
+    // Pending line breaks before the next text run. Soft breaks (`\n`) are
+    // collapsible whitespace - they guarantee a line break but never stack;
+    // hard breaks (`<br>`, `  \n`) each add one line break. So a run of break
+    // nodes before some text yields `max(1, #hard)` line breaks.
+    let mut pending_soft = false;
+    let mut pending_hard = 0usize;
     // Open list types (`None` = bullet, `Some(start)` = ordered).
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     // Number of currently open list items: an item's indent level.
@@ -327,8 +353,19 @@ pub fn parse_paragraphs(
                     pending = None;
                 }
                 TagEnd::Paragraph => {
+                    // A paragraph that is only breaks (or ends with breaks)
+                    // keeps its empty break runs instead of being dropped.
+                    let breaks = if pending_soft || pending_hard > 0 {
+                        pending_hard.max(1)
+                    } else {
+                        0
+                    };
+                    for _ in 0..breaks {
+                        current.push(empty_break_run());
+                    }
+                    pending_soft = false;
+                    pending_hard = 0;
                     flush(&mut paragraphs, &mut current, &mut pending);
-                    pending_break = false;
                 }
                 other => state.pop(&other),
             },
@@ -345,35 +382,59 @@ pub fn parse_paragraphs(
                         return Err("stray </span> without a matching <span class=\"...\">".into());
                     }
                     Some(SpanOp::Close) => {}
+                    Some(SpanOp::Break) => {
+                        pending_hard += 1;
+                    }
                     None => {}
                 }
             }
             Event::Text(t) => {
+                let breaks = if pending_soft || pending_hard > 0 {
+                    pending_hard.max(1)
+                } else {
+                    0
+                };
+                pending_soft = false;
+                pending_hard = 0;
+                for _ in 1..breaks {
+                    current.push(empty_break_run());
+                }
                 push_text(
                     &mut current,
                     &mut state.hyperlink,
                     state.bold,
                     state.italic,
                     &t,
-                    pending_break,
+                    breaks > 0,
                     span_stack.last().unwrap_or(&BTreeMap::new()),
                 );
-                pending_break = false;
             }
             Event::Code(t) => {
+                let breaks = if pending_soft || pending_hard > 0 {
+                    pending_hard.max(1)
+                } else {
+                    0
+                };
+                pending_soft = false;
+                pending_hard = 0;
+                for _ in 1..breaks {
+                    current.push(empty_break_run());
+                }
                 push_text(
                     &mut current,
                     &mut state.hyperlink,
                     state.bold,
                     state.italic,
                     &t,
-                    pending_break,
+                    breaks > 0,
                     span_stack.last().unwrap_or(&BTreeMap::new()),
                 );
-                pending_break = false;
             }
-            Event::SoftBreak | Event::HardBreak => {
-                pending_break = true;
+            Event::SoftBreak => {
+                pending_soft = true;
+            }
+            Event::HardBreak => {
+                pending_hard += 1;
             }
             _ => {}
         }
@@ -606,5 +667,73 @@ mod tests {
             .join("");
         assert_eq!(text, "<span class=\"red\">literal</span>");
         assert!(p[0].iter().all(|r| r.options.is_empty()));
+    }
+
+    #[test]
+    fn br_is_a_line_break() {
+        let p = parse("a<br>b");
+        assert_eq!(p[0][0].text, "a");
+        assert_eq!(p[0][1].text, "b");
+        assert_eq!(p[0][1].soft_break_before, Some(true));
+        // self-closing and spaced variants too
+        let p = parse("a<br/>b<br />c");
+        assert_eq!(
+            p[0].iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        // an escaped `<br>` is literal text
+        let p = parse("a\\<br>b");
+        let text = p[0]
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, "a<br>b");
+        assert!(p[0].iter().all(|r| r.soft_break_before.is_none()));
+    }
+
+    #[test]
+    fn br_consecutive_breaks_stack() {
+        // each `<br>` adds a line break: a<br><br>b = a blank line between.
+        let p = parse("a<br><br>b");
+        assert_eq!(
+            p[0].iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "", "b"]
+        );
+        assert!(p[0][1].soft_break_before == Some(true));
+        assert!(p[0][2].soft_break_before == Some(true));
+        let p = parse("a<br><br><br>b");
+        assert_eq!(
+            p[0].iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "", "", "b"]
+        );
+        // soft breaks are collapsible: a\n<br>\nb = one line break.
+        let p = parse("a\n<br>\nb");
+        assert_eq!(
+            p[0].iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert!(p[0][1].soft_break_before == Some(true));
+        // a paragraph of only `<br>`s stays a blank line.
+        let p = parse("a\n\n<br><br>\n\nb");
+        assert_eq!(
+            p.iter().map(|par| par[0].text.as_str()).collect::<Vec<_>>(),
+            vec!["a", "", "b"]
+        );
+    }
+
+    #[test]
+    fn br_keeps_span_styling() {
+        let mut styles = BTreeMap::new();
+        styles.insert(
+            "red".into(),
+            toml::Table::from_iter([("color".into(), toml::Value::String("FF0000".into()))]),
+        );
+        let p = parse_paragraphs("<span class=\"red\">a<br>b</span>", &[], &[], &styles).unwrap();
+        assert_eq!(p[0][0].text, "a");
+        assert_eq!(p[0][0].options["color"], "FF0000");
+        assert_eq!(p[0][1].text, "b");
+        assert_eq!(p[0][1].soft_break_before, Some(true));
+        assert_eq!(p[0][1].options["color"], "FF0000");
     }
 }

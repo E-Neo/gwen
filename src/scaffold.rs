@@ -542,8 +542,12 @@ treatment as slide text):
 | `**bold**`          | bold run                                      |
 | `` `code` ``        | plain run                                     |
 | `[text](url)`       | run with a hyperlink                          |
-| single `\n`         | soft line break                               |
-| blank line (`\n\n`) | new paragraph                                 |
+| `\n` / `<br>`      | line break                                     |
+| `\n\n`             | new paragraph                                 |
+
+`<br>` is a hard line break: each one adds a line, so `a<br><br>b` renders a
+blank line between `a` and `b`. Soft breaks (`\n`) are collapsible - they
+guarantee a line break but don't stack, so `a\n<br>\nb` is one line break.
 
 `- item` / `1. item` markdown lists become bulleted paragraphs; an item's
 indent level equals its nesting depth (top-level 0, nested = parent + 1).

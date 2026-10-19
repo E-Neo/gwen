@@ -254,11 +254,13 @@ for slides **and** masters/placeholders alike:
 | `**bold**`          | bold run                                        |
 | `` `code` ``        | plain run                                     |
 | `[text](url)`       | run with a hyperlink                            |
-| single `\n`         | soft line break                                 |
-| blank line (`\n\n`) | new paragraph                                   |
+| `\n` / `<br>`      | line break                                     |
+| `\n\n`             | new paragraph                                   |
 
-A single `\n` becomes a soft line break (pptxgenjs `softBreakBefore`); a blank
-line starts a new paragraph. `  \n` (a hard break) behaves like a soft break.
+A `\n` or `<br>` is a line break (pptxgenjs `softBreakBefore`); a blank
+line starts a new paragraph. Hard breaks stack: `a<br><br>b` renders a blank
+line between `a` and `b`, while `a\n<br>\nb` collapses to one line break
+(soft breaks are collapsible, `<br>`s are not).
 
 A `<span class="name">` applies a `[styles.named.name]` to the runs it wraps -
 e.g. `black with <span class="red">**bold and red**</span>` colours that run
