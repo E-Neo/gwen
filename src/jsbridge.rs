@@ -84,6 +84,41 @@ struct CapturedFile {
     base64: bool,
 }
 
+/// Turn a `sldNum` placeholder into a locked, non-placeholder slide-number
+/// field. The `<p:ph>` is dropped so PowerPoint's per-slide "Insert -> Slide
+/// Number" toggle can't hide the number, `<a:spLocks>` is tightened so the
+/// shape can't be selected, moved, resized, or its text edited, and the
+/// `<a:fld type="slidenum">` is preserved so the number still updates per
+/// slide. Applied to pptxgenjs's deterministic output; slides without a
+/// slide-number placeholder are returned unchanged.
+fn lock_slide_numbers(xml: &str) -> String {
+    let mut out = xml.to_string();
+    while let Some(ph_start) = out.find("<p:ph type=\"sldNum\"") {
+        let Some(rel) = out[ph_start..].find("/>") else {
+            break;
+        };
+        let ph_end = ph_start + rel + 2;
+        // The lock and placeholder live in the shape's `<p:nvSpPr>`.
+        let Some(nv_start) = out[..ph_start].rfind("<p:nvSpPr>") else {
+            break;
+        };
+        let Some(nv_rel) = out[nv_start..].find("</p:nvSpPr>") else {
+            break;
+        };
+        let nv_end = nv_start + nv_rel;
+        let mut nvsp = out[nv_start..nv_end].to_string();
+        // Remove the placeholder first (indices were computed on the original
+        // string); the lock upgrade after is a pure string match.
+        nvsp.replace_range(ph_start - nv_start..ph_end - nv_start, "");
+        nvsp = nvsp.replace(
+            "<a:spLocks noGrp=\"1\"/>",
+            "<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>",
+        );
+        out.replace_range(nv_start..nv_end, &nvsp);
+    }
+    out
+}
+
 /// Render a deck from a spec JSON string (see `render::spec`) and return the
 /// `.pptx` bytes. The spec is plain data - it is `JSON.parse`d and passed to
 /// pptxgenjs objects; nothing from it is ever evaluated as code.
@@ -148,6 +183,10 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let lock_numbers = serde_json::from_str::<serde_json::Value>(spec_json)
+        .ok()
+        .and_then(|v| v.get("lockSlideNumbers").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
     for part in parts {
         if !seen.insert(part.name.clone()) {
             continue;
@@ -164,6 +203,9 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
             Some(data) if part.base64 => base64::engine::general_purpose::STANDARD
                 .decode(data.trim())
                 .map_err(|e| miette::miette!("part `{}` has invalid base64: {e}", part.name))?,
+            Some(data) if lock_numbers && data.contains("<p:ph type=\"sldNum\"") => {
+                lock_slide_numbers(&data).into_bytes()
+            }
             Some(data) => data.into_bytes(),
             None => Vec::new(),
         };
@@ -203,5 +245,24 @@ mod tests {
         let bytes = render(spec).unwrap();
         assert_eq!(&bytes[0..2], b"PK", "output must be a zip");
         assert!(bytes.len() > 100, "deck is unexpectedly tiny");
+    }
+
+    #[test]
+    fn lock_slide_numbers_removes_placeholder_and_locks() {
+        let xml = r#"<p:sp> <p:nvSpPr>  <p:cNvPr id="25" name="Slide Number Placeholder 0"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>  <p:nvPr><p:ph type="sldNum" sz="quarter" idx="4294967295"/></p:nvPr> </p:nvSpPr> <p:spPr><a:xfrm>..</a:xfrm></p:spPr><p:txBody><a:p><a:fld id="{ABC}" type="slidenum"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>"#;
+        let out = lock_slide_numbers(xml);
+        assert!(
+            !out.contains("<p:ph type=\"sldNum\""),
+            "placeholder removed"
+        );
+        assert!(
+            out.contains("<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>"),
+            "locks tightened: {out}"
+        );
+        assert!(out.contains("type=\"slidenum\""), "field kept");
+        assert!(out.contains("<p:txBody>"), "shape body kept");
+        // Unrelated XML (no slide number) is untouched.
+        let plain = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\"/></p:nvSpPr></p:sp>";
+        assert_eq!(lock_slide_numbers(plain), plain);
     }
 }

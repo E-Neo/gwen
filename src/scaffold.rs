@@ -476,6 +476,9 @@ background = { color = "FFFFFF" }
 margin = 0.5                       # inches/EMU/array
 slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
                  font_size = 12, color = "999999", align = "right" }
+# Add `locked = true` to bake the number into every slide as a locked,
+# non-placeholder field: not hideable per-slide, not selectable/movable/
+# resizable/editable in PowerPoint, still renumbering per slide.
 
 [[shapes]]
 type = "rect"                       # rect | line | text | image | chart | placeholder

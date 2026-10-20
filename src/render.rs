@@ -30,7 +30,7 @@ const SHAPE_SKIP: &[&str] = &[
 /// The typed paragraph keys outside the option map.
 const PARA_SKIP: &[&str] = &["text"];
 /// The typed slide-number keys outside the option map.
-const SLIDE_NUMBER_SKIP: &[&str] = &["x", "y", "w", "h"];
+const SLIDE_NUMBER_SKIP: &[&str] = &["x", "y", "w", "h", "locked"];
 
 /// A parsed deck file backed by a `toml_edit` document, so validation errors
 /// can point at the exact `path:line:col` in the source TOML.
@@ -154,7 +154,7 @@ pub fn spec_json(project: &Project) -> Result<String> {
     validate_styles_located(&main_src)?;
     validate_styles(main_)?;
 
-    let masters = load_masters(project, width, height, main_)?;
+    let (masters, lock_slide_numbers) = load_masters(project, width, height, main_)?;
     let sections = resolve_sections(project)?;
     let slides = build_sections(project, &sections, main_, width, height)?;
 
@@ -165,6 +165,7 @@ pub fn spec_json(project: &Project) -> Result<String> {
         "minorFont": main_.theme.minor_font,
         "masters": masters,
         "sections": slides,
+        "lockSlideNumbers": lock_slide_numbers,
     });
     serde_json::to_string(&out).map_err(|e| miette!("cannot serialise spec: {e}"))
 }
@@ -248,7 +249,12 @@ fn validate_source_bucket(ctx: Ctx, table: &Table, src: &opts::Src, where_: &str
     opts::validate_list_markers_edit(table, src, where_)
 }
 
-fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Result<Vec<Value>> {
+fn load_masters(
+    project: &Project,
+    width: i64,
+    height: i64,
+    main: &Main,
+) -> Result<(Vec<Value>, bool)> {
     let dir = project.dir.join("masters");
     let mut files: Vec<_> = if dir.is_dir() {
         std::fs::read_dir(&dir)
@@ -265,6 +271,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
     files.sort_by_key(|e| e.file_name());
 
     let mut out = Vec::new();
+    let mut any_locked = false;
     for entry in files {
         let stem = entry
             .path()
@@ -387,13 +394,14 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             }
             objects.push(Value::Object(out));
         }
-        let slide_number = match &master.slide_number {
+        let (slide_number, locked) = match &master.slide_number {
             Some(sn) => {
                 let table = file_src.table_of("slide_number");
                 slide_number_value(sn, width, height, &stem, &src, table.as_ref())?
             }
-            None => Value::Null,
+            None => (Value::Null, false),
         };
+        any_locked |= locked;
         out.push(json!({
             "name": stem,
             "background": normalize_background(&master.background, "master")?,
@@ -402,7 +410,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             "objects": objects,
         }));
     }
-    Ok(out)
+    Ok((out, any_locked))
 }
 
 /// Validate placeholder options on a master shape and rewrite `ph_type` to the
@@ -437,7 +445,10 @@ fn placeholder_opts(opts: &mut toml::Value, master: &str) -> Result<()> {
     Ok(())
 }
 
-/// Convert a master `slide_number` into inches + camelCase options for `defineSlideMaster`.
+/// Convert a master `slide_number` into inches + camelCase options for
+/// `defineSlideMaster`. `locked` is a gwen-owned key stripped before passing
+/// the rest to pptxgenjs; it reports whether the number should be baked into
+/// each slide as a locked, non-placeholder field.
 fn slide_number_value(
     sn: &SlideNumber,
     width: i64,
@@ -445,15 +456,27 @@ fn slide_number_value(
     master: &str,
     src: &opts::Src,
     table: Option<&Table>,
-) -> Result<Value> {
+) -> Result<(Value, bool)> {
     let where_ = format!("master `{master}` slide_number");
     if let Some(table) = table {
         opts::validate_source(Ctx::Text, table, src, &where_, SLIDE_NUMBER_SKIP)?;
     }
-    if !sn.opts.is_empty() {
-        opts::validate_ctx(Ctx::Text, &toml::Value::Table(sn.opts.clone()), &where_)?;
+    let mut sn_opts = sn.opts.clone();
+    let mut locked = false;
+    if let Some(value) = sn_opts.remove("locked") {
+        locked = match value {
+            toml::Value::Boolean(b) => b,
+            other => {
+                return Err(miette!(
+                    "master `{master}` slide_number: `locked` must be a boolean, got `{other}`"
+                ));
+            }
+        };
     }
-    let mut opts = toml::Value::Table(sn.opts.clone());
+    if !sn_opts.is_empty() {
+        opts::validate_ctx(Ctx::Text, &toml::Value::Table(sn_opts.clone()), &where_)?;
+    }
+    let mut opts = toml::Value::Table(sn_opts);
     opts::finalize_opts(Ctx::Text, &mut opts)?;
     let mut out = Map::new();
     out.insert("x".into(), json!(geo(&sn.x, width, "x")?));
@@ -464,7 +487,7 @@ fn slide_number_value(
     for (k, v) in opts.as_object().unwrap() {
         out.insert(k.clone(), v.clone());
     }
-    Ok(Value::Object(out))
+    Ok((Value::Object(out), locked))
 }
 
 fn build_sections(

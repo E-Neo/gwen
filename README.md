@@ -151,6 +151,11 @@ margin = 0.5                        # inches (EMU/unit strings/arrays also OK)
 slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
                  font_size = 12, color = "999999", align = "right" }
 
+# Add `locked = true` to bake the number into every slide as a locked,
+# non-placeholder field: PowerPoint can't hide it per-slide, and it can't be
+# selected, moved, resized, or its text edited. It still renumbers per slide.
+# slide_number = { ..., locked = true }
+
 [[shapes]]
 type = "rect"       # rect | line | text | image | chart | placeholder
 x = 0

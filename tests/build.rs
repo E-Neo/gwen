@@ -677,6 +677,67 @@ src = "media/logo.svg"
 }
 
 #[test]
+fn locked_slide_number_is_baked_and_locked() {
+    let dir = tmp("locked-num");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "locked deck"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[[sections]]
+title = "Intro"
+slides = ["one.toml"]
+"##,
+    );
+    write(
+        &dir.join("masters").join("brand.toml"),
+        r##"slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in", font_size = 12, locked = true }
+"##,
+    );
+    write(&dir.join("slides").join("one.toml"), "master = \"brand\"\n");
+
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+    let xml = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
+    assert!(
+        !xml.contains("<p:ph type=\"sldNum\""),
+        "placeholder type dropped: {xml}"
+    );
+    assert!(
+        xml.contains(
+            "<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>"
+        ),
+        "shape fully locked: {xml}"
+    );
+    assert!(
+        xml.contains("type=\"slidenum\""),
+        "the number still updates per slide: {xml}"
+    );
+}
+
+#[test]
+fn slide_number_stays_a_placeholder_by_default() {
+    let dir = sample_project("slnum-placeholder");
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+    let xml = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
+    assert!(
+        xml.contains("<p:ph type=\"sldNum\""),
+        "default slide_number keeps the editable placeholder: {xml}"
+    );
+    assert!(
+        !xml.contains("noTextEdit"),
+        "no lock applied without `locked = true`: {xml}"
+    );
+}
+
+#[test]
 fn gwen_new_scaffolds_a_buildable_project() {
     let dir = tmp("scaffold");
     let _ = std::fs::remove_dir_all(&dir);
