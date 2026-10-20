@@ -480,9 +480,12 @@ background = { color = "FFFFFF" }
 margin = 0.5                       # inches/EMU/array
 slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
                  font_size = 12, color = "999999", align = "right" }
-# Add `locked = true` to bake the number into every slide as a locked,
-# non-placeholder field: not hideable per-slide, not selectable/movable/
-# resizable/editable in PowerPoint, still renumbering per slide.
+# Add `locked = true` to keep the number a standard auto-updating slide-number
+# placeholder whose shape is locked on the rendered slides (not selectable/
+# movable/resizable/editable in PowerPoint); the master's layout stays editable
+# in Slide Master view. `slide_number` is per-master: each master's style
+# applies to its own slides, and `locked` locks only that master's rendered
+# slides.
 
 [[shapes]]
 type = "rect"                       # rect | line | text | image | chart | placeholder

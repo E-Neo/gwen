@@ -154,7 +154,7 @@ pub fn spec_json(project: &Project) -> Result<String> {
     validate_styles_located(&main_src)?;
     validate_styles(main_)?;
 
-    let (masters, lock_slide_numbers) = load_masters(project, width, height, main_)?;
+    let masters = load_masters(project, width, height, main_)?;
     let sections = resolve_sections(project)?;
     let slides = build_sections(project, &sections, main_, width, height)?;
 
@@ -165,7 +165,6 @@ pub fn spec_json(project: &Project) -> Result<String> {
         "minorFont": main_.theme.minor_font,
         "masters": masters,
         "sections": slides,
-        "lockSlideNumbers": lock_slide_numbers,
     });
     serde_json::to_string(&out).map_err(|e| miette!("cannot serialise spec: {e}"))
 }
@@ -249,12 +248,7 @@ fn validate_source_bucket(ctx: Ctx, table: &Table, src: &opts::Src, where_: &str
     opts::validate_list_markers_edit(table, src, where_)
 }
 
-fn load_masters(
-    project: &Project,
-    width: i64,
-    height: i64,
-    main: &Main,
-) -> Result<(Vec<Value>, bool)> {
+fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Result<Vec<Value>> {
     let dir = project.dir.join("masters");
     let mut files: Vec<_> = if dir.is_dir() {
         std::fs::read_dir(&dir)
@@ -271,7 +265,6 @@ fn load_masters(
     files.sort_by_key(|e| e.file_name());
 
     let mut out = Vec::new();
-    let mut any_locked = false;
     for entry in files {
         let stem = entry
             .path()
@@ -397,14 +390,13 @@ fn load_masters(
             }
             objects.push(Value::Object(out));
         }
-        let (slide_number, locked) = match &master.slide_number {
+        let slide_number = match &master.slide_number {
             Some(sn) => {
                 let table = file_src.table_of("slide_number");
                 slide_number_value(sn, width, height, &stem, &src, table.as_ref())?
             }
-            None => (Value::Null, false),
+            None => Value::Null,
         };
-        any_locked |= locked;
         out.push(json!({
             "name": stem,
             "background": normalize_background(&master.background, "master")?,
@@ -413,7 +405,7 @@ fn load_masters(
             "objects": objects,
         }));
     }
-    Ok((out, any_locked))
+    Ok(out)
 }
 
 /// Validate placeholder options on a master shape and rewrite `ph_type` to the
@@ -449,9 +441,10 @@ fn placeholder_opts(opts: &mut toml::Value, master: &str) -> Result<()> {
 }
 
 /// Convert a master `slide_number` into inches + camelCase options for
-/// `defineSlideMaster`. `locked` is a gwen-owned key stripped before passing
-/// the rest to pptxgenjs; it reports whether the number should be baked into
-/// each slide as a locked, non-placeholder field.
+/// `defineSlideMaster`. `locked` is a gwen-owned key that never reaches
+/// pptxgenjs; it marks whether the number should be locked (it rides in the
+/// spec's `slideNumber` object, which the host reads to pick which parts to
+/// lock).
 fn slide_number_value(
     sn: &SlideNumber,
     width: i64,
@@ -459,7 +452,7 @@ fn slide_number_value(
     master: &str,
     src: &opts::Src,
     table: Option<&Table>,
-) -> Result<(Value, bool)> {
+) -> Result<Value> {
     let where_ = format!("master `{master}` slide_number");
     if let Some(table) = table {
         opts::validate_source(Ctx::Text, table, src, &where_, SLIDE_NUMBER_SKIP)?;
@@ -490,7 +483,8 @@ fn slide_number_value(
     for (k, v) in opts.as_object().unwrap() {
         out.insert(k.clone(), v.clone());
     }
-    Ok((Value::Object(out), locked))
+    out.insert("locked".into(), json!(locked));
+    Ok(Value::Object(out))
 }
 
 fn build_sections(

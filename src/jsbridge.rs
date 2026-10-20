@@ -84,21 +84,18 @@ struct CapturedFile {
     base64: bool,
 }
 
-/// Turn a `sldNum` placeholder into a locked, non-placeholder slide-number
-/// field. The `<p:ph>` is dropped so PowerPoint's per-slide "Insert -> Slide
-/// Number" toggle can't hide the number, `<a:spLocks>` is tightened so the
-/// shape can't be selected, moved, resized, or its text edited, and the
-/// `<a:fld type="slidenum">` is preserved so the number still updates per
-/// slide. Applied to pptxgenjs's deterministic output; slides without a
-/// slide-number placeholder are returned unchanged.
+/// Lock a `sldNum` slide-number shape: the `<a:spLocks>` is tightened so the
+/// shape can't be selected, moved, resized, or its text edited. The `<p:ph
+/// type="sldNum">` placeholder and its `<a:fld type="slidenum">` are kept, so
+/// the number renders and auto-updates exactly like a normal slide number.
+/// Applied to pptxgenjs's deterministic output; shapes without a slide-number
+/// placeholder are returned unchanged.
 fn lock_slide_numbers(xml: &str) -> String {
     let mut out = xml.to_string();
-    while let Some(ph_start) = out.find("<p:ph type=\"sldNum\"") {
-        let Some(rel) = out[ph_start..].find("/>") else {
-            break;
-        };
-        let ph_end = ph_start + rel + 2;
-        // The lock and placeholder live in the shape's `<p:nvSpPr>`.
+    let mut pos = 0;
+    while let Some(ph_rel) = out[pos..].find("<p:ph type=\"sldNum\"") {
+        let ph_start = pos + ph_rel;
+        // The lock lives in the same shape's `<p:nvSpPr>` as the placeholder.
         let Some(nv_start) = out[..ph_start].rfind("<p:nvSpPr>") else {
             break;
         };
@@ -106,15 +103,86 @@ fn lock_slide_numbers(xml: &str) -> String {
             break;
         };
         let nv_end = nv_start + nv_rel;
-        let mut nvsp = out[nv_start..nv_end].to_string();
-        // Remove the placeholder first (indices were computed on the original
-        // string); the lock upgrade after is a pure string match.
-        nvsp.replace_range(ph_start - nv_start..ph_end - nv_start, "");
-        nvsp = nvsp.replace(
+        let nvsp = out[nv_start..nv_end].replace(
             "<a:spLocks noGrp=\"1\"/>",
             "<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>",
         );
         out.replace_range(nv_start..nv_end, &nvsp);
+        // Continue past this shape so the placeholder we kept isn't re-found.
+        let after = nv_start + nvsp.len();
+        let Some(close_rel) = out[after..].find("</p:sp>") else {
+            break;
+        };
+        pos = after + close_rel + "</p:sp>".len();
+    }
+    out
+}
+
+/// Drop the slide-number shape from the shared slide master part.
+///
+/// When any master defines a `slide_number`, pptxgenjs copies its props onto
+/// the single shared slide master (`masterSlide._slideNumberProps`), so the
+/// master XML carries a slide-number shape that PowerPoint renders on EVERY
+/// slide, regardless of which layout a slide uses - and, with several masters,
+/// with the first defining master's style. The number belongs to the layout
+/// and slides of each master that defines it, so this leaked master-level shape
+/// is removed (`name="Slide Number Placeholder 0"` is pptxgenjs's fixed shape
+/// name). A no-op when the master carries no slide number.
+fn strip_master_slide_number(xml: &str) -> String {
+    let anchor = "name=\"Slide Number Placeholder 0\"";
+    let Some(at) = xml.find(anchor) else {
+        return xml.to_string();
+    };
+    let Some(sp) = xml[..at].rfind("<p:sp>") else {
+        return xml.to_string();
+    };
+    let Some(rel) = xml[sp..].find("</p:sp>") else {
+        return xml.to_string();
+    };
+    let end = sp + rel + "</p:sp>".len();
+    format!("{}{}", &xml[..sp], &xml[end..])
+}
+
+/// The captured slide part names whose slide numbers should be locked,
+/// derived from the spec: a master with `slideNumber.locked` locks every slide
+/// that names it (`ppt/slides/slideN.xml`, in spec order). Layouts are not
+/// locked, so the number stays editable in Slide Master view.
+fn lock_targets(spec_json: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(spec) = serde_json::from_str::<serde_json::Value>(spec_json) else {
+        return out;
+    };
+    let Some(masters) = spec.get("masters").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    let locked: Vec<bool> = masters
+        .iter()
+        .map(|m| {
+            m.get("slideNumber")
+                .and_then(|v| v.get("locked"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .collect();
+    let Some(sections) = spec.get("sections").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    let mut n = 0usize;
+    for section in sections {
+        let Some(slides) = section.get("slides").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for slide in slides {
+            n += 1;
+            let master = slide.get("master").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(i) = masters
+                .iter()
+                .position(|m| m.get("name").and_then(|v| v.as_str()) == Some(master))
+                && locked[i]
+            {
+                out.insert(format!("ppt/slides/slide{n}.xml"));
+            }
+        }
     }
     out
 }
@@ -183,10 +251,7 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let lock_numbers = serde_json::from_str::<serde_json::Value>(spec_json)
-        .ok()
-        .and_then(|v| v.get("lockSlideNumbers").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
+    let lock_parts = lock_targets(spec_json);
     for part in parts {
         if !seen.insert(part.name.clone()) {
             continue;
@@ -203,10 +268,18 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
             Some(data) if part.base64 => base64::engine::general_purpose::STANDARD
                 .decode(data.trim())
                 .map_err(|e| miette::miette!("part `{}` has invalid base64: {e}", part.name))?,
-            Some(data) if lock_numbers && data.contains("<p:ph type=\"sldNum\"") => {
-                lock_slide_numbers(&data).into_bytes()
+            Some(data) => {
+                let mut xml = data;
+                // The shared master would leak one master's slide number onto
+                // every slide; drop that shape (a no-op without one).
+                if part.name == "ppt/slideMasters/slideMaster1.xml" {
+                    xml = strip_master_slide_number(&xml);
+                }
+                if lock_parts.contains(&part.name) && xml.contains("<p:ph type=\"sldNum\"") {
+                    xml = lock_slide_numbers(&xml);
+                }
+                xml.into_bytes()
             }
-            Some(data) => data.into_bytes(),
             None => Vec::new(),
         };
         entries.push(Entry {
@@ -248,12 +321,12 @@ mod tests {
     }
 
     #[test]
-    fn lock_slide_numbers_removes_placeholder_and_locks() {
+    fn lock_slide_numbers_keeps_placeholder_and_locks() {
         let xml = r#"<p:sp> <p:nvSpPr>  <p:cNvPr id="25" name="Slide Number Placeholder 0"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>  <p:nvPr><p:ph type="sldNum" sz="quarter" idx="4294967295"/></p:nvPr> </p:nvSpPr> <p:spPr><a:xfrm>..</a:xfrm></p:spPr><p:txBody><a:p><a:fld id="{ABC}" type="slidenum"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>"#;
         let out = lock_slide_numbers(xml);
         assert!(
-            !out.contains("<p:ph type=\"sldNum\""),
-            "placeholder removed"
+            out.contains("<p:ph type=\"sldNum\""),
+            "placeholder kept (a normal slide number): {out}"
         );
         assert!(
             out.contains("<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>"),
@@ -261,8 +334,45 @@ mod tests {
         );
         assert!(out.contains("type=\"slidenum\""), "field kept");
         assert!(out.contains("<p:txBody>"), "shape body kept");
-        // Unrelated XML (no slide number) is untouched.
-        let plain = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\"/></p:nvSpPr></p:sp>";
+        // A shape with the same lock but no slide number is not touched.
+        let plain = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr></p:nvPr></p:nvSpPr></p:sp>";
         assert_eq!(lock_slide_numbers(plain), plain);
+    }
+
+    #[test]
+    fn strip_master_slide_number_removes_only_the_number_shape() {
+        let xml = r#"<p:spTree><p:nvGrpSpPr>..</p:nvGrpSpPr><p:grpSpPr>..</p:grpSpPr><p:sp> <p:nvSpPr>  <p:cNvPr id="25" name="Slide Number Placeholder 0"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>  <p:nvPr><p:ph type="sldNum" sz="quarter" idx="4294967295"/></p:nvPr> </p:nvSpPr> <p:spPr>..</p:spPr><p:txBody><a:p><a:fld type="slidenum"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp><p:sp>other</p:sp></p:spTree>"#;
+        let out = strip_master_slide_number(xml);
+        assert!(
+            !out.contains("Slide Number Placeholder 0"),
+            "leaked number shape removed: {out}"
+        );
+        assert!(out.contains("<p:sp>other</p:sp>"), "other shapes kept");
+        // No number on the master -> unchanged.
+        let plain = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\"/></p:nvSpPr></p:sp>";
+        assert_eq!(strip_master_slide_number(plain), plain);
+    }
+
+    #[test]
+    fn lock_targets_picks_locked_masters_and_their_slides() {
+        let spec = r#"{
+            "masters": [
+                {"name": "amaster", "slideNumber": {"x": 0, "y": 0, "w": 1, "h": 1, "locked": true}},
+                {"name": "bmaster", "slideNumber": {"x": 1, "y": 1, "w": 1, "h": 1, "locked": false}},
+                {"name": "cmaster", "slideNumber": {"x": 2, "y": 2, "w": 1, "h": 1, "locked": true}}
+            ],
+            "sections": [
+                {"title": "a", "slides": [{"master": "amaster"}, {"master": "bmaster"}]},
+                {"title": "c", "slides": [{"master": "cmaster"}]}
+            ]
+        }"#;
+        let targets = lock_targets(spec);
+        // Only slides of locked masters; layouts stay editable in master view.
+        assert!(!targets.contains("ppt/slideLayouts/slideLayout2.xml"));
+        assert!(!targets.contains("ppt/slideLayouts/slideLayout3.xml"));
+        assert!(!targets.contains("ppt/slideLayouts/slideLayout4.xml"));
+        assert!(targets.contains("ppt/slides/slide1.xml"));
+        assert!(!targets.contains("ppt/slides/slide2.xml"));
+        assert!(targets.contains("ppt/slides/slide3.xml"));
     }
 }

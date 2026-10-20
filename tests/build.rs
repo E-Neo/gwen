@@ -706,8 +706,8 @@ slides = ["one.toml"]
     let bytes = std::fs::read(&deck).unwrap();
     let xml = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
     assert!(
-        !xml.contains("<p:ph type=\"sldNum\""),
-        "placeholder type dropped: {xml}"
+        xml.contains("<p:ph type=\"sldNum\""),
+        "kept as a real slide-number placeholder: {xml}"
     );
     assert!(
         xml.contains(
@@ -718,6 +718,88 @@ slides = ["one.toml"]
     assert!(
         xml.contains("type=\"slidenum\""),
         "the number still updates per slide: {xml}"
+    );
+    // The leaked master-level copy is stripped so no other slide inherits it.
+    let master =
+        String::from_utf8(zip_member(&bytes, "ppt/slideMasters/slideMaster1.xml").unwrap())
+            .unwrap();
+    assert!(
+        !master.contains("Slide Number Placeholder 0"),
+        "no leaked number on the shared master: {master}"
+    );
+}
+
+#[test]
+fn slide_numbers_stay_per_master() {
+    let dir = tmp("per-master-slnum");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "two masters"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[[sections]]
+title = "Intro"
+slides = ["a.toml", "b.toml"]
+"##,
+    );
+    write(
+        &dir.join("masters").join("amaster.toml"),
+        r##"slide_number = { x = "1in", y = "1in", w = "1in", h = "0.3in", font_size = 12, locked = true }
+"##,
+    );
+    write(
+        &dir.join("masters").join("bmaster.toml"),
+        r##"slide_number = { x = "6in", y = "6in", w = "1in", h = "0.3in", font_size = 24, color = "FF0000" }
+"##,
+    );
+    write(&dir.join("slides").join("a.toml"), "master = \"amaster\"\n");
+    write(&dir.join("slides").join("b.toml"), "master = \"bmaster\"\n");
+
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+
+    // Master A's slide: its own geometry + font, and locked.
+    let a = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
+    let a_num = &a[a.find("Slide Number Placeholder").unwrap()..];
+    assert!(
+        a_num.contains("<a:off x=\"914400\" y=\"914400\""),
+        "A's x/y: {a_num}"
+    );
+    assert!(a_num.contains("sz=\"1200\""), "A's font size: {a_num}");
+    assert!(
+        a_num.contains("noTextEdit=\"1\""),
+        "A is locked because A is locked: {a_num}"
+    );
+    // Master A's layout stays editable in Slide Master view.
+    let a_layout =
+        String::from_utf8(zip_member(&bytes, "ppt/slideLayouts/slideLayout2.xml").unwrap())
+            .unwrap();
+    assert!(
+        !a_layout.contains("noTextEdit"),
+        "A's layout is not locked (editable in master view): {a_layout}"
+    );
+    // Master B's slide: its own geometry + font + color, not locked.
+    let b = String::from_utf8(zip_member(&bytes, "ppt/slides/slide2.xml").unwrap()).unwrap();
+    let b_num = &b[b.find("Slide Number Placeholder").unwrap()..];
+    assert!(
+        b_num.contains("<a:off x=\"5486400\" y=\"5486400\""),
+        "B's x/y: {b_num}"
+    );
+    assert!(b_num.contains("sz=\"2400\""), "B's font size: {b_num}");
+    assert!(!b_num.contains("noTextEdit"), "B is not locked: {b_num}");
+    // The shared master leaks neither master's style.
+    let master =
+        String::from_utf8(zip_member(&bytes, "ppt/slideMasters/slideMaster1.xml").unwrap())
+            .unwrap();
+    assert!(
+        !master.contains("Slide Number Placeholder 0"),
+        "no number on the shared master: {master}"
     );
 }
 
