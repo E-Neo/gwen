@@ -227,6 +227,32 @@ fn zip_member(bytes: &[u8], want: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// The member names of a zip produced by `gwen::zip`, in central-directory
+/// order.
+fn zip_names(bytes: &[u8]) -> Vec<String> {
+    let Some(eocd_at) = bytes.windows(4).rposition(|w| w == b"PK\x05\x06") else {
+        return Vec::new();
+    };
+    let cd_offset =
+        u32::from_le_bytes(bytes[eocd_at + 16..eocd_at + 20].try_into().unwrap()) as usize;
+    let mut pos = cd_offset;
+    let mut names = Vec::new();
+    loop {
+        if pos + 46 > bytes.len() || &bytes[pos..pos + 4] != b"PK\x01\x02" {
+            return names;
+        }
+        let name_len = u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().unwrap()) as usize;
+        let comment_len =
+            u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().unwrap()) as usize;
+        let Ok(name) = std::str::from_utf8(&bytes[pos + 46..pos + 46 + name_len]) else {
+            return names;
+        };
+        names.push(name.to_string());
+        pos += 46 + name_len + extra_len + comment_len;
+    }
+}
+
 /// Parse `p14:section` blocks out of `presentation.xml`.
 fn sections(xml: &str) -> Vec<(String, String, usize)> {
     fn between(s: &str, open: &str, close: char) -> Option<String> {
@@ -539,6 +565,115 @@ fn unknown_placeholder_fill_is_reported() {
         format!("{err:?}").contains("placeholder `Nope`"),
         "expected a placeholder-fill error, got: {err:?}"
     );
+}
+
+#[test]
+fn svg_images_embed_vector_and_raster_preview() {
+    let dir = tmp("svg-deck");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "svg deck"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[[sections]]
+title = "Intro"
+slides = ["one.toml"]
+"##,
+    );
+    write(
+        &dir.join("masters").join("brand.toml"),
+        r##"[[shapes]]
+type = "placeholder"
+ph_type = "title"
+name = "Title"
+x = "0.8in"
+y = "0.25in"
+w = "11.7in"
+h = "0.66in"
+
+[[shapes]]
+type = "image"
+x = "11in"
+y = "0.1in"
+w = "1in"
+h = "0.5in"
+src = "media/logo.svg"
+"##,
+    );
+    write(
+        &dir.join("slides").join("one.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "text"
+placeholder = "Title"
+text = "Hello"
+
+[[shapes]]
+type = "image"
+x = "2in"
+y = "2in"
+w = "4in"
+h = "2in"
+src = "media/logo.svg"
+"##,
+    );
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    std::fs::write(
+        dir.join("media").join("logo.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="200" height="100" fill="#C7000A"/></svg>"##,
+    )
+    .unwrap();
+
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+
+    // The deck embeds the SVG as a real vector part *and* a raster preview.
+    let media: Vec<String> = zip_names(&bytes)
+        .into_iter()
+        .filter(|n| n.starts_with("ppt/media/"))
+        .collect();
+    let svg_part = media
+        .iter()
+        .find(|n| n.ends_with(".svg"))
+        .expect("a vector SVG media part");
+    let png_part = media
+        .iter()
+        .find(|n| n.ends_with(".png"))
+        .expect("a rasterized PNG preview part");
+    let svg_bytes = zip_member(&bytes, svg_part).unwrap();
+    assert!(
+        String::from_utf8_lossy(&svg_bytes).contains("viewBox=\"0 0 200 100\""),
+        "the svg part holds the real vector data"
+    );
+    let png_bytes = zip_member(&bytes, png_part).unwrap();
+    assert_eq!(
+        &png_bytes[0..8],
+        &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+        "the preview is a real PNG"
+    );
+
+    // Slide and master layout pictures reference the SVG natively.
+    for (part, label) in [
+        ("ppt/slides/slide1.xml", "slide"),
+        ("ppt/slideLayouts/slideLayout2.xml", "master layout"),
+    ] {
+        let xml = String::from_utf8(zip_member(&bytes, part).unwrap()).unwrap();
+        assert!(
+            xml.contains("<asvg:svgBlip"),
+            "{label} references the vector SVG: {xml}"
+        );
+        assert!(
+            xml.contains("<a:blip r:embed="),
+            "{label} keeps the PNG fallback"
+        );
+    }
 }
 
 #[test]

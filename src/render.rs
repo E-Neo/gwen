@@ -377,9 +377,13 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             if obj.ty == "image"
                 && let Some(src) = &obj.src
             {
-                let (data, mime) = media_data(project, src)?;
+                let (data, mime, preview) =
+                    media_value(project, src, Some((w_in * 96.0, h_in * 96.0)))?;
                 out.insert("data".into(), json!(data));
                 out.insert("mime".into(), json!(mime));
+                if let Some(preview) = preview {
+                    out.insert("preview".into(), json!(preview));
+                }
             }
             objects.push(Value::Object(out));
         }
@@ -656,7 +660,10 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
         }
         Kind::Image => {
             value.insert("kind".into(), json!("image"));
-            for (k, v) in image_value(ctx.project, file, shape)?.as_object().unwrap() {
+            for (k, v) in image_value(ctx.project, file, shape, w_in, h_in)?
+                .as_object()
+                .unwrap()
+            {
                 value.insert(k.clone(), v.clone());
             }
             for (k, v) in opts.as_object().unwrap() {
@@ -836,30 +843,56 @@ fn runs_value(
 }
 
 /// Load + base64-encode a media file referenced by an image shape.
-fn image_value(project: &Project, file: &str, shape: &Shape) -> Result<Value> {
+fn image_value(
+    project: &Project,
+    file: &str,
+    shape: &Shape,
+    w_in: f64,
+    h_in: f64,
+) -> Result<Value> {
     let src = shape
         .src
         .as_deref()
         .ok_or_else(|| miette!("slide `{file}`: image shape needs `src`"))?;
-    let (data, mime) = media_data(project, src)?;
+    let (data, mime, preview) = media_value(project, src, Some((w_in * 96.0, h_in * 96.0)))?;
     let mut obj = Map::new();
     obj.insert("data".into(), json!(data));
     obj.insert("mime".into(), json!(mime));
+    if let Some(preview) = preview {
+        obj.insert("preview".into(), json!(preview));
+    }
     if !shape.opts.contains_key("sizing") {
         obj.insert("sizing".into(), json!({ "type": "contain" }));
     }
     Ok(Value::Object(obj))
 }
 
-/// Read a media file and return a `data:` URI plus its MIME type.
-fn media_data(project: &Project, src: &str) -> Result<(String, &'static str)> {
+/// Media for an image shape: the data URI handed to pptxgenjs, its MIME, and
+/// an optional rasterized PNG preview. SVG sources keep their vector data URI
+/// (pptxgenjs embeds the SVG natively, rendered via `<asvg:svgBlip>` by
+/// PowerPoint 2016+) and get a real PNG preview for older PowerPoint, which
+/// the bridge shim feeds into pptxgenjs's preview slot.
+fn media_value(
+    project: &Project,
+    src: &str,
+    target_px: Option<(f64, f64)>,
+) -> Result<(String, &'static str, Option<String>)> {
     let path = project.dir.join(src);
     let bytes =
         std::fs::read(&path).map_err(|e| miette!("cannot read image `{}`: {e}", path.display()))?;
     let mime = crate::media::mime_for(src)
         .map_err(|e| miette!("cannot read image `{}`: {e}", path.display()))?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok((format!("data:{mime};base64,{encoded}"), mime))
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let data = format!("data:{mime};base64,{encoded}");
+    let preview = if mime == "image/svg+xml" {
+        let png = crate::media::svg_to_png(&bytes, target_px)
+            .map_err(|e| miette!("cannot render image `{}`: {e}", path.display()))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        Some(format!("data:image/png;base64,{b64}"))
+    } else {
+        None
+    };
+    Ok((data, mime, preview))
 }
 
 /// Merge `[styles.<type>]` == `[styles.named.<name>]` == shape.opts (later

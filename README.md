@@ -222,6 +222,11 @@ h = "1in"
 src = "media/pixel.png"             # relative to the deck root
 ```
 
+`src` accepts `png`/`jpg`/`jpeg`/`gif`/`bmp`/`tiff` and `svg`. An SVG is embedded as a
+real vector picture (PowerPoint 2016+ renders it natively) *and* as a rasterized
+PNG preview (rendered by gwen with `resvg` at the shape's display size, so older
+PowerPoint still shows the image).
+
 `chart`, `table` and `media` shape types are recognised but not supported yet.
 
 A shape preset that carries `text` draws the shape **with** the text inside it

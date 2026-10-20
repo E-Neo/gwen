@@ -52,6 +52,7 @@
           case "kind":
           case "runs":
           case "type":
+          case "preview":
             continue;
         }
         out[k] = v;
@@ -59,6 +60,49 @@
     }
     return out;
   }
+
+  // SVG previews rasterized by gwen (Rust), keyed by the SVG data URI. The
+  // QuickJS runtime has no DOM, so pptxgenjs's `new Image` + canvas preview
+  // rasterizer can't run; feed it just enough fake DOM that it "succeeds" and
+  // returns the real preview PNG (or a 1x1 placeholder when none is given).
+  var __gwenSvgPreviews = {};
+  var __gwenLastPreview = null;
+  var __gwenPlaceholderPng =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+  function __gwenFakeImage() {
+    this.width = 1;
+    this.height = 1;
+    this.onload = null;
+    this.onerror = null;
+    var self = this;
+    Object.defineProperty(this, "src", {
+      set: function (v) {
+        self._src = v;
+        __gwenLastPreview = __gwenSvgPreviews[v] || __gwenPlaceholderPng;
+        if (self.onload) {
+          self.onload();
+        }
+      },
+    });
+  }
+  globalThis.Image = __gwenFakeImage;
+  // The fake canvas never reports `onreadystatechange`, so JSZip's microtask
+  // polyfill (initialized before this runs) keeps its setTimeout branch.
+  globalThis.document = {
+    createElement: function () {
+      return {
+        width: 0,
+        height: 0,
+        getContext: function () {
+          return { drawImage: function () {} };
+        },
+        toDataURL: function () {
+          return __gwenLastPreview;
+        },
+      };
+    },
+  };
 
   // pptxgenjs's text model: addText / master text takes a flat run list;
   // paragraph boundaries are `breakLine` run options and soft breaks are
@@ -105,6 +149,9 @@
       } else if (sh.kind === "shape") {
         slide.addShape(sh.type, optOf(sh));
       } else if (sh.kind === "image") {
+        if (sh.preview && sh.data) {
+          __gwenSvgPreviews[sh.data] = sh.preview;
+        }
         slide.addImage(optOf(sh));
       }
     }
@@ -141,6 +188,9 @@
         }
         if (o.data) {
           combined.data = o.data;
+        }
+        if (o.preview && o.data) {
+          __gwenSvgPreviews[o.data] = o.preview;
         }
         if (o.type === "text" || o.type === "placeholder") {
           // Master text/placeholder objects accept the same flat run list as

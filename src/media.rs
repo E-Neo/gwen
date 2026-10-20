@@ -212,6 +212,34 @@ fn ratio_f(w: f64, h: f64) -> Option<f64> {
     }
 }
 
+/// Rasterize an SVG to PNG bytes with `resvg` (pure Rust, offline). `target`
+/// is a desired pixel box; the SVG scales to fit inside it preserving aspect.
+/// Without a target the SVG renders at its natural size. The PNG keeps a
+/// transparent background so SVG transparency survives.
+pub fn svg_to_png(bytes: &[u8], target: Option<(f64, f64)>) -> Result<Vec<u8>, String> {
+    let mut opt = resvg::usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(bytes, &opt).map_err(|e| e.to_string())?;
+    let size = tree.size();
+    let (sw, sh) = (f64::from(size.width()), f64::from(size.height()));
+    if sw <= 0.0 || sh <= 0.0 {
+        return Err("the SVG has no usable size".into());
+    }
+    // Fit the target box (or natural size), then clamp the output dimensions
+    // to [1, 16384] so a pathological SVG can't allocate a giant pixmap.
+    let max_dim = sw.max(sh);
+    let scale = target.map_or(1.0, |(tw, th)| (tw / sw).min(th / sh));
+    let scale = scale.clamp(1.0 / max_dim, 16384.0 / max_dim);
+    let ow = (sw * scale).round().clamp(1.0, 16384.0) as u32;
+    let oh = (sh * scale).round().clamp(1.0, 16384.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(ow, oh)
+        .ok_or_else(|| format!("cannot allocate a {ow}x{oh} pixmap"))?;
+    let transform =
+        resvg::tiny_skia::Transform::from_scale(ow as f32 / sw as f32, oh as f32 / sh as f32);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    pixmap.encode_png().map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +269,23 @@ mod tests {
             Some(2.0)
         );
         assert_eq!(svg_aspect("<svg width=\"100px\"/>"), None);
+    }
+
+    #[test]
+    fn svg_to_png_renders_at_target() {
+        let svg =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="200" height="100" fill="red"/></svg>"#;
+        let png = svg_to_png(svg, Some((400.0, 400.0))).unwrap();
+        // Valid PNG header, fitted into the 400x400 box at its 2:1 aspect.
+        assert_eq!(
+            &png[0..8],
+            &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+        assert_eq!(png_aspect(&png), Some(2.0));
+        // Natural size when no target is given.
+        let png = svg_to_png(svg, None).unwrap();
+        assert_eq!(png_aspect(&png), Some(2.0));
+        // Malformed SVG is an error.
+        assert!(svg_to_png(b"<svg", None).is_err());
     }
 }
