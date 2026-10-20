@@ -1195,6 +1195,32 @@ fn ctx_parts(
     }
 }
 
+/// Drop keys the given context cannot apply, so a base style bucket such as
+/// `[styles.shape]` may carry keys that only some shape types use (text-only
+/// keys on image shapes, for instance). Accepts the same keys as
+/// `validate_ctx` plus the gwen-owned list-marker options. Style buckets are
+/// still validated up front against their own context (`validate_styles`) and
+/// a shape's own options via `validate_source`, so this filter can never hide
+/// a misspelled key.
+pub fn retain_ctx_keys(ctx: Ctx, value: &mut toml::Value) {
+    let Some(table) = value.as_table_mut() else {
+        return;
+    };
+    let (keys, _, extra) = ctx_parts(ctx);
+    let mut accept: Vec<&str> = keys.to_vec();
+    accept.extend(POSITION);
+    accept.extend(extra);
+    accept.extend(["ordered_markers", "unordered_markers"]);
+    let drop: Vec<String> = table
+        .keys()
+        .filter(|k| !accept.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for k in drop {
+        table.remove(&k);
+    }
+}
+
 /// A parsed source TOML file, used to render diagnostics that point at the
 /// exact `path:line:col` of a misconfiguration.
 pub struct Src {
@@ -1826,6 +1852,29 @@ mod tests {
         assert!(err.to_string().contains("EMU integer"));
         let err = ctx(Ctx::Text, "shape = \"rectt\"\n").unwrap_err();
         assert!(err.to_string().contains("not a known shape preset"));
+    }
+
+    #[test]
+    fn retain_ctx_keys_keeps_applicable_keys_only() {
+        let mut value = toml::from_str::<toml::Value>(
+            "align = \"left\"\n\
+             sizing = { type = \"contain\" }\n\
+             ordered_markers = [\"1.\"]\n\
+             x = 1000\n",
+        )
+        .unwrap();
+        // An image can't apply a text-only `align`, but keeps image keys,
+        // position and the gwen-owned list-marker options.
+        retain_ctx_keys(Ctx::Image, &mut value);
+        let t = value.as_table().unwrap();
+        assert!(!t.contains_key("align"));
+        assert!(t.contains_key("sizing"));
+        assert!(t.contains_key("x"));
+        assert!(t.contains_key("ordered_markers"));
+        // Text context keeps `align`.
+        let mut text = toml::from_str::<toml::Value>("align = \"left\"\n").unwrap();
+        retain_ctx_keys(Ctx::Text, &mut text);
+        assert!(text.as_table().unwrap().contains_key("align"));
     }
 
     #[test]

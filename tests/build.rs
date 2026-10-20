@@ -738,6 +738,99 @@ fn slide_number_stays_a_placeholder_by_default() {
 }
 
 #[test]
+fn base_shape_style_text_keys_do_not_break_images() {
+    let dir = tmp("shape-style-image");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "shape style"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[styles.shape]
+align = "left"
+bold = true
+
+[[sections]]
+title = "Intro"
+slides = ["one.toml"]
+"##,
+    );
+    write(
+        &dir.join("masters").join("brand.toml"),
+        r##"[[shapes]]
+type = "image"
+x = "1in"
+y = "1in"
+w = "1in"
+h = "1in"
+src = "media/pixel.png"
+"##,
+    );
+    write(
+        &dir.join("slides").join("one.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "image"
+x = "2in"
+y = "2in"
+w = "1in"
+h = "1in"
+src = "media/pixel.png"
+
+[[shapes]]
+type = "text"
+text = "hello"
+"##,
+    );
+    std::fs::create_dir_all(dir.join("media")).unwrap();
+    std::fs::write(dir.join("media").join("pixel.png"), pixel_png()).unwrap();
+
+    // Text-only base-style keys are ignored by image shapes, not errors.
+    let deck = gwen::build(&dir).unwrap();
+    let bytes = std::fs::read(&deck).unwrap();
+    let slide = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
+    // The image pic gets no `align`; the text shape still carries it.
+    let pic = &slide[slide.find("<p:pic>").unwrap()..slide.find("</p:pic>").unwrap()];
+    assert!(!pic.contains("algn="), "no alignment on an image: {pic}");
+    assert!(slide.contains("algn=\"l\""), "text alignment still applied");
+}
+
+#[test]
+fn base_shape_style_typos_still_fail() {
+    let dir = sample_project("style-typo");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "typo"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[styles.shape]
+alignment = "left"
+
+[[sections]]
+title = "Intro"
+slides = ["title.toml"]
+"##,
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("unknown style option `alignment`"),
+        "bucket typos stay errors: {err:?}"
+    );
+}
+
+#[test]
 fn gwen_new_scaffolds_a_buildable_project() {
     let dir = tmp("scaffold");
     let _ = std::fs::remove_dir_all(&dir);

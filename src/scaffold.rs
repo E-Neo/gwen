@@ -459,6 +459,10 @@ Precedence when building a shape's options:
 - `[styles.shape]` is the base for every shape; `[styles.text]` layers onto it
   for text-carrying shapes (type `text`, or a preset with a text value);
   `[styles.<type>]` layers per type id (`text`, `image`, `rect`, `ellipse`, ...).
+- A bucket may hold keys that only some shape types can apply: they take effect
+  where valid and are dropped elsewhere (an `align` in `[styles.shape]` applies
+  to text shapes but is ignored by image shapes, not an error). Buckets are
+  still validated against the union of all options, so typos never pass.
 - `[styles.named.<name>]` defines named styles. Shapes and buckets opt in with a
   `styles` key that accepts a scalar or a list, applied in order (later wins);
   named styles may reference other named styles (recursion). A reference to a

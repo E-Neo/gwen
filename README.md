@@ -112,6 +112,12 @@ for any text option the type bucket doesn't set. A `styles` reference to a
 `[styles.named.<name>]` block that doesn't exist is an error, as is a reference
 cycle.
 
+A style bucket may hold keys that only some shape types can apply - they take
+effect where valid and are ignored elsewhere. For example, an `align` in
+`[styles.shape]` applies to text shapes but is dropped (not an error) for image
+shapes. Style buckets are still validated strictly against the union of all
+options, so typos are never silently accepted.
+
 ### Style composition
 
 Named styles compose via a `styles` key on shapes and inside any bucket. The

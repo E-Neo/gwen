@@ -312,6 +312,9 @@ fn load_masters(
                 if let Some(table) = shape_tables.get(idx) {
                     opts::validate_source(ctx, table, &src, &where_, SHAPE_SKIP)?;
                 }
+                // Base buckets (`[styles.shape]`) may hold keys that only some
+                // shape types can apply; keep only what this shape accepts.
+                opts::retain_ctx_keys(ctx, &mut opts);
                 opts::validate_ctx(ctx, &opts, &where_)?;
                 opts::finalize_opts(ctx, &mut opts)?;
             }
@@ -644,6 +647,9 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
             .unwrap()
             .insert("shape".into(), toml::Value::String(canon_ty.to_string()));
     }
+    // Base buckets (`[styles.shape]`) may hold keys that only some shape types
+    // can apply; keep only what this shape accepts.
+    opts::retain_ctx_keys(octx, &mut merged);
     opts::validate_ctx(octx, &merged, &where_)?;
     opts::finalize_opts(octx, &mut merged)?;
     let opts = to_pptxgen(&merged);
