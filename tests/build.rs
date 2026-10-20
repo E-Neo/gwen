@@ -706,8 +706,8 @@ slides = ["one.toml"]
     let bytes = std::fs::read(&deck).unwrap();
     let xml = String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").unwrap()).unwrap();
     assert!(
-        xml.contains("<p:ph type=\"sldNum\""),
-        "kept as a real slide-number placeholder: {xml}"
+        !xml.contains("<p:ph type=\"sldNum\""),
+        "placeholder removed so PowerPoint honors the locks: {xml}"
     );
     assert!(
         xml.contains(
@@ -772,6 +772,10 @@ slides = ["a.toml", "b.toml"]
         "A's x/y: {a_num}"
     );
     assert!(a_num.contains("sz=\"1200\""), "A's font size: {a_num}");
+    assert!(
+        !a.contains("<p:ph type=\"sldNum\""),
+        "A's number is a plain locked shape, not a placeholder: {a_num}"
+    );
     assert!(
         a_num.contains("noTextEdit=\"1\""),
         "A is locked because A is locked: {a_num}"

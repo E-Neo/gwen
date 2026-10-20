@@ -157,10 +157,10 @@ margin = 0.5                        # inches (EMU/unit strings/arrays also OK)
 slide_number = { x = "12.2in", y = "7.1in", w = "1in", h = "0.3in",
                  font_size = 12, color = "999999", align = "right" }
 
-# Add `locked = true` to make the number a standard auto-updating slide-number
-# placeholder (renders and renumbers like a normal pptx) whose shape is locked
-# on the rendered slides: it can't be selected, moved, resized, or have its
-# text edited. The master's layout stays editable in Slide Master view.
+# Add `locked = true` to render the auto-updating number on the slides as a
+# locked, non-placeholder box (PowerPoint ignores shape locks on placeholders):
+# it can't be selected, moved, resized, or have its text edited, and it still
+# renumbers per slide. The master's layout stays editable in Slide Master view.
 # slide_number = { ..., locked = true }
 #
 # `slide_number` is per-master: each master's own style (position, font,

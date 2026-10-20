@@ -84,17 +84,23 @@ struct CapturedFile {
     base64: bool,
 }
 
-/// Lock a `sldNum` slide-number shape: the `<a:spLocks>` is tightened so the
-/// shape can't be selected, moved, resized, or its text edited. The `<p:ph
-/// type="sldNum">` placeholder and its `<a:fld type="slidenum">` are kept, so
-/// the number renders and auto-updates exactly like a normal slide number.
-/// Applied to pptxgenjs's deterministic output; shapes without a slide-number
-/// placeholder are returned unchanged.
+/// Lock a `sldNum` slide-number shape: the `<p:ph type="sldNum">` placeholder
+/// is removed (PowerPoint ignores `<a:spLocks>` on placeholders, so a
+/// placeholder number stays movable/editable on slides), `<a:spLocks>` is
+/// tightened so the resulting plain shape can't be selected, moved, resized, or
+/// have its text edited, and the `<a:fld type="slidenum">` is kept so the number
+/// still renders and auto-updates per slide. Applied to pptxgenjs's
+/// deterministic output; shapes without a slide-number placeholder are returned
+/// unchanged.
 fn lock_slide_numbers(xml: &str) -> String {
     let mut out = xml.to_string();
     let mut pos = 0;
     while let Some(ph_rel) = out[pos..].find("<p:ph type=\"sldNum\"") {
         let ph_start = pos + ph_rel;
+        let Some(ph_end_rel) = out[ph_start..].find("/>") else {
+            break;
+        };
+        let ph_end = ph_start + ph_end_rel + 2;
         // The lock lives in the same shape's `<p:nvSpPr>` as the placeholder.
         let Some(nv_start) = out[..ph_start].rfind("<p:nvSpPr>") else {
             break;
@@ -103,12 +109,16 @@ fn lock_slide_numbers(xml: &str) -> String {
             break;
         };
         let nv_end = nv_start + nv_rel;
-        let nvsp = out[nv_start..nv_end].replace(
+        let mut nvsp = out[nv_start..nv_end].to_string();
+        // Remove the placeholder first (indices are relative to the original
+        // nvSpPr); the lock upgrade after is a pure string match.
+        nvsp.replace_range(ph_start - nv_start..ph_end - nv_start, "");
+        nvsp = nvsp.replace(
             "<a:spLocks noGrp=\"1\"/>",
             "<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>",
         );
         out.replace_range(nv_start..nv_end, &nvsp);
-        // Continue past this shape so the placeholder we kept isn't re-found.
+        // Continue past this shape; its `<a:fld type="slidenum">` is kept.
         let after = nv_start + nvsp.len();
         let Some(close_rel) = out[after..].find("</p:sp>") else {
             break;
@@ -321,12 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn lock_slide_numbers_keeps_placeholder_and_locks() {
+    fn lock_slide_numbers_removes_placeholder_and_locks() {
         let xml = r#"<p:sp> <p:nvSpPr>  <p:cNvPr id="25" name="Slide Number Placeholder 0"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>  <p:nvPr><p:ph type="sldNum" sz="quarter" idx="4294967295"/></p:nvPr> </p:nvSpPr> <p:spPr><a:xfrm>..</a:xfrm></p:spPr><p:txBody><a:p><a:fld id="{ABC}" type="slidenum"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>"#;
         let out = lock_slide_numbers(xml);
         assert!(
-            out.contains("<p:ph type=\"sldNum\""),
-            "placeholder kept (a normal slide number): {out}"
+            !out.contains("<p:ph type=\"sldNum\""),
+            "placeholder removed so spLocks are honored: {out}"
         );
         assert!(
             out.contains("<a:spLocks noGrp=\"1\" noSelect=\"1\" noMove=\"1\" noResize=\"1\" noTextEdit=\"1\"/>"),
