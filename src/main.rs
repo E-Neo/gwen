@@ -42,8 +42,8 @@ enum Commands {
         #[arg(default_value = ".")]
         project: String,
     },
-    /// Measure layout facts (spatial + structural) for every slide, as
-    /// Markdown by default or JSON with `--json`.
+    /// Measure composition, content, structure and palette facts for every
+    /// slide (or one `--page`), as Markdown by default or JSON with `--json`.
     Measure {
         /// Project directory (defaults to the current directory).
         #[arg(default_value = ".")]
@@ -51,6 +51,9 @@ enum Commands {
         /// Emit a JSON document instead of Markdown.
         #[arg(long)]
         json: bool,
+        /// Measure one slide only, by 1-based page number.
+        #[arg(long, value_name = "N")]
+        page: Option<usize>,
     },
 }
 
@@ -67,8 +70,12 @@ fn main() -> miette::Result<()> {
             eprintln!("built {}", out.display());
             Ok(())
         }
-        Commands::Measure { project, json } => {
-            let m = gwen::measure::measure(Path::new(&project))?;
+        Commands::Measure {
+            project,
+            json,
+            page,
+        } => {
+            let m = gwen::measure::measure_with(Path::new(&project), page)?;
             print!("{}", if json { m.to_json() } else { m.to_markdown() });
             Ok(())
         }

@@ -958,26 +958,67 @@ fill = { color = "C7000A" }
     let m = gwen::measure::measure(&dir).unwrap();
     assert_eq!(m.slides.len(), 1);
     let s = &m.slides[0];
-    assert!(s.mass_dx < -0.3, "left-heavy content: {}", s.mass_dx);
-    assert!(s.margin_r > 6.0, "right margin is huge: {}", s.margin_r);
     assert!(
-        s.empty_ratio > 0.3,
-        "right half is empty: {}",
-        s.empty_ratio
+        s.composition.balance_x < -0.3,
+        "left-heavy content: {}",
+        s.composition.balance_x
+    );
+    let margins = s.composition.margins.expect("margins");
+    assert!(margins.r > 6.0, "right margin is huge: {}", margins.r);
+    assert!(
+        s.composition.whitespace > 0.3,
+        "right half is quiet: {}",
+        s.composition.whitespace
+    );
+    assert_eq!(s.content.words, 0, "rectangles carry no information");
+    assert!(
+        s.content.decoration_share > 0.3,
+        "large fills are decoration"
     );
 
     let md = m.to_markdown();
     assert!(md.contains("# gwen measure: measure"), "deck heading");
-    assert!(md.contains("### Spatial"), "spatial section");
-    assert!(md.contains("### Structural"), "structural section");
+    assert!(md.contains("### Composition"), "composition section");
+    assert!(md.contains("### Content"), "content section");
+    assert!(md.contains("### Structure"), "structure section");
+    assert!(md.contains("### Palette"), "palette section");
+    assert!(md.contains("words/cm²"), "density uses cm²");
+    assert!(md.contains("```text"), "heatmap fence");
     assert!(
         md.ends_with('\n') && !md.ends_with("\n\n"),
         "single trailing newline"
     );
     assert!(!md.contains('\r'), "no CR");
+    assert!(!md.contains('\t'), "no tabs");
+    let mut blank = 0usize;
     for line in md.lines() {
         assert!(!line.ends_with(' '), "no trailing whitespace: {line:?}");
+        if line.is_empty() {
+            blank += 1;
+            assert!(blank <= 1, "no consecutive blank lines");
+        } else {
+            blank = 0;
+        }
+        if line.starts_with(" 0 |") || line.starts_with("12 |") {
+            assert!(
+                line.ends_with(" |"),
+                "map rows have a right border: {line:?}"
+            );
+        }
     }
+    let json: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
+    assert_eq!(json["units"], "cm");
+    assert!(
+        json["slides"][0]["composition"]["coverage"]
+            .as_f64()
+            .is_some()
+    );
+    assert!(
+        json["slides"][0]["content"]["density_words_per_cm2"]
+            .as_f64()
+            .is_some_and(|v| v >= 0.0)
+    );
+    assert!(json["slides"][0]["palette"]["families"].as_u64().is_some());
 }
 
 #[test]
@@ -999,16 +1040,53 @@ fn gwen_measure_cli_outputs_markdown_and_json() {
     );
     let stdout = String::from_utf8_lossy(&md.stdout);
     assert!(stdout.starts_with("# gwen measure:"), "heading: {stdout}");
-    assert!(stdout.contains("### Spatial"));
-    assert!(stdout.contains("### Structural"));
+    assert!(stdout.contains("### Composition"));
+    assert!(stdout.contains("### Content"));
+    assert!(stdout.contains("### Structure"));
+    assert!(stdout.contains("### Palette"));
+    assert!(stdout.contains("- slides: 2"));
+    assert!(stdout.contains("cm²"));
 
     let js = run(&["--json"]);
     assert!(js.status.success());
     let value: serde_json::Value =
         serde_json::from_slice(&js.stdout).expect("--json prints a JSON document");
     assert_eq!(value["slides"].as_array().map(|a| a.len()), Some(2));
-    let s0 = &value["slides"][0]["spatial"];
-    assert!(s0["empty_ratio"].as_f64().is_some(), "spatial present");
+    assert_eq!(value["units"], "cm");
+    assert_eq!(value["slides_total"], 2);
+    assert!(value["page"].is_null());
+    let s0 = &value["slides"][0]["composition"];
+    assert!(s0["coverage"].as_f64().is_some(), "composition present");
+    assert!(value["slides"][0]["palette"]["families"].as_u64().is_some());
+
+    let page = run(&["--page", "2"]);
+    assert!(
+        page.status.success(),
+        "page measure failed: {}",
+        String::from_utf8_lossy(&page.stderr)
+    );
+    let page_out = String::from_utf8_lossy(&page.stdout);
+    assert!(page_out.contains("- page: 2 of 2"), "page header");
+    assert!(page_out.contains("## content.toml"), "only second slide");
+    assert!(
+        !page_out.contains("## title.toml"),
+        "first slide filtered out"
+    );
+
+    let page_json = run(&["--page", "2", "--json"]);
+    assert!(page_json.status.success());
+    let page_value: serde_json::Value = serde_json::from_slice(&page_json.stdout).unwrap();
+    assert_eq!(page_value["page"], 2);
+    assert_eq!(page_value["slides_total"], 2);
+    assert_eq!(page_value["slides"].as_array().map(|a| a.len()), Some(1));
+
+    let bad = run(&["--page", "99"]);
+    assert!(!bad.status.success(), "out-of-range page fails");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("between 1 and 2"),
+        "page error message: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
 }
 
 #[test]

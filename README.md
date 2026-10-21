@@ -32,25 +32,38 @@ is installed.
 
 ## Measuring a deck
 
-`gwen measure` reports objective layout facts for every slide - numbers, not
-judgments, so you or an agent can decide what matters:
+`gwen measure [project] [--page N] [--json]` reports objective facts about
+what a slide actually looks like - numbers, not judgments. It measures the
+rendered spec (text layout, master inheritance, fills, lines, images), not
+just shape boxes. Lengths are reported in cm and areas in cm²; JSON uses the
+same units.
 
-- **Spatial**: how much of the slide carries no ink (`empty_ratio`), where the
-  visual mass sits (`mass_offset`, relative to the slide center), the
-  whitespace around the whole content (`margins_in`), an ink-density table by
-  zone (3x3), and an aspect-proportional ASCII heatmap of the ink.
-- **Structural**: the fraction of edges that share gridlines (`align_snap`,
-  plus the actual gridlines and the off-grid edges with their positions), the
-  rhythm of gaps between neighbouring shapes (`spacing_cv`, plus the gaps with
-  their positions), and overlapping shapes.
+- **Composition**: `coverage` (share of the slide with painted ink),
+  `whitespace` (perceptually quiet area, including pale fills), `largest_void`
+  (largest quiet rectangle), `salience` (contrast-weighted visual weight),
+  `balance` (weighted centroid offset from center), `margins`, and a 3x3
+  `zones` table. A large saturated rectangle therefore stays high-salience /
+  low-information, while small dense text stays low-salience /
+  high-information.
+- **Content**: `words`, `chars`, `lines`, `text_area`, `content_area`,
+  `density` (words per cm² of slide), `content_density` (words per cm² of
+  painted content), decoration share and blocks, and word counts by zone.
+- **Structure**: `alignment` and unaligned edges, shared x/y gridlines,
+  `near_miss` edges, gap rhythm (`median`, `even`, `cv`) per axis, and real
+  collisions. Text labels on cards, nested shapes, chevron interlocks and thin
+  rules are not collisions.
+- **Palette**: raw colour count, perceptual families, neutral/accent split,
+  exact top colours, text contrast (minimum and low-contrast run count), and
+  one-off colours.
 
-How the facts are computed: text extents come from the text content (a single
-word in a large box counts as nearly empty), images fill their box, full-bleed
-shapes are treated as background/paper, and a shape fully inside another is
-nesting - not an overlap. The heatmap and zones weight ink by type (text is the
-hottest, a filled shape is tepid), so a large shape with little text reads
-cooler than dense text. `gwen measure --json` prints the same facts as JSON
-for tooling.
+`--page N` measures one 1-based slide while keeping deck-wide averages in the
+header. Master footer, logo and decoration are excluded from content metrics;
+master content such as a closing "Thank you." is included.
+
+The Markdown report has no tabs or trailing spaces, single blank lines, real
+tables, balanced fences, and fixed-width heatmap rows ending in `|`. `--json`
+emits the same facts with `units: "cm"` and explicit `_cm`, `_cm2`, and
+`_words_per_cm2` fields.
 
 Every new project also gets a project-level skill at
 `.agents/skills/gwen/` - an agent- and human-readable reference to the gwen
