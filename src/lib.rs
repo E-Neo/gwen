@@ -9,6 +9,7 @@
 pub mod error;
 pub mod import;
 pub mod jsbridge;
+pub mod measure;
 pub mod media;
 pub mod model;
 pub mod opts;

@@ -917,6 +917,101 @@ slides = ["title.toml"]
 }
 
 #[test]
+fn measure_reports_layout_facts() {
+    let dir = tmp("measure");
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "measure"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[[sections]]
+title = "Intro"
+slides = ["one.toml"]
+"##,
+    );
+    write(
+        &dir.join("slides").join("one.toml"),
+        r##"[[shapes]]
+type = "rect"
+x = "0.5in"
+y = "0.5in"
+w = "6in"
+h = "4in"
+fill = { color = "C7000A" }
+
+[[shapes]]
+type = "rect"
+x = "0.5in"
+y = "5in"
+w = "6in"
+h = "2in"
+fill = { color = "C7000A" }
+"##,
+    );
+
+    let m = gwen::measure::measure(&dir).unwrap();
+    assert_eq!(m.slides.len(), 1);
+    let s = &m.slides[0];
+    assert!(s.mass_dx < -0.3, "left-heavy content: {}", s.mass_dx);
+    assert!(s.margin_r > 6.0, "right margin is huge: {}", s.margin_r);
+    assert!(
+        s.empty_ratio > 0.3,
+        "right half is empty: {}",
+        s.empty_ratio
+    );
+
+    let md = m.to_markdown();
+    assert!(md.contains("# gwen measure: measure"), "deck heading");
+    assert!(md.contains("### Spatial"), "spatial section");
+    assert!(md.contains("### Structural"), "structural section");
+    assert!(
+        md.ends_with('\n') && !md.ends_with("\n\n"),
+        "single trailing newline"
+    );
+    assert!(!md.contains('\r'), "no CR");
+    for line in md.lines() {
+        assert!(!line.ends_with(' '), "no trailing whitespace: {line:?}");
+    }
+}
+
+#[test]
+fn gwen_measure_cli_outputs_markdown_and_json() {
+    let dir = sample_project("measure-cli");
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gwen"))
+            .arg("measure")
+            .arg(dir.as_os_str())
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let md = run(&[]);
+    assert!(
+        md.status.success(),
+        "gwen measure failed: {}",
+        String::from_utf8_lossy(&md.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&md.stdout);
+    assert!(stdout.starts_with("# gwen measure:"), "heading: {stdout}");
+    assert!(stdout.contains("### Spatial"));
+    assert!(stdout.contains("### Structural"));
+
+    let js = run(&["--json"]);
+    assert!(js.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&js.stdout).expect("--json prints a JSON document");
+    assert_eq!(value["slides"].as_array().map(|a| a.len()), Some(2));
+    let s0 = &value["slides"][0]["spatial"];
+    assert!(s0["empty_ratio"].as_f64().is_some(), "spatial present");
+}
+
+#[test]
 fn gwen_new_scaffolds_a_buildable_project() {
     let dir = tmp("scaffold");
     let _ = std::fs::remove_dir_all(&dir);

@@ -18,6 +18,7 @@ required.
 gwen new <deck>          # scaffold a project
 gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
 gwen build <deck>        # render <deck>/target/<title>.pptx
+gwen measure <deck>      # layout facts per slide (markdown; --json for JSON)
 ```
 
 `gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
@@ -28,6 +29,28 @@ is copied from it - `template/main.toml` (required, with its
 recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
+
+## Measuring a deck
+
+`gwen measure` reports objective layout facts for every slide - numbers, not
+judgments, so you or an agent can decide what matters:
+
+- **Spatial**: how much of the slide carries no ink (`empty_ratio`), where the
+  visual mass sits (`mass_offset`, relative to the slide center), the
+  whitespace around the whole content (`margins_in`), an ink-density table by
+  zone (3x3), and an aspect-proportional ASCII heatmap of the ink.
+- **Structural**: the fraction of edges that share gridlines (`align_snap`,
+  plus the actual gridlines and the off-grid edges with their positions), the
+  rhythm of gaps between neighbouring shapes (`spacing_cv`, plus the gaps with
+  their positions), and overlapping shapes.
+
+How the facts are computed: text extents come from the text content (a single
+word in a large box counts as nearly empty), images fill their box, full-bleed
+shapes are treated as background/paper, and a shape fully inside another is
+nesting - not an overlap. The heatmap and zones weight ink by type (text is the
+hottest, a filled shape is tepid), so a large shape with little text reads
+cooler than dense text. `gwen measure --json` prints the same facts as JSON
+for tooling.
 
 Every new project also gets a project-level skill at
 `.agents/skills/gwen/` - an agent- and human-readable reference to the gwen

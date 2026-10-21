@@ -580,6 +580,7 @@ fn build_slide(
     }
 
     Ok(json!({
+        "file": file,
         "master": slide.master,
         "background": normalize_background(&slide.background, "slide")?,
         "hidden": slide.hidden,

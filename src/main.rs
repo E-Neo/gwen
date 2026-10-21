@@ -42,6 +42,16 @@ enum Commands {
         #[arg(default_value = ".")]
         project: String,
     },
+    /// Measure layout facts (spatial + structural) for every slide, as
+    /// Markdown by default or JSON with `--json`.
+    Measure {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+        /// Emit a JSON document instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> miette::Result<()> {
@@ -55,6 +65,11 @@ fn main() -> miette::Result<()> {
         Commands::Build { project } => {
             let out = gwen::build(Path::new(&project))?;
             eprintln!("built {}", out.display());
+            Ok(())
+        }
+        Commands::Measure { project, json } => {
+            let m = gwen::measure::measure(Path::new(&project))?;
+            print!("{}", if json { m.to_json() } else { m.to_markdown() });
             Ok(())
         }
     }

@@ -413,6 +413,9 @@ project.
   `"50%"`
 - gwen validates strictly: unknown fields/options/`styles` references/cycles
   and wrong option value types are loud errors - read the diagnostics
+- before judging a slide's layout, measure it: `gwen measure --json` prints
+  per-slide spatial facts (emptiness, visual-mass offset, margins, zones) and
+  structural facts (gridlines, off-grid edges, gaps, overlaps)
 
 ## Full specification
 Read **references/toml-dsl.md** for the complete TOML DSL specification
