@@ -60,6 +60,7 @@ pub const SHAPE_PRESETS: &[&str] = &[
     "curvedLeftArrow",
     "curvedRightArrow",
     "curvedUpArrow",
+    "custGeom",
     "decagon",
     "diagStripe",
     "diamond",

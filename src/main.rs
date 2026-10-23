@@ -51,9 +51,25 @@ enum Commands {
         /// Emit a JSON document instead of Markdown.
         #[arg(long)]
         json: bool,
-        /// Measure one slide only, by 1-based page number.
-        #[arg(long, value_name = "N")]
-        page: Option<usize>,
+        /// Measure selected slides only, as 1-based numbers and ranges
+        /// (`1`, `1,3-5`).
+        #[arg(long, value_name = "N[,N-R]")]
+        page: Option<String>,
+    },
+    /// Render slides to `target/render/slide-NN.svg` and/or `.png`
+    /// (no office suite required; text is drawn with gwen's own layout).
+    Render {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+        /// Render selected slides only, as 1-based numbers and ranges
+        /// (`1`, `1,3-5`).
+        #[arg(long, value_name = "N[,N-R]")]
+        page: Option<String>,
+        /// Output formats, comma separated (`png`, `svg`). PNG is the
+        /// default; SVG is only written when requested.
+        #[arg(long, value_name = "LIST", default_value = "png")]
+        format: String,
     },
 }
 
@@ -75,8 +91,32 @@ fn main() -> miette::Result<()> {
             json,
             page,
         } => {
-            let m = gwen::measure::measure_with(Path::new(&project), page)?;
+            let pages = match page.as_deref() {
+                Some(raw) => {
+                    Some(gwen::pages::PageSelection::parse(raw).map_err(|e| miette::miette!(e))?)
+                }
+                None => None,
+            };
+            let m = gwen::measure::measure_with(Path::new(&project), pages.as_ref())?;
             print!("{}", if json { m.to_json() } else { m.to_markdown() });
+            Ok(())
+        }
+        Commands::Render {
+            project,
+            page,
+            format,
+        } => {
+            let pages = match page.as_deref() {
+                Some(raw) => {
+                    Some(gwen::pages::PageSelection::parse(raw).map_err(|e| miette::miette!(e))?)
+                }
+                None => None,
+            };
+            let formats = gwen::preview::Formats::parse(&format).map_err(|e| miette::miette!(e))?;
+            let out = gwen::preview::render(Path::new(&project), pages.as_ref(), formats)?;
+            for path in out {
+                eprintln!("wrote {}", path.display());
+            }
             Ok(())
         }
     }

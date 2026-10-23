@@ -18,6 +18,7 @@ required.
 gwen new <deck>          # scaffold a project
 gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
 gwen build <deck>        # render <deck>/target/<title>.pptx
+gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
 gwen measure <deck>      # layout facts per slide (markdown; --json for JSON)
 ```
 
@@ -32,9 +33,9 @@ is installed.
 
 ## Measuring a deck
 
-`gwen measure [project] [--page N] [--json]` reports objective facts about
-what a slide actually looks like - numbers, not judgments. It measures the
-rendered spec (text layout, master inheritance, fills, lines, images), not
+`gwen measure [project] [--page N[,N-R]] [--json]` reports objective facts
+about what a slide actually looks like - numbers, not judgments. It measures
+the rendered spec (text layout, master inheritance, fills, lines, images), not
 just shape boxes. Lengths are reported in cm and areas in cm²; JSON uses the
 same units.
 
@@ -56,14 +57,40 @@ same units.
   exact top colours, text contrast (minimum and low-contrast run count), and
   one-off colours.
 
-`--page N` measures one 1-based slide while keeping deck-wide averages in the
-header. Master footer, logo and decoration are excluded from content metrics;
-master content such as a closing "Thank you." is included.
+`--page N[,N-R]` measures only the selected 1-based slides (`--page 2`,
+`--page 1,3-5`) while keeping deck-wide averages in the header. The JSON `page`
+field is an array of selected numbers, or `null` for the whole deck. Master
+footer, logo and decoration are excluded from content metrics; master content
+such as a closing "Thank you." is included.
 
 The Markdown report has no tabs or trailing spaces, single blank lines, real
 tables, balanced fences, and fixed-width heatmap rows ending in `|`. `--json`
 emits the same facts with `units: "cm"` and explicit `_cm`, `_cm2`, and
 `_words_per_cm2` fields.
+
+## Previewing slides
+
+`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg]` paints the
+deck straight from the TOML spec, without LibreOffice, PowerPoint or any other
+office suite. Output paths are fixed:
+
+```
+<deck>/target/render/slide-01.png   # default format
+<deck>/target/render/slide-01.svg   # only with --format svg or png,svg
+<deck>/target/render/preview.json   # selection, formats and approximations
+```
+
+PNG is the default and is the artifact to inspect visually; it is rasterized
+at 2x for readable text. SVG is never written unless requested. `--page`
+accepts the same 1-based `1,3-5` selection syntax as `measure`, and stale
+`slide-*.png` / `slide-*.svg` files from an earlier run are removed so the
+directory always reflects the current invocation.
+
+Fonts are loaded from `<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system.
+An unknown family falls back to an available sans-serif face instead of
+dropping text. Features the renderer still approximates (for example inner
+shadows, mixed-direction span order, or an unknown shape preset) are reported
+per slide on stderr and under `approximations` in `preview.json`.
 
 Every new project also gets a project-level skill at
 `.agents/skills/gwen/` - an agent- and human-readable reference to the gwen

@@ -395,7 +395,9 @@ description: Editing or building this gwen deck's TOML files (main.toml, masters
 
 This directory is a **gwen** project: a PowerPoint deck defined by TOML files.
 `gwen build` regenerates `target/<title>.pptx` deterministically - edit the
-TOML, never the `.pptx`. TOML is the single source of truth.
+TOML, never the `.pptx`. TOML is the single source of truth. `gwen render`
+paints `target/render/slide-NN.png` directly from the same TOML, without an
+office suite, so you can inspect a slide before building.
 
 ## When to use
 Editing or building slides, masters, styles or any `.toml` file in this
@@ -416,6 +418,9 @@ project.
 - before judging a slide's layout, measure it: `gwen measure --json` prints
   per-slide spatial facts (emptiness, visual-mass offset, margins, zones) and
   structural facts (gridlines, off-grid edges, gaps, overlaps)
+- to look at a slide, render it: `gwen render --page 1,3-5 --format png` writes
+  `target/render/slide-NN.png`; `preview.json` records the selection and every
+  feature that is still approximated
 
 ## Full specification
 Read **references/toml-dsl.md** for the complete TOML DSL specification
@@ -430,7 +435,9 @@ const DEFAULT_DSL_SPEC: &str = r##"# gwen TOML DSL spec
 
 This directory is a **gwen** project: a PowerPoint deck defined by TOML files.
 `gwen build` regenerates `target/<title>.pptx` deterministically - edit the
-TOML, never the `.pptx`. TOML is the single source of truth.
+TOML, never the `.pptx`. TOML is the single source of truth. `gwen render`
+paints `target/render/slide-NN.png` directly from the same TOML, without an
+office suite, so you can inspect a slide before building.
 
 ```
 deck/
@@ -604,6 +611,16 @@ Shape preset and marker names are
 snake_case in the DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is
 `"1."`) and are canonicalised to pptxgenjs camelCase internally - including the
 `shape` option, so `shape = "round_rect"` works.
+
+## Preview
+
+`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg]` paints the
+same spec directly to `<deck>/target/render/slide-NN.{png,svg}`. PNG is the
+default and is rasterized at 2x; SVG is only written when requested. Page
+numbers are 1-based and accept ranges (`--page 1,3-5`). Fonts come from
+`<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system. Any feature the
+renderer still approximates is printed to stderr and listed per slide in
+`target/render/preview.json`.
 
 ## Validation
 

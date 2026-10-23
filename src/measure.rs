@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::model::Project;
+use crate::pages::PageSelection;
 use crate::render;
 
 const CM_PER_IN: f64 = 2.54;
@@ -1085,16 +1086,20 @@ fn large_quiet_rect(grid: &Grid) -> Option<(Rect, usize, usize, usize, usize)> {
     let mut best = (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut best_area = 0usize;
     for row in 0..grid.rows {
-        for col in 0..grid.cols {
-            heights[col] = if grid.value(col, row) < QUIET {
-                heights[col] + 1
+        for (col, height) in heights.iter_mut().enumerate() {
+            *height = if grid.value(col, row) < QUIET {
+                *height + 1
             } else {
                 0
             };
         }
         let mut stack: Vec<(usize, usize)> = Vec::new();
-        for col in 0..=grid.cols {
-            let h = if col < grid.cols { heights[col] } else { 0 };
+        for (col, h) in heights
+            .iter()
+            .copied()
+            .chain(std::iter::once(0))
+            .enumerate()
+        {
             let mut start = col;
             while let Some(&(s, sh)) = stack.last() {
                 if sh > h {
@@ -1263,7 +1268,7 @@ pub struct Measurement {
     pub title: String,
     pub width: f64,
     pub height: f64,
-    pub page: Option<usize>,
+    pub page: Option<Vec<usize>>,
     pub total_slides: usize,
     pub deck: DeckSummary,
     pub slides: Vec<SlideMeasure>,
@@ -1274,23 +1279,24 @@ pub fn measure(project_dir: &Path) -> Result<Measurement> {
     measure_with(project_dir, None)
 }
 
-/// Measure every slide, or only `page` (1-based) when given.
-pub fn measure_with(project_dir: &Path, page: Option<usize>) -> Result<Measurement> {
+/// Measure every slide, or only the selected `pages` (1-based) when given.
+/// Deck averages always cover the whole deck.
+pub fn measure_with(project_dir: &Path, pages: Option<&PageSelection>) -> Result<Measurement> {
     let project = Project::load(project_dir)?;
     let spec = render::spec_json(&project)?;
     let spec: Value = serde_json::from_str(&spec)
         .map_err(|e| miette::miette!("cannot parse the deck spec: {e}"))?;
     let title = project.main.presentation.title.clone();
     let mut measurement = measure_spec(&spec, title);
-    if let Some(page) = page {
-        if page == 0 || page > measurement.total_slides {
-            return Err(miette::miette!(
-                "`--page` must be between 1 and {}",
-                measurement.total_slides
-            ));
-        }
-        measurement.slides = vec![measurement.slides[page - 1].clone()];
-        measurement.page = Some(page);
+    if let Some(pages) = pages {
+        let selected = pages
+            .select(measurement.total_slides)
+            .map_err(|e| miette::miette!(e))?;
+        measurement.slides = selected
+            .iter()
+            .map(|page| measurement.slides[page - 1].clone())
+            .collect();
+        measurement.page = Some(selected);
     }
     Ok(measurement)
 }
@@ -2243,7 +2249,7 @@ fn gap_stats(mut gaps: Vec<f64>) -> GapStats {
     }
     gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = gaps.len();
-    let median = if n % 2 == 0 {
+    let median = if n.is_multiple_of(2) {
         (gaps[n / 2 - 1] + gaps[n / 2]) / 2.0
     } else {
         gaps[n / 2]
@@ -2405,8 +2411,8 @@ impl Measurement {
         md.line(format!("# gwen measure: {title}"));
         md.blank();
         md.line(format!("- slides: {}", self.total_slides));
-        if let Some(page) = self.page {
-            md.line(format!("- page: {page} of {}", self.total_slides));
+        if let Some(pages) = &self.page {
+            md.line(format!("- page: {}", PageSelection::format(pages)));
         }
         md.line(format!(
             "- canvas: {} x {} cm",

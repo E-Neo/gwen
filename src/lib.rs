@@ -6,16 +6,26 @@
 //! QuickJS runtime, so the output is pptxgenjs's output - gwen never writes
 //! OOXML itself. See the project README for the full format reference.
 
+pub mod color;
+pub mod defaults;
 pub mod error;
+pub mod fonts;
 pub mod import;
 pub mod jsbridge;
 pub mod measure;
 pub mod media;
 pub mod model;
 pub mod opts;
+pub mod pages;
+pub mod presets;
+pub mod preview;
 pub mod render;
 pub mod richtext;
+pub mod scene;
+pub mod svg;
+pub mod textlayout;
 pub mod units;
+pub mod xml;
 pub mod zip;
 
 pub use crate::import::import_pptx;

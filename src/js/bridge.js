@@ -225,4 +225,25 @@
     try { gwenRender(specJson); }
     catch (e) { globalThis.__gwenError = String(e && e.message !== undefined ? e.message : e); }
   };
+
+  // Capture pptxgenjs's own default theme and shared slide master, so gwen's
+  // preview inherits exactly what PowerPoint would (palette, title/body text
+  // styles, placeholder defaults) from the vendored bundle instead of a
+  // hand-copied table. Fonts match the deck's [theme] so `+mj-lt`/`+mn-lt`
+  // resolve the same way.
+  globalThis.gwenDefaultsSync = function (fontsJson) {
+    globalThis.__gwenError = null;
+    try {
+      __gwenFiles.length = 0;
+      var fonts = JSON.parse(fontsJson || "{}");
+      var p = new PptxGenJS();
+      p.theme = {
+        headFontFace: fonts.majorFont || "Calibri",
+        bodyFontFace: fonts.minorFont || "Calibri",
+      };
+      p.write({ outputType: "base64", compression: "DEFLATE" });
+    } catch (e) {
+      globalThis.__gwenError = String(e && e.message !== undefined ? e.message : e);
+    }
+  };
 })();

@@ -197,14 +197,21 @@ fn lock_targets(spec_json: &str) -> std::collections::HashSet<String> {
     out
 }
 
-/// Render a deck from a spec JSON string (see `render::spec`) and return the
-/// `.pptx` bytes. The spec is plain data - it is `JSON.parse`d and passed to
-/// pptxgenjs objects; nothing from it is ever evaluated as code.
-pub fn render(spec_json: &str) -> Result<Vec<u8>> {
+/// pptxgenjs's own default theme and shared slide master XML, captured from a
+/// throwaway empty deck.
+pub struct DefaultsXml {
+    pub theme: String,
+    pub master: String,
+}
+
+/// Evaluate the bundle + bridge, run `function` with one JSON argument, pump
+/// the microtask queue until pptxgenjs's part count settles, and return the
+/// captured parts.
+fn capture(function: &str, argument: &str) -> Result<Vec<CapturedFile>> {
     let runtime = Runtime::new().map_err(|e| miette::miette!("quickjs runtime: {e}"))?;
     let context = Context::full(&runtime).map_err(|e| miette::miette!("quickjs context: {e}"))?;
 
-    let parts = context.with(|ctx| -> Result<Vec<CapturedFile>> {
+    context.with(|ctx| -> Result<Vec<CapturedFile>> {
         let eval = |source: &str| {
             ctx.eval::<(), _>(source)
                 .map_err(|e| miette::miette!("quickjs eval failed: {e}"))
@@ -215,10 +222,10 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
         eval(BRIDGE)?;
 
         let kick_off: Function = ctx
-            .eval("gwenRenderSync")
-            .map_err(|e| miette::miette!("gwenRenderSync not defined: {e}"))?;
+            .eval(function)
+            .map_err(|e| miette::miette!("{function} not defined: {e}"))?;
         kick_off
-            .call::<_, ()>((spec_json,))
+            .call::<_, ()>((argument,))
             .map_err(|e| miette::miette!("pptxgenjs threw: {e}"))?;
 
         // Drive the microtask queue: most parts are registered synchronously
@@ -257,7 +264,44 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
             .eval("__gwenFilesJson()")
             .map_err(|e| miette::miette!("reading parts failed: {e}"))?;
         serde_json::from_str(&json).map_err(|e| miette::miette!("parts JSON invalid: {e}"))
-    })?;
+    })
+}
+
+/// Capture pptxgenjs's default theme/master for the given theme fonts.
+pub fn defaults(major_font: &str, minor_font: &str) -> Result<DefaultsXml> {
+    let arg = serde_json::json!({
+        "majorFont": major_font,
+        "minorFont": minor_font,
+    })
+    .to_string();
+    let parts = capture("gwenDefaultsSync", &arg)?;
+    let mut theme = None;
+    let mut master = None;
+    for part in parts {
+        if part.dir {
+            continue;
+        }
+        let Some(data) = part.data else {
+            continue;
+        };
+        match part.name.as_str() {
+            "ppt/theme/theme1.xml" => theme = Some(data),
+            "ppt/slideMasters/slideMaster1.xml" => master = Some(data),
+            _ => {}
+        }
+    }
+    let missing = |name: &str| miette::miette!("pptxgenjs did not produce `{name}`");
+    Ok(DefaultsXml {
+        theme: theme.ok_or_else(|| missing("ppt/theme/theme1.xml"))?,
+        master: master.ok_or_else(|| missing("ppt/slideMasters/slideMaster1.xml"))?,
+    })
+}
+
+/// Render a deck from a spec JSON string (see `render::spec`) and return the
+/// `.pptx` bytes. The spec is plain data - it is `JSON.parse`d and passed to
+/// pptxgenjs objects; nothing from it is ever evaluated as code.
+pub fn render(spec_json: &str) -> Result<Vec<u8>> {
+    let parts = capture("gwenRenderSync", spec_json)?;
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = std::collections::HashSet::new();

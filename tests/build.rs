@@ -1066,7 +1066,7 @@ fn gwen_measure_cli_outputs_markdown_and_json() {
         String::from_utf8_lossy(&page.stderr)
     );
     let page_out = String::from_utf8_lossy(&page.stdout);
-    assert!(page_out.contains("- page: 2 of 2"), "page header");
+    assert!(page_out.contains("- page: 2"), "page header");
     assert!(page_out.contains("## content.toml"), "only second slide");
     assert!(
         !page_out.contains("## title.toml"),
@@ -1076,16 +1076,263 @@ fn gwen_measure_cli_outputs_markdown_and_json() {
     let page_json = run(&["--page", "2", "--json"]);
     assert!(page_json.status.success());
     let page_value: serde_json::Value = serde_json::from_slice(&page_json.stdout).unwrap();
-    assert_eq!(page_value["page"], 2);
+    assert_eq!(page_value["page"], serde_json::json!([2]));
     assert_eq!(page_value["slides_total"], 2);
     assert_eq!(page_value["slides"].as_array().map(|a| a.len()), Some(1));
 
     let bad = run(&["--page", "99"]);
     assert!(!bad.status.success(), "out-of-range page fails");
     assert!(
-        String::from_utf8_lossy(&bad.stderr).contains("between 1 and 2"),
+        String::from_utf8_lossy(&bad.stderr).contains("out of range"),
         "page error message: {}",
         String::from_utf8_lossy(&bad.stderr)
+    );
+}
+
+#[test]
+fn gwen_render_writes_pngs_and_preview_report() {
+    let dir = sample_project("render-png");
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("render")
+        .arg(dir.as_os_str())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let target = dir.join("target").join("render");
+    for page in ["01", "02"] {
+        let png = std::fs::read(target.join(format!("slide-{page}.png"))).unwrap();
+        assert_eq!(
+            &png[..8],
+            &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+            "slide {page} is a PNG"
+        );
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert!(
+            (2500..=2600).contains(&width) && (1400..=1500).contains(&height),
+            "slide {page} rasters at 2x: {width}x{height}"
+        );
+        assert!(
+            !target.join(format!("slide-{page}.svg")).exists(),
+            "PNG is the default; no SVG is written"
+        );
+    }
+    assert!(!target.join("slide-03.png").exists());
+    assert!(!target.join("slide-01.svg").exists());
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("preview.json")).unwrap()).unwrap();
+    assert_eq!(report["slides"], serde_json::json!([1, 2]));
+    assert_eq!(report["formats"]["png"], true);
+    assert_eq!(report["formats"]["svg"], false);
+    assert!(report["approximations"].as_array().is_some());
+}
+
+#[test]
+fn gwen_render_svg_pages_and_clears_stale_outputs() {
+    let dir = sample_project("render-svg");
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gwen"))
+            .arg("render")
+            .arg(dir.as_os_str())
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let first = run(&[]);
+    assert!(first.status.success());
+    let target = dir.join("target").join("render");
+    assert!(target.join("slide-01.png").exists());
+    assert!(target.join("slide-02.png").exists());
+
+    let svg = run(&["--format", "svg", "--page", "2"]);
+    assert!(
+        svg.status.success(),
+        "svg render failed: {}",
+        String::from_utf8_lossy(&svg.stderr)
+    );
+    let second = std::fs::read_to_string(target.join("slide-02.svg")).unwrap();
+    assert!(second.contains("line one"), "slide text is painted");
+    assert!(second.contains("line two"));
+    assert!(
+        second.contains("fill=\"#112233\""),
+        "slide background is painted"
+    );
+    assert!(
+        !target.join("slide-01.svg").exists(),
+        "only page 2 selected"
+    );
+    assert!(
+        !target.join("slide-01.png").exists(),
+        "stale PNG from the earlier run is removed"
+    );
+    assert!(
+        !target.join("slide-02.png").exists(),
+        "only requested formats are written"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("preview.json")).unwrap()).unwrap();
+    assert_eq!(report["slides"], serde_json::json!([2]));
+    assert_eq!(report["formats"]["png"], false);
+    assert_eq!(report["formats"]["svg"], true);
+
+    let bad = run(&["--format", "jpg"]);
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("unknown render format"),
+        "format error: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}
+
+#[test]
+fn gwen_render_grows_resized_text_shapes_and_emits_filter_ids() {
+    let dir = sample_project("render-autofit");
+    let slide = dir.join("slides").join("content.toml");
+    let mut toml = std::fs::read_to_string(&slide).unwrap();
+    toml.push_str(
+        r##"
+[[shapes]]
+type = "rect"
+x = "8.5in"
+y = "3.5in"
+w = "3in"
+h = "0.25in"
+fill = { color = "00FF00" }
+shadow = { type = "outer", color = "000000", opacity = 0.5, blur = 4, offset = 2, angle = 45 }
+text = "This box is far too short for all of this text"
+font_size = 16
+fit = "resize"
+"##,
+    );
+    std::fs::write(&slide, toml).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("render")
+        .arg(dir.as_os_str())
+        .args(["--format", "svg", "--page", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let svg = std::fs::read_to_string(dir.join("target/render/slide-02.svg")).unwrap();
+    assert!(svg.contains("<filter id=\"fx"), "filter has an id");
+    assert!(
+        svg.contains("filter=\"url(#fx"),
+        "shape references the filter"
+    );
+
+    let path = svg
+        .split("<path")
+        .find(|tag| tag.contains("fill=\"#00ff00\""))
+        .expect("resized shape is painted");
+    let d = path
+        .split("d=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let numbers: Vec<f64> = d
+        .split_whitespace()
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    assert!(
+        numbers[5] > 0.25,
+        "resize grew the backing shape beyond its 0.25in start: {d}"
+    );
+}
+
+#[test]
+fn gwen_render_reports_approximations_on_stderr_and_json() {
+    let dir = sample_project("render-approx");
+    let slide = dir.join("slides").join("content.toml");
+    let mut toml = std::fs::read_to_string(&slide).unwrap();
+    toml.push_str(
+        r##"
+[[shapes]]
+type = "rect"
+x = "9in"
+y = "4in"
+w = "2in"
+h = "1in"
+fill = { color = "C7000A" }
+shadow = { type = "inner", color = "000000", opacity = 0.5, blur = 4 }
+
+[[shapes]]
+type = "text"
+x = "9in"
+y = "2in"
+w = "3in"
+h = "1in"
+text = "double underline"
+underline = "dbl"
+font_size = 20
+"##,
+    );
+    std::fs::write(&slide, toml).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("render")
+        .arg(dir.as_os_str())
+        .args(["--format", "svg", "--page", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("inner shadows are approximated"),
+        "approximation is reported on stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("underline style `dbl` drawn as a single line"),
+        "text approximation is reported on stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("target/render/preview.json")).unwrap())
+            .unwrap();
+    let approximations = report["approximations"].as_array().unwrap();
+    assert_eq!(approximations.len(), 1);
+    assert_eq!(approximations[0]["page"], 2);
+    assert_eq!(
+        approximations[0]["approximations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        approximations[0]["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.contains("inner shadows"))),
+        "approximation is recorded in JSON"
+    );
+    assert!(
+        approximations[0]["approximations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.contains("underline style"))),
+        "text approximation is recorded in JSON"
     );
 }
 
