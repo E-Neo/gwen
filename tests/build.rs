@@ -1090,7 +1090,7 @@ fn gwen_measure_cli_outputs_markdown_and_json() {
 }
 
 #[test]
-fn gwen_render_writes_pngs_and_preview_report() {
+fn gwen_render_writes_stem_named_pngs() {
     let dir = sample_project("render-png");
     let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
         .arg("render")
@@ -1104,33 +1104,34 @@ fn gwen_render_writes_pngs_and_preview_report() {
     );
 
     let target = dir.join("target").join("render");
-    for page in ["01", "02"] {
-        let png = std::fs::read(target.join(format!("slide-{page}.png"))).unwrap();
+    for stem in ["title", "content"] {
+        let png = std::fs::read(target.join(format!("{stem}.png"))).unwrap();
         assert_eq!(
             &png[..8],
             &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-            "slide {page} is a PNG"
+            "{stem} is a PNG"
         );
         let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
         assert!(
             (2500..=2600).contains(&width) && (1400..=1500).contains(&height),
-            "slide {page} rasters at 2x: {width}x{height}"
+            "{stem} rasters at 2x: {width}x{height}"
         );
         assert!(
-            !target.join(format!("slide-{page}.svg")).exists(),
+            !target.join(format!("{stem}.svg")).exists(),
             "PNG is the default; no SVG is written"
         );
     }
-    assert!(!target.join("slide-03.png").exists());
-    assert!(!target.join("slide-01.svg").exists());
-
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(target.join("preview.json")).unwrap()).unwrap();
-    assert_eq!(report["slides"], serde_json::json!([1, 2]));
-    assert_eq!(report["formats"]["png"], true);
-    assert_eq!(report["formats"]["svg"], false);
-    assert!(report["approximations"].as_array().is_some());
+    let mut files: Vec<String> = std::fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        ["content.png".to_string(), "title.png".to_string()],
+        "only stem-named images are written; no preview.json or legacy slide-NN files"
+    );
 }
 
 #[test]
@@ -1147,8 +1148,8 @@ fn gwen_render_svg_pages_and_clears_stale_outputs() {
     let first = run(&[]);
     assert!(first.status.success());
     let target = dir.join("target").join("render");
-    assert!(target.join("slide-01.png").exists());
-    assert!(target.join("slide-02.png").exists());
+    assert!(target.join("title.png").exists());
+    assert!(target.join("content.png").exists());
 
     let svg = run(&["--format", "svg", "--page", "2"]);
     assert!(
@@ -1156,31 +1157,23 @@ fn gwen_render_svg_pages_and_clears_stale_outputs() {
         "svg render failed: {}",
         String::from_utf8_lossy(&svg.stderr)
     );
-    let second = std::fs::read_to_string(target.join("slide-02.svg")).unwrap();
+    let second = std::fs::read_to_string(target.join("content.svg")).unwrap();
     assert!(second.contains("line one"), "slide text is painted");
     assert!(second.contains("line two"));
     assert!(
         second.contains("fill=\"#112233\""),
         "slide background is painted"
     );
+    assert!(!target.join("title.svg").exists(), "only page 2 selected");
     assert!(
-        !target.join("slide-01.svg").exists(),
-        "only page 2 selected"
-    );
-    assert!(
-        !target.join("slide-01.png").exists(),
+        !target.join("title.png").exists(),
         "stale PNG from the earlier run is removed"
     );
     assert!(
-        !target.join("slide-02.png").exists(),
+        !target.join("content.png").exists(),
         "only requested formats are written"
     );
-
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(target.join("preview.json")).unwrap()).unwrap();
-    assert_eq!(report["slides"], serde_json::json!([2]));
-    assert_eq!(report["formats"]["png"], false);
-    assert_eq!(report["formats"]["svg"], true);
+    assert!(!target.join("preview.json").exists());
 
     let bad = run(&["--format", "jpg"]);
     assert!(!bad.status.success());
@@ -1225,7 +1218,7 @@ fit = "resize"
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let svg = std::fs::read_to_string(dir.join("target/render/slide-02.svg")).unwrap();
+    let svg = std::fs::read_to_string(dir.join("target/render/content.svg")).unwrap();
     assert!(svg.contains("<filter id=\"fx"), "filter has an id");
     assert!(
         svg.contains("filter=\"url(#fx"),
@@ -1254,7 +1247,7 @@ fit = "resize"
 }
 
 #[test]
-fn gwen_render_reports_approximations_on_stderr_and_json() {
+fn gwen_render_reports_approximations_on_stderr() {
     let dir = sample_project("render-approx");
     let slide = dir.join("slides").join("content.toml");
     let mut toml = std::fs::read_to_string(&slide).unwrap();
@@ -1305,34 +1298,9 @@ font_size = 20
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("target/render/preview.json")).unwrap())
-            .unwrap();
-    let approximations = report["approximations"].as_array().unwrap();
-    assert_eq!(approximations.len(), 1);
-    assert_eq!(approximations[0]["page"], 2);
-    assert_eq!(
-        approximations[0]["approximations"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
     assert!(
-        approximations[0]["approximations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m.as_str().is_some_and(|m| m.contains("inner shadows"))),
-        "approximation is recorded in JSON"
-    );
-    assert!(
-        approximations[0]["approximations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m.as_str().is_some_and(|m| m.contains("underline style"))),
-        "text approximation is recorded in JSON"
+        !dir.join("target/render/preview.json").exists(),
+        "approximations are reported on stderr, not in a report file"
     );
 }
 

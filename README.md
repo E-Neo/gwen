@@ -72,25 +72,24 @@ emits the same facts with `units: "cm"` and explicit `_cm`, `_cm2`, and
 
 `gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg]` paints the
 deck straight from the TOML spec, without LibreOffice, PowerPoint or any other
-office suite. Output paths are fixed:
+office suite. Outputs are named after the source slide TOML:
 
 ```
-<deck>/target/render/slide-01.png   # default format
-<deck>/target/render/slide-01.svg   # only with --format svg or png,svg
-<deck>/target/render/preview.json   # selection, formats and approximations
+<deck>/target/render/01-trend.png   # default format, from slides/01-trend.toml
+<deck>/target/render/01-trend.svg   # only with --format svg or png,svg
 ```
 
 PNG is the default and is the artifact to inspect visually; it is rasterized
 at 2x for readable text. SVG is never written unless requested. `--page`
 accepts the same 1-based `1,3-5` selection syntax as `measure`, and stale
-`slide-*.png` / `slide-*.svg` files from an earlier run are removed so the
-directory always reflects the current invocation.
+rendered images from an earlier run are removed so the directory always
+reflects the current invocation.
 
 Fonts are loaded from `<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system.
 An unknown family falls back to an available sans-serif face instead of
 dropping text. Features the renderer still approximates (for example inner
 shadows, mixed-direction span order, or an unknown shape preset) are reported
-per slide on stderr and under `approximations` in `preview.json`.
+per slide on stderr.
 
 Every new project also gets a project-level skill at
 `.agents/skills/gwen/` - an agent- and human-readable reference to the gwen

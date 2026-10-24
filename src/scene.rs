@@ -124,7 +124,9 @@ pub struct Scene {
     pub items: Vec<Item>,
     /// 1-based slide number.
     pub page: usize,
-    /// Features drawn approximately, reported to stderr and JSON.
+    /// Source slide file, relative to `<deck>/slides`.
+    pub file: String,
+    /// Features drawn approximately, reported to stderr.
     pub approximations: Vec<String>,
 }
 
@@ -440,6 +442,11 @@ fn build_slide(
         background,
         items,
         page,
+        file: slide
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         approximations,
     })
 }

@@ -56,7 +56,7 @@ enum Commands {
         #[arg(long, value_name = "N[,N-R]")]
         page: Option<String>,
     },
-    /// Render slides to `target/render/slide-NN.svg` and/or `.png`
+    /// Render slides to `target/render/<slide-stem>.svg` and/or `.png`
     /// (no office suite required; text is drawn with gwen's own layout).
     Render {
         /// Project directory (defaults to the current directory).

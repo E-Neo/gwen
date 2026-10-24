@@ -139,9 +139,14 @@ pub fn path(id: &str, w: f64, h: f64, opts: &GeomOpts) -> Option<String> {
         "triangle" => p(&[(w / 2.0, 0.0), (w, h), (0.0, h)]),
         "rtTriangle" => p(&[(0.0, 0.0), (0.0, h), (w, h)]),
         "diamond" => p(&[(w / 2.0, 0.0), (w, h / 2.0), (w / 2.0, h), (0.0, h / 2.0)]),
-        "parallelogram" => p(&[(w * 0.25, 0.0), (w, 0.0), (w * 0.75, h), (0.0, h)]),
-        "trapezoid" => p(&[(w * 0.25, 0.0), (w * 0.75, 0.0), (w, h), (0.0, h)]),
-        "nonIsoscelesTrapezoid" => p(&[(w * 0.2, 0.0), (w * 0.8, 0.0), (w, h), (0.0, h)]),
+        "parallelogram" => {
+            let x = ooxml_adj(25000.0, min);
+            p(&[(0.0, h), (x, 0.0), (w, 0.0), (w - x, h)])
+        }
+        "trapezoid" | "nonIsoscelesTrapezoid" => {
+            let x = ooxml_adj(25000.0, min);
+            p(&[(0.0, h), (x, 0.0), (w - x, 0.0), (w, h)])
+        }
         "pentagon" => regular(w / 2.0, h / 2.0, w / 2.0, h / 2.0, 5, -90.0),
         "hexagon" => regular(w / 2.0, h / 2.0, w / 2.0, h / 2.0, 6, 0.0),
         "heptagon" => regular(w / 2.0, h / 2.0, w / 2.0, h / 2.0, 7, -90.0),
@@ -271,21 +276,21 @@ pub fn path(id: &str, w: f64, h: f64, opts: &GeomOpts) -> Option<String> {
                 (w * 0.15, h * 0.7),
             ],
         ]),
-        "chevron" => poly(&[
-            (0.0, 0.0),
-            (w * 0.75, 0.0),
-            (w, h * 0.5),
-            (w * 0.75, h),
-            (0.0, h),
-            (w * 0.25, h * 0.5),
-        ]),
-        "homePlate" => poly(&[
-            (0.0, 0.0),
-            (w * 0.75, 0.0),
-            (w, h * 0.5),
-            (w * 0.75, h),
-            (0.0, h),
-        ]),
+        "chevron" => {
+            let x = ooxml_adj(50000.0, min);
+            poly(&[
+                (0.0, 0.0),
+                (w - x, 0.0),
+                (w, h * 0.5),
+                (w - x, h),
+                (0.0, h),
+                (x, h * 0.5),
+            ])
+        }
+        "homePlate" => {
+            let x = w - ooxml_adj(50000.0, min);
+            poly(&[(0.0, 0.0), (x, 0.0), (w, h * 0.5), (x, h), (0.0, h)])
+        }
         "swooshArrow" => {
             let mut b = P::default();
             b.m(w * 0.05, h * 0.55)
@@ -452,6 +457,11 @@ pub fn uses_evenodd(id: &str) -> bool {
 /// Shapes that are open strokes and never have a fill.
 pub fn is_open_line(id: &str) -> bool {
     matches!(id, "line" | "lineInv" | "arc")
+}
+
+/// Convert an OOXML adjustment value (1/100000 of `ss`) to local inches.
+fn ooxml_adj(adj: f64, ss: f64) -> f64 {
+    ss * adj / 100000.0
 }
 
 fn f(v: f64) -> String {
@@ -1705,5 +1715,32 @@ mod tests {
         assert!(is_open_line("lineInv"));
         assert!(is_open_line("arc"));
         assert!(!is_open_line("rect"));
+    }
+
+    #[test]
+    fn chevron_uses_the_shorter_side_for_its_adjustment() {
+        let path = path("chevron", 8.4, 2.6, &GeomOpts::default()).unwrap();
+        assert_eq!(
+            path,
+            "M 0 0 L 7.1 0 L 8.4 1.3 L 7.1 2.6 L 0 2.6 L 1.3 1.3 Z"
+        );
+    }
+
+    #[test]
+    fn home_plate_uses_the_shorter_side_for_its_tip() {
+        let path = path("homePlate", 8.4, 2.6, &GeomOpts::default()).unwrap();
+        assert_eq!(path, "M 0 0 L 7.1 0 L 8.4 1.3 L 7.1 2.6 L 0 2.6 Z");
+    }
+
+    #[test]
+    fn slanted_rectangles_use_the_shorter_side_for_their_offset() {
+        assert_eq!(
+            path("parallelogram", 8.4, 2.6, &GeomOpts::default()).unwrap(),
+            "M 0 2.6 L 0.65 0 L 8.4 0 L 7.75 2.6 Z"
+        );
+        assert_eq!(
+            path("trapezoid", 8.4, 2.6, &GeomOpts::default()).unwrap(),
+            "M 0 2.6 L 0.65 0 L 7.75 0 L 8.4 2.6 Z"
+        );
     }
 }
