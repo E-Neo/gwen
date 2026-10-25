@@ -378,8 +378,8 @@ w = "11.3in"
 h = "4in"
 text = """**gwen** builds .pptx from TOML.
 
-It drives the real pptxgenjs under QuickJS, so everything is
-[standard](https://gitbrent.github.io/PptxGenJS/) PowerPoint.
+It emits standard PowerPoint, with the same OOXML parts
+[pptxgenjs](https://gitbrent.github.io/PptxGenJS/) produces.
 """
 font_size = 24
 "##;

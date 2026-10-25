@@ -6,11 +6,10 @@ Generate clean PowerPoint decks (`.pptx`) from TOML.
 
 A deck is a directory of TOML files - `main.toml`, `masters/*.toml` and
 `slides/*.toml` - that is the single source of truth. `gwen build` compiles it
-into a JSON spec and renders the deck with the **real pptxgenjs bundle** running
-on an embedded QuickJS runtime (`rquickjs`). The parts pptxgenjs produces are
-packaged into a valid `.pptx` container by gwen itself. gwen only ever calls
-pptxgenjs's public API - it never writes OOXML - and a `node` runtime is not
-required.
+into a JSON spec and renders that spec with gwen's **native PPTX writer**. The
+writer is a direct Rust port of pptxgenjs 4.0.1's OOXML emitters, so existing
+decks keep producing the same `.pptx` parts - while gwen stays self-contained
+and needs neither Node nor an embedded JavaScript runtime.
 
 ## Quick start
 
@@ -431,9 +430,8 @@ objects/arrays.
 
 ## Rendering
 
-`gwen build` turns the project into a JSON spec string (`render.rs`). Inside
-the embedded QuickJS runtime, the bridge parses that string with
-`JSON.parse(specJson)` - it becomes a plain JavaScript **data** object, nothing
-more - and passes it to pptxgenjs's public methods (`defineSlideMaster`,
-`addSlide`, `addText`, `addShape`, ...). The spec is data only: nothing from
-your TOML is ever `eval`'d or executed as code in the runtime.
+`gwen build` turns the project into a JSON spec string (`render.rs`) and hands
+that plain **data** object to the native writer in `src/pptx/`. The writer
+parses the spec, builds the same slide/master/layout/notes XML pptxgenjs would,
+and packages the parts with gwen's deterministic ZIP writer. Nothing from your
+TOML is ever evaluated as code.

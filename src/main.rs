@@ -13,7 +13,7 @@ use gwen::error::Result;
 #[command(
     name = "gwen",
     version,
-    about = "Generate PowerPoint decks from TOML (drives pptxgenjs)",
+    about = "Generate PowerPoint decks from TOML",
     subcommand_required = true,
     arg_required_else_help = true
 )]

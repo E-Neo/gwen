@@ -2,21 +2,21 @@
 //!
 //! A deck is a directory with `main.toml` (presentation/theme/sections/styles),
 //! `masters/*.toml` and `slides/*.toml`. `build` translates them into a spec
-//! and renders the deck with the real pptxgenjs bundle running on an embedded
-//! QuickJS runtime, so the output is pptxgenjs's output - gwen never writes
-//! OOXML itself. See the project README for the full format reference.
+//! and renders that spec with gwen's native OOXML/PPTX writer, reproducing
+//! pptxgenjs 4.0.1's output format. See the project README for the full format
+//! reference.
 
 pub mod color;
 pub mod defaults;
 pub mod error;
 pub mod fonts;
 pub mod import;
-pub mod jsbridge;
 pub mod measure;
 pub mod media;
 pub mod model;
 pub mod opts;
 pub mod pages;
+pub mod pptx;
 pub mod presets;
 pub mod preview;
 pub mod render;
@@ -40,7 +40,7 @@ use crate::error::Result;
 pub fn build(project_dir: &Path) -> Result<std::path::PathBuf> {
     let project = model::Project::load(project_dir)?;
     let spec = render::spec_json(&project)?;
-    let bytes = jsbridge::render(&spec)?;
+    let bytes = pptx::render(&spec)?;
 
     let out_dir = project_dir.join("target");
     std::fs::create_dir_all(&out_dir)

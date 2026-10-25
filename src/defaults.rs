@@ -1,11 +1,9 @@
 //! The generator-side defaults gwen must reproduce to preview a deck.
 //!
-//! pptxgenjs resolves placeholder geometry and default text styles at
-//! `write()` time: the theme palette, `+mj-lt`/`+mn-lt` font roles and the
-//! shared master's `titleStyle` / `bodyStyle` / `otherStyle`. Rather than
-//! hard-coding a copy of those tables (which would silently drift when the
-//! vendored bundle is upgraded), ask pptxgenjs itself for an empty deck's
-//! `theme1.xml` and `slideMaster1.xml` once and parse them.
+//! The theme palette, `+mj-lt`/`+mn-lt` font roles and the shared master's
+//! `titleStyle` / `bodyStyle` / `otherStyle` are the same static parts the
+//! native PPTX writer emits.  Parse them once rather than duplicating the
+//! tables in Rust.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,7 +11,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use miette::{Result, miette};
 
 use crate::color::Color;
-use crate::jsbridge;
 use crate::xml::{self, Node};
 
 const EMU_PER_IN: f64 = 914_400.0;
@@ -104,9 +101,9 @@ pub fn get(major_font: &str, minor_font: &str) -> Result<Arc<Defaults>> {
     {
         return Ok(value.clone());
     }
-    let xml = jsbridge::defaults(major_font, minor_font)
-        .map_err(|e| miette!("cannot read pptxgenjs defaults: {e}"))?;
-    let value = Arc::new(parse(&xml.theme, &xml.master)?);
+    let theme = crate::pptx::default_theme_xml(major_font, minor_font);
+    let master = crate::pptx::default_master_styles_xml();
+    let value = Arc::new(parse(&theme, &master)?);
     *guard = Some((key, value.clone()));
     Ok(value)
 }
@@ -269,7 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_defaults_from_the_vendored_bundle() {
+    fn reads_native_default_theme_and_master() {
         let d = get("Calibri", "Calibri").unwrap();
         assert_eq!(d.title.size_pt, Some(44.0), "pptxgenjs title default");
         assert!(d.palette.contains_key("accent1"), "theme palette parsed");
