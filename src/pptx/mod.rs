@@ -1244,7 +1244,7 @@ pub fn render(spec_json: &str) -> Result<Vec<u8>> {
     Ok(deck.render())
 }
 
-/// Default theme used by the preview/measure pipeline for these fonts.
+/// Default theme used by the preview pipeline for these fonts.
 pub(crate) fn default_theme_xml(major_font: &str, minor_font: &str) -> String {
     emit::theme_xml(major_font, minor_font)
 }

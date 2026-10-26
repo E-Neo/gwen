@@ -42,20 +42,6 @@ enum Commands {
         #[arg(default_value = ".")]
         project: String,
     },
-    /// Measure composition, content, structure and palette facts for every
-    /// slide (or one `--page`), as Markdown by default or JSON with `--json`.
-    Measure {
-        /// Project directory (defaults to the current directory).
-        #[arg(default_value = ".")]
-        project: String,
-        /// Emit a JSON document instead of Markdown.
-        #[arg(long)]
-        json: bool,
-        /// Measure selected slides only, as 1-based numbers and ranges
-        /// (`1`, `1,3-5`).
-        #[arg(long, value_name = "N[,N-R]")]
-        page: Option<String>,
-    },
     /// Render slides to `target/render/<slide-stem>.svg` and/or `.png`
     /// (no office suite required; text is drawn with gwen's own layout).
     Render {
@@ -84,21 +70,6 @@ fn main() -> miette::Result<()> {
         Commands::Build { project } => {
             let out = gwen::build(Path::new(&project))?;
             eprintln!("built {}", out.display());
-            Ok(())
-        }
-        Commands::Measure {
-            project,
-            json,
-            page,
-        } => {
-            let pages = match page.as_deref() {
-                Some(raw) => {
-                    Some(gwen::pages::PageSelection::parse(raw).map_err(|e| miette::miette!(e))?)
-                }
-                None => None,
-            };
-            let m = gwen::measure::measure_with(Path::new(&project), pages.as_ref())?;
-            print!("{}", if json { m.to_json() } else { m.to_markdown() });
             Ok(())
         }
         Commands::Render {

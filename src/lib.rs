@@ -11,7 +11,6 @@ pub mod defaults;
 pub mod error;
 pub mod fonts;
 pub mod import;
-pub mod measure;
 pub mod media;
 pub mod model;
 pub mod opts;

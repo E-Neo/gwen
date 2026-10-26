@@ -18,7 +18,6 @@ gwen new <deck>          # scaffold a project
 gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
 gwen build <deck>        # render <deck>/target/<title>.pptx
 gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
-gwen measure <deck>      # layout facts per slide (markdown; --json for JSON)
 ```
 
 `gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
@@ -29,43 +28,6 @@ is copied from it - `template/main.toml` (required, with its
 recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
-
-## Measuring a deck
-
-`gwen measure [project] [--page N[,N-R]] [--json]` reports objective facts
-about what a slide actually looks like - numbers, not judgments. It measures
-the rendered spec (text layout, master inheritance, fills, lines, images), not
-just shape boxes. Lengths are reported in cm and areas in cm²; JSON uses the
-same units.
-
-- **Composition**: `coverage` (share of the slide with painted ink),
-  `whitespace` (perceptually quiet area, including pale fills), `largest_void`
-  (largest quiet rectangle), `salience` (contrast-weighted visual weight),
-  `balance` (weighted centroid offset from center), `margins`, and a 3x3
-  `zones` table. A large saturated rectangle therefore stays high-salience /
-  low-information, while small dense text stays low-salience /
-  high-information.
-- **Content**: `words`, `chars`, `lines`, `text_area`, `content_area`,
-  `density` (words per cm² of slide), `content_density` (words per cm² of
-  painted content), decoration share and blocks, and word counts by zone.
-- **Structure**: `alignment` and unaligned edges, shared x/y gridlines,
-  `near_miss` edges, gap rhythm (`median`, `even`, `cv`) per axis, and real
-  collisions. Text labels on cards, nested shapes, chevron interlocks and thin
-  rules are not collisions.
-- **Palette**: raw colour count, perceptual families, neutral/accent split,
-  exact top colours, text contrast (minimum and low-contrast run count), and
-  one-off colours.
-
-`--page N[,N-R]` measures only the selected 1-based slides (`--page 2`,
-`--page 1,3-5`) while keeping deck-wide averages in the header. The JSON `page`
-field is an array of selected numbers, or `null` for the whole deck. Master
-footer, logo and decoration are excluded from content metrics; master content
-such as a closing "Thank you." is included.
-
-The Markdown report has no tabs or trailing spaces, single blank lines, real
-tables, balanced fences, and fixed-width heatmap rows ending in `|`. `--json`
-emits the same facts with `units: "cm"` and explicit `_cm`, `_cm2`, and
-`_words_per_cm2` fields.
 
 ## Previewing slides
 
@@ -80,9 +42,9 @@ office suite. Outputs are named after the source slide TOML:
 
 PNG is the default and is the artifact to inspect visually; it is rasterized
 at 2x for readable text. SVG is never written unless requested. `--page`
-accepts the same 1-based `1,3-5` selection syntax as `measure`, and stale
-rendered images from an earlier run are removed so the directory always
-reflects the current invocation.
+accepts 1-based numbers and ranges (`1`, `3-5`), and stale rendered images
+from an earlier run are removed so the directory always reflects the current
+invocation.
 
 Fonts are loaded from `<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system.
 An unknown family falls back to an available sans-serif face instead of

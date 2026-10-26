@@ -1,8 +1,8 @@
 //! Slide page selections: `N[,N-R]` (1-based, whitespace tolerated).
 //!
-//! Both `gwen measure --page` and `gwen render --page` use this parser so a
-//! selection means the same thing everywhere. Selected pages are deduplicated
-//! and returned in ascending deck order.
+//! `gwen render --page` uses this parser, so a selection means the same thing
+//! everywhere. Selected pages are deduplicated and returned in ascending deck
+//! order.
 
 use std::collections::BTreeSet;
 use std::fmt;
