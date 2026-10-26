@@ -376,7 +376,19 @@ fn build_is_deterministic() {
     let dir = sample_project("deterministic");
     let first = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
     let second = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
-    assert_eq!(first, second, "building twice yields identical bytes");
+    let names = zip_names(&first);
+    assert_eq!(names, zip_names(&second), "same part list");
+    for name in names {
+        // core.xml carries the build timestamp, so compare every other part.
+        if name.ends_with('/') || name == "docProps/core.xml" {
+            continue;
+        }
+        assert_eq!(
+            zip_member(&first, &name),
+            zip_member(&second, &name),
+            "part {name} is deterministic"
+        );
+    }
 }
 
 #[test]
@@ -662,7 +674,7 @@ src = "media/logo.svg"
     // Slide and master layout pictures reference the SVG natively.
     for (part, label) in [
         ("ppt/slides/slide1.xml", "slide"),
-        ("ppt/slideLayouts/slideLayout2.xml", "master layout"),
+        ("ppt/slideLayouts/slideLayout1.xml", "master layout"),
     ] {
         let xml = String::from_utf8(zip_member(&bytes, part).unwrap()).unwrap();
         assert!(
@@ -782,7 +794,7 @@ slides = ["a.toml", "b.toml"]
     );
     // Master A's layout stays editable in Slide Master view.
     let a_layout =
-        String::from_utf8(zip_member(&bytes, "ppt/slideLayouts/slideLayout2.xml").unwrap())
+        String::from_utf8(zip_member(&bytes, "ppt/slideLayouts/slideLayout1.xml").unwrap())
             .unwrap();
     assert!(
         !a_layout.contains("noTextEdit"),
@@ -936,8 +948,14 @@ slides = ["one.toml"]
 "##,
     );
     write(
+        &dir.join("masters").join("brand.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
         &dir.join("slides").join("one.toml"),
-        r##"[[shapes]]
+        r##"master = "brand"
+
+[[shapes]]
 type = "rect"
 x = "0.5in"
 y = "0.5in"
@@ -1391,7 +1409,7 @@ fn template_home(name: &str) -> PathBuf {
     );
     write(
         &t.join("slides").join("a.toml"),
-        "[[shapes]]\ntype = \"text\"\ntext = \"from template\"\n",
+        "master = \"a\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"from template\"\n",
     );
     write(&t.join("media").join("keep.txt"), "payload\n");
     home
@@ -1605,7 +1623,9 @@ slides = ["content.toml"]
     );
     write(
         &dir.join("slides").join("content.toml"),
-        r##"[[shapes]]
+        r##"master = "brand"
+
+[[shapes]]
 type = "text"
 x = "1in"
 y = "1in"
@@ -1635,7 +1655,9 @@ fn snake_case_shape_type_builds_as_preset() {
     let dir = sample_project("snakepreset");
     write(
         &dir.join("slides").join("content.toml"),
-        r##"[[shapes]]
+        r##"master = "brand"
+
+[[shapes]]
 type = "round_rect"
 x = "1in"
 y = "1in"
@@ -1660,7 +1682,7 @@ fn snake_case_preset_renders_canonical_prst() {
     let dir = sample_project("snakeprst");
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
     );
     let out = gwen::build(&dir).unwrap();
     let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
@@ -1680,7 +1702,7 @@ fn snake_case_style_bucket_applies() {
     std::fs::write(dir.join("main.toml"), main).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
     );
     let out = gwen::build(&dir).unwrap();
     let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
@@ -1697,7 +1719,7 @@ fn camel_case_style_bucket_still_applies() {
     std::fs::write(dir.join("main.toml"), main).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"round_rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\n",
     );
     let out = gwen::build(&dir).unwrap();
     let xml = zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap();
@@ -1732,7 +1754,7 @@ fn wrong_option_value_type_is_reported() {
     let dir = sample_project("badvaltype");
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\nrect_radius = \"1cm\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\nrect_radius = \"1cm\"\n",
     );
     let err = gwen::build(&dir).unwrap_err();
     let msg = format!("{err:?}");
@@ -1747,7 +1769,7 @@ fn length_string_margin_is_coerced_to_inches() {
     let dir = sample_project("lenmargin");
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"text\"\nx = \"1.5in\"\ny = \"1.5in\"\nw = \"4in\"\nh = \"1in\"\ntext = \"hi\"\nmargin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1.5in\"\ny = \"1.5in\"\nw = \"4in\"\nh = \"1in\"\ntext = \"hi\"\nmargin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -1794,7 +1816,7 @@ fn bad_value_reports_source_location() {
     let dir = sample_project("located");
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\ntext = \"hi\"\nfont_size = \"big\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"3in\"\nh = \"1in\"\ntext = \"hi\"\nfont_size = \"big\"\n",
     );
     let err = gwen::build(&dir).unwrap_err();
     let msg = format!("{err:?}");
@@ -1818,7 +1840,7 @@ fn image_w_only_derives_height_from_aspect() {
     std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -1841,7 +1863,7 @@ fn image_h_only_derives_width_from_aspect() {
     std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nh = \"1in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nh = \"1in\"\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -1864,7 +1886,7 @@ fn image_needs_w_or_h() {
     std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\n",
     );
     let err = gwen::build(&dir).unwrap_err();
     assert!(
@@ -1882,7 +1904,7 @@ fn image_aspect_from_svg_viewbox() {
     );
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"image\"\nsrc = \"media/logo.svg\"\nx = \"1in\"\ny = \"1in\"\nw = \"4in\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"image\"\nsrc = \"media/logo.svg\"\nx = \"1in\"\ny = \"1in\"\nw = \"4in\"\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -1904,7 +1926,7 @@ fn image_sizing_disables_derivation() {
     std::fs::write(dir.join("media").join("pixel.png"), png_bytes(200, 100)).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nsizing = { type = \"cover\" }\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"image\"\nsrc = \"media/pixel.png\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nsizing = { type = \"cover\" }\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -2290,7 +2312,7 @@ fn span_renders_per_run_color() {
     std::fs::write(dir.join("main.toml"), main).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"8in\"\nh = \"1in\"\ntext = \"black with <span class=\\\"red\\\">**bold and red**</span>\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"8in\"\nh = \"1in\"\ntext = \"black with <span class=\\\"red\\\">**bold and red**</span>\"\n",
     );
     let project = gwen::model::Project::load(&dir).unwrap();
     let spec: serde_json::Value =
@@ -2360,7 +2382,7 @@ fn span_unknown_class_reports_location() {
     let dir = sample_project("spanbad");
     write(
         &dir.join("slides").join("content.toml"),
-        "[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"8in\"\nh = \"1in\"\ntext = \"with <span class=\\\"nope\\\">bad</span>\"\n",
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"8in\"\nh = \"1in\"\ntext = \"with <span class=\\\"nope\\\">bad</span>\"\n",
     );
     let err = gwen::build(&dir).unwrap_err();
     let msg = format!("{err:?}");
@@ -2821,4 +2843,108 @@ fn import_whitespace_only_run_does_not_panic() {
         "no emphasis markers around a bare space: {slide_toml}"
     );
     gwen::build(&imported).unwrap();
+}
+
+#[test]
+fn negative_extent_is_rejected() {
+    for axis in ["w", "h"] {
+        let dir = sample_project(&format!("negextent-{axis}"));
+        let other = if axis == "w" { "h" } else { "w" };
+        write(
+            &dir.join("slides").join("content.toml"),
+            &format!(
+                "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\n{axis} = \"-1in\"\n{other} = \"1in\"\n"
+            ),
+        );
+        let err = gwen::build(&dir).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains(&format!("`{axis}` must not be negative")),
+            "negative {axis} is a build error: {msg}"
+        );
+    }
+}
+
+#[test]
+fn missing_master_is_reported() {
+    let dir = sample_project("nomaster");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "[[shapes]]\ntype = \"text\"\ntext = \"hi\"\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("missing required `master`"),
+        "a slide without a master is rejected: {msg}"
+    );
+}
+
+#[test]
+fn core_properties_name_gwen() {
+    let dir = sample_project("metadata");
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let core = String::from_utf8(zip_member(&bytes, "docProps/core.xml").unwrap()).unwrap();
+    assert!(core.contains("<dc:creator>Gwen</dc:creator>"), "{core}");
+    assert!(
+        core.contains("<cp:lastModifiedBy>Gwen</cp:lastModifiedBy>"),
+        "{core}"
+    );
+    assert!(!core.contains("PptxGenJS"), "no pptxgenjs metadata: {core}");
+    assert!(
+        core.contains("<dcterms:created xsi:type=\"dcterms:W3CDTF\">20"),
+        "created timestamp is emitted: {core}"
+    );
+    let app = String::from_utf8(zip_member(&bytes, "docProps/app.xml").unwrap()).unwrap();
+    assert!(app.contains("<Company>Gwen</Company>"), "{app}");
+}
+
+#[test]
+fn section_guids_use_uppercase_hex() {
+    let dir = sample_project("guids");
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = String::from_utf8(zip_member(&bytes, "ppt/presentation.xml").unwrap()).unwrap();
+    let mut found = 0;
+    let mut rest = xml.as_str();
+    while let Some(at) = rest.find("id=\"{") {
+        rest = &rest[at + "id=\"{".len()..];
+        let end = rest.find('}').expect("closed guid");
+        let guid = &rest[..end];
+        assert!(
+            !guid.chars().any(|c| c.is_ascii_lowercase()),
+            "guid uses uppercase hex: {guid}"
+        );
+        found += 1;
+        rest = &rest[end..];
+    }
+    assert!(found > 0, "sections carry guids: {xml}");
+}
+
+#[test]
+fn placeholders_are_locked() {
+    let dir = sample_project("phlocks");
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    for part in ["ppt/slides/slide1.xml", "ppt/slideLayouts/slideLayout1.xml"] {
+        let xml = String::from_utf8(zip_member(&bytes, part).unwrap()).unwrap();
+        assert!(
+            xml.contains("<p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr>"),
+            "placeholder shapes are not grouped: {part}: {xml}"
+        );
+    }
+}
+
+#[test]
+fn slide_number_field_shows_a_placeholder_marker() {
+    let dir = sample_project("slnumtext");
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    for (part, want) in [
+        ("ppt/slides/slide1.xml", "<a:t>‹#›</a:t>"),
+        ("ppt/notesSlides/notesSlide1.xml", "<a:t>‹#›</a:t>"),
+    ] {
+        let xml = String::from_utf8(zip_member(&bytes, part).unwrap()).unwrap();
+        assert!(
+            xml.contains(want),
+            "slide number field text in {part}: {xml}"
+        );
+    }
 }

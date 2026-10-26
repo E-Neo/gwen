@@ -25,7 +25,6 @@ pub(crate) const EMU: f64 = 914_400.0;
 pub(crate) const ONEPT: f64 = 12_700.0;
 pub(crate) const CRLF: &str = "\r\n";
 pub(crate) const LAYOUT_IDX_SERIES_BASE: u64 = 2_147_483_649;
-pub(crate) const DEF_PRES_LAYOUT_NAME: &str = "DEFAULT";
 pub(crate) const DEF_FONT_COLOR: &str = "000000";
 pub(crate) const DEF_SHAPE_LINE_COLOR: &str = "333333";
 pub(crate) const DEF_BULLET_MARGIN: f64 = 27.0;
@@ -279,11 +278,10 @@ impl Deck {
             .unwrap_or_default()
     }
 
-    pub fn layout_index(&self, name: &str) -> usize {
+    pub fn layout_index(&self, name: &str) -> Option<usize> {
         self.layouts
             .iter()
             .position(|l| l.name.as_deref() == Some(name))
-            .unwrap_or(0)
     }
 }
 
@@ -311,12 +309,12 @@ impl Lcg {
             match c {
                 'x' => {
                     let r = (self.next() * 16.0) as u32;
-                    out.push(char::from_digit(r, 16).unwrap());
+                    out.push(char::from_digit(r, 16).unwrap().to_ascii_uppercase());
                 }
                 'y' => {
                     let r = (self.next() * 16.0) as u32;
                     let v = 8 | (r & 3);
-                    out.push(char::from_digit(v, 16).unwrap());
+                    out.push(char::from_digit(v, 16).unwrap().to_ascii_uppercase());
                 }
                 other => out.push(other),
             }
@@ -1000,16 +998,7 @@ fn build_deck(spec_json: &str) -> Result<Deck> {
         height,
         major_font,
         minor_font,
-        layouts: vec![Target {
-            name: Some(DEF_PRES_LAYOUT_NAME.into()),
-            slide_num: Some(1000),
-            rels: Vec::new(),
-            media: Vec::new(),
-            objects: Vec::new(),
-            background: None,
-            slide_number: None,
-            slide_layout: None,
-        }],
+        layouts: Vec::new(),
         master: Target::default(),
         slides: Vec::new(),
         sections: Vec::new(),
@@ -1135,12 +1124,14 @@ fn build_deck(spec_json: &str) -> Result<Deck> {
             .unwrap_or_default();
         for s in slides {
             let Some(s) = s.as_object() else { continue };
-            let layout_idx = s
+            let n = deck.slides.len() + 1;
+            let master = s
                 .get("master")
                 .and_then(Value::as_str)
-                .map(|name| deck.layout_index(name))
-                .unwrap_or(0);
-            let n = deck.slides.len() + 1;
+                .ok_or_else(|| miette!("slide {n}: spec is missing `master`"))?;
+            let layout_idx = deck
+                .layout_index(master)
+                .ok_or_else(|| miette!("slide {n}: unknown master `{master}`"))?;
             let mut slide = Target {
                 name: Some(format!("Slide {n}")),
                 slide_num: Some(n as u64),
@@ -1463,7 +1454,6 @@ fn lock_targets(deck: &Deck) -> HashSet<String> {
     let locked: Vec<bool> = deck
         .layouts
         .iter()
-        .skip(1)
         .map(|l| {
             l.slide_number
                 .as_ref()
@@ -1473,7 +1463,7 @@ fn lock_targets(deck: &Deck) -> HashSet<String> {
         })
         .collect();
     for (i, slide) in deck.slides.iter().enumerate() {
-        let idx = slide.slide_layout.unwrap_or(0).saturating_sub(1);
+        let idx = slide.slide_layout.unwrap_or(0);
         if locked.get(idx).copied().unwrap_or(false) {
             out.insert(format!("ppt/slides/slide{}.xml", i + 1));
         }

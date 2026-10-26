@@ -332,6 +332,8 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             } else {
                 (geo(&obj.w, width, "w")?, geo(&obj.h, height, "h")?)
             };
+            reject_negative_extent(w_in, "w", &where_)?;
+            reject_negative_extent(h_in, "h", &where_)?;
             out.insert("w".into(), json!(w_in));
             out.insert("h".into(), json!(h_in));
             if matches!(ty, "text" | "placeholder") {
@@ -477,8 +479,12 @@ fn slide_number_value(
     let mut out = Map::new();
     out.insert("x".into(), json!(geo(&sn.x, width, "x")?));
     out.insert("y".into(), json!(geo(&sn.y, height, "y")?));
-    out.insert("w".into(), json!(geo(&sn.w, width, "w")?));
-    out.insert("h".into(), json!(geo(&sn.h, height, "h")?));
+    let w_in = geo(&sn.w, width, "w")?;
+    let h_in = geo(&sn.h, height, "h")?;
+    reject_negative_extent(w_in, "w", &where_)?;
+    reject_negative_extent(h_in, "h", &where_)?;
+    out.insert("w".into(), json!(w_in));
+    out.insert("h".into(), json!(h_in));
     let opts = to_pptxgen(&opts);
     for (k, v) in opts.as_object().unwrap() {
         out.insert(k.clone(), v.clone());
@@ -545,24 +551,25 @@ fn build_slide(
     let file_src = FileSrc::new(path.clone(), raw.clone())?;
     let slide: crate::model::Slide =
         toml::from_str(&raw).map_err(|e| miette!("cannot parse `{}`: {e}", path.display()))?;
-    if let Some(master) = &slide.master
-        && !project.master_path(master).is_file()
-    {
+    let Some(master) = &slide.master else {
+        return Err(miette!(
+            "slide `{file}`: missing required `master` (add `master = \"<name>\"` at the top of the file)"
+        ));
+    };
+    if !project.master_path(master).is_file() {
         return Err(miette!(
             "slide `{file}` references unknown master `{master}` (no `{}`)",
             project.master_path(master).display()
         ));
     }
-    if let Some(master) = &slide.master {
-        let names = master_placeholder_names(project, master, file)?;
-        for shape in &slide.shapes {
-            if let Some(p) = shape.opts.get("placeholder").and_then(|v| v.as_str())
-                && !names.contains(p)
-            {
-                return Err(miette!(
-                    "slide `{file}` fills placeholder `{p}` but master `{master}` has no placeholder of that name"
-                ));
-            }
+    let names = master_placeholder_names(project, master, file)?;
+    for shape in &slide.shapes {
+        if let Some(p) = shape.opts.get("placeholder").and_then(|v| v.as_str())
+            && !names.contains(p)
+        {
+            return Err(miette!(
+                "slide `{file}` fills placeholder `{p}` but master `{master}` has no placeholder of that name"
+            ));
         }
     }
 
@@ -669,6 +676,8 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
             geo(&shape.h, ctx.height, "h")?,
         )
     };
+    reject_negative_extent(w_in, "w", &where_)?;
+    reject_negative_extent(h_in, "h", &where_)?;
     value.insert("w".into(), json!(w_in));
     value.insert("h".into(), json!(h_in));
     match kind {
@@ -995,6 +1004,17 @@ fn geo(coord: &Option<Coord>, slide_emu: i64, axis: &str) -> Result<f64> {
         .map(|c| c.inches(slide_emu))
         .unwrap_or(Ok(0.0))
         .map_err(|e| miette!("invalid `{axis}` coordinate: {e}"))
+}
+
+/// `a:ext` only accepts non-negative values; a negative extent cannot be
+/// represented in OOXML and makes PowerPoint reject the deck.
+fn reject_negative_extent(value: f64, axis: &str, where_: &str) -> Result<()> {
+    if value < 0.0 {
+        return Err(miette!(
+            "{where_}: `{axis}` must not be negative (got {value})"
+        ));
+    }
+    Ok(())
 }
 
 /// A `background` value may be a color shorthand (`"FFFFFF"`) or a full

@@ -411,6 +411,9 @@ project.
 - text is markdown: `**bold**`, `*italic*`, `[link](url)`, a single `\n` is a
   soft break, a blank line is a new paragraph, `- item` / `1. item` are
   bulleted lists
+- a line that starts with `-`, `+`, `*`, `>`, or `1.` is a markdown list or
+  quote marker; escape the leading character (`\- item`, `\> note`) to show
+  it literally
 - coordinates: EMU integers or `"1in"` / `"2.5cm"` / `"25mm"` / `"72pt"` /
   `"50%"`
 - gwen validates strictly: unknown fields/options/`styles` references/cycles
@@ -512,7 +515,8 @@ font_size = 26; color = "FFFFFF"; bold = true
 
 Slide-level keys (`master`, `background`, `hidden`, `notes`) must come BEFORE
 the first `[[shapes]]` - in TOML, keys after a `[[shapes]]` header belong to
-the last shape. `hidden` is accepted but not applied (pptxgenjs has no hidden
+the last shape. `master` is required and must name a `masters/<name>.toml`
+file. `hidden` is accepted but not applied (pptxgenjs has no hidden
 slides).
 
 ```toml
@@ -575,6 +579,9 @@ guarantee a line break but don't stack, so `a\n<br>\nb` is one line break.
 
 `- item` / `1. item` markdown lists become bulleted paragraphs; an item's
 indent level equals its nesting depth (top-level 0, nested = parent + 1).
+A line that starts with a markdown marker (`-`, `+`, `*`, `>`, or `1.`) is
+parsed as a list or quote marker. Escape the leading character with a
+backslash (`\- item`, `\+ item`, `\> note`) to show it literally.
 Marker styles come from `[styles.*]` `ordered_markers` (patterns like `"1."`,
 `"(1)"`, `"A."`) and `unordered_markers` (unicode runes, e.g. `"\u25BA"`),
 indexed by indent level; missing levels fall back to the last marker, then
@@ -661,5 +668,12 @@ mod tests {
         assert!(out.starts_with("[presentation]"));
         assert!(out.contains("title = \"deck\""));
         assert!(out.contains("[[sections]]"));
+    }
+
+    #[test]
+    fn skill_docs_explain_markdown_escaping_and_required_masters() {
+        assert!(DEFAULT_SKILL_MD.contains("escape the leading character"));
+        assert!(DEFAULT_DSL_SPEC.contains("Escape the leading character"));
+        assert!(DEFAULT_DSL_SPEC.contains("`master` is required"));
     }
 }

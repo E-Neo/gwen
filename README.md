@@ -262,7 +262,7 @@ master doesn't define is an error.
 ### `slides/<name>.toml`
 
 ```toml
-master = "brand"                    # optional master name
+master = "brand"                    # required master name
 background = "112233"               # color string or background object
 hidden = false                      # accepted; not applied (pptxgenjs has no hidden slides)
 notes = "presenter notes"
@@ -387,8 +387,10 @@ shape-level `align` instead.
 ### Lists
 
 Markdown lists in `text` become bulleted paragraphs with the correct indent
-level (top-level = 0, nested = parent + 1). The marker style per indent level
-is configured in style buckets:
+level (top-level = 0, nested = parent + 1). A line starting with `-`, `+`,
+`*`, `>`, or `1.` is treated as a list or quote marker; escape the leading
+character (`\- item`, `\> note`) to show it literally. The marker style per
+indent level is configured in style buckets:
 
 ```toml
 [styles.text]
