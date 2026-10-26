@@ -42,6 +42,12 @@ enum Commands {
         #[arg(default_value = ".")]
         project: String,
     },
+    /// Remove the generated `target/` directory.
+    Clean {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+    },
     /// Render slides to `target/render/<slide-stem>.svg` and/or `.png`
     /// (no office suite required; text is drawn with gwen's own layout).
     Render {
@@ -70,6 +76,15 @@ fn main() -> miette::Result<()> {
         Commands::Build { project } => {
             let out = gwen::build(Path::new(&project))?;
             eprintln!("built {}", out.display());
+            Ok(())
+        }
+        Commands::Clean { project } => {
+            let root = Path::new(&project);
+            if gwen::clean(root)? {
+                eprintln!("cleaned {}", root.join("target").display());
+            } else {
+                eprintln!("nothing to clean");
+            }
             Ok(())
         }
         Commands::Render {

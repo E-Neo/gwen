@@ -18,7 +18,11 @@ gwen new <deck>          # scaffold a project
 gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
 gwen build <deck>        # render <deck>/target/<title>.pptx
 gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
+gwen clean <deck>        # remove the generated <deck>/target/ directory
 ```
+
+`gwen clean` refuses to run unless `<deck>/main.toml` exists, so it cannot
+delete an unrelated `target/`.
 
 `gwen new` uses a template from gwen's home directory when one exists: `$GWEN_HOME`
 if set, otherwise `~/.gwen`. If `<home>/template/` is present, the new project

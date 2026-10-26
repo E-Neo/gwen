@@ -2769,3 +2769,57 @@ fn slide_number_field_shows_a_placeholder_marker() {
         );
     }
 }
+
+#[test]
+fn gwen_clean_removes_generated_target() {
+    let dir = sample_project("clean");
+    gwen::build(&dir).unwrap();
+    assert!(dir.join("target").is_dir(), "build creates target/");
+
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_gwen"))
+            .arg("clean")
+            .arg(dir.as_os_str())
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    assert!(
+        out.status.success(),
+        "gwen clean failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.join("target").exists(), "target/ removed");
+    assert!(dir.join("main.toml").is_file(), "sources untouched");
+
+    let again = run();
+    assert!(again.status.success(), "cleaning twice succeeds");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("nothing to clean"),
+        "second clean is a no-op: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}
+
+#[test]
+fn gwen_clean_requires_a_gwen_project() {
+    let dir = tmp("clean-safety");
+    std::fs::create_dir_all(dir.join("target")).unwrap();
+    std::fs::write(dir.join("target").join("keep"), b"keep").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("clean")
+        .arg(dir.as_os_str())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "non-gwen directories are refused");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a gwen project"),
+        "handler explains the refusal: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("target").join("keep").is_file(),
+        "the unrelated target/ is untouched"
+    );
+}

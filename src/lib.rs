@@ -50,3 +50,32 @@ pub fn build(project_dir: &Path) -> Result<std::path::PathBuf> {
     std::fs::write(&out, bytes).map_err(|e| miette!("cannot write {}: {e}", out.display()))?;
     Ok(out)
 }
+
+/// Remove the generated `target/` directory, returning whether it existed.
+///
+/// Only directories that contain `main.toml` are touched, so cleaning a
+/// non-gwen directory cannot delete an unrelated `target/`.
+pub fn clean(project_dir: &Path) -> Result<bool> {
+    if !project_dir.join("main.toml").is_file() {
+        return Err(miette!(
+            "`{}` is not a gwen project (no main.toml)",
+            project_dir.display()
+        ));
+    }
+    let target = project_dir.join("target");
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.is_dir() => {
+            std::fs::remove_dir_all(&target)
+                .map_err(|e| miette!("cannot remove `{}`: {e}", target.display()))?;
+            Ok(true)
+        }
+        Ok(_) => {
+            // A file or symlink at target/ is removed as-is, never followed.
+            std::fs::remove_file(&target)
+                .map_err(|e| miette!("cannot remove `{}`: {e}", target.display()))?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(miette!("cannot inspect `{}`: {e}", target.display())),
+    }
+}

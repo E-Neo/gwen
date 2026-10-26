@@ -397,7 +397,8 @@ This directory is a **gwen** project: a PowerPoint deck defined by TOML files.
 `gwen build` regenerates `target/<title>.pptx` deterministically - edit the
 TOML, never the `.pptx`. TOML is the single source of truth. `gwen render`
 paints `target/render/<slide-stem>.png` directly from the same TOML, without an
-office suite, so you can inspect a slide before building.
+office suite, so you can inspect a slide before building. `gwen clean` removes
+the generated `target/` directory.
 
 ## When to use
 Editing or building slides, masters, styles or any `.toml` file in this
@@ -437,7 +438,8 @@ This directory is a **gwen** project: a PowerPoint deck defined by TOML files.
 `gwen build` regenerates `target/<title>.pptx` deterministically - edit the
 TOML, never the `.pptx`. TOML is the single source of truth. `gwen render`
 paints `target/render/<slide-stem>.png` directly from the same TOML, without an
-office suite, so you can inspect a slide before building.
+office suite, so you can inspect a slide before building. `gwen clean` removes
+the generated `target/` directory.
 
 ```
 deck/
