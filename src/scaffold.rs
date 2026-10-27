@@ -69,17 +69,19 @@ pub fn scaffold(root: &Path, name: &str, no_template: bool, pptx: Option<&Path>)
         return Ok(());
     }
     scaffold_builtin(root, name)?;
-    write_gitignore(root)
+    write_gitignore(root)?;
+    Ok(())
 }
 
 /// Write (or append to) the project `.gitignore` so `target/` is ignored.
-fn write_gitignore(root: &Path) -> Result<()> {
+/// Returns true when the file changed.
+pub(crate) fn write_gitignore(root: &Path) -> Result<bool> {
     let path = root.join(".gitignore");
     if path.exists() {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| miette::miette!("cannot read `{}`: {e}", path.display()))?;
         if contents.lines().any(|l| l.trim() == "target/") {
-            return Ok(());
+            return Ok(false);
         }
         let mut out = contents;
         if !out.ends_with('\n') {
@@ -87,10 +89,12 @@ fn write_gitignore(root: &Path) -> Result<()> {
         }
         out.push_str("target/\n");
         std::fs::write(&path, out)
-            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))
+            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))?;
+        Ok(true)
     } else {
         std::fs::write(&path, "target/\n")
-            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))
+            .map_err(|e| miette::miette!("cannot write `{}`: {e}", path.display()))?;
+        Ok(true)
     }
 }
 
@@ -228,12 +232,23 @@ fn scaffold_project_skill(root: &Path, template: Option<&Path>, _name: &str) -> 
     }
     let dir = root.join(".agents").join("skills").join("gwen");
     create_dir(&dir.join("references"))?;
+    for (rel, contents) in gwen_skill_files() {
+        write_file(&root.join(rel), &contents)?;
+    }
+    Ok(())
+}
+
+/// The generated project skill, as `(path relative to the project, contents)`.
+/// Kept separate so `gwen update` can refresh the same two files from the
+/// binary (the DSL spec may be newer than the installed template).
+pub(crate) fn gwen_skill_files() -> [(&'static str, String); 2] {
     let spec = DEFAULT_DSL_SPEC
         .replace("{{shape_types}}", &shape_types())
         .replace("{{option_fields}}", &option_fields());
-    write_file(&dir.join("SKILL.md"), DEFAULT_SKILL_MD)?;
-    write_file(&dir.join("references").join("toml-dsl.md"), &spec)?;
-    Ok(())
+    [
+        (".agents/skills/gwen/SKILL.md", DEFAULT_SKILL_MD.to_string()),
+        (".agents/skills/gwen/references/toml-dsl.md", spec),
+    ]
 }
 
 /// All supported shape preset ids as snake_case, sorted, in one paragraph.
@@ -310,16 +325,20 @@ slides = ["title.toml", "intro.toml"]
 
 # [styles.shape] is the base style for every shape; [styles.<type>] layers on
 # top of it for specific shape types (text, image, rect, ellipse, ...).
+# [styles.text] only applies to `type = "text"`; shared text options belong in
+# [styles.shape]. Master placeholders use [styles.placeholder].
 # [styles.shape]
 # fill = { color = "C7000A" }
 # [styles.text]
 # font_face = "Arial"
 # font_size = 18
 # color = "262626"
+# [styles.placeholder]
+# line = { type = "none" }
 # [styles.image]
 # sizing = { type = "contain" }
 
-# Named styles; a shape referencing `style = "muted"` merges these.
+# Named styles; a shape referencing `styles = "muted"` merges these.
 # [styles.named.muted]
 # color = "808080"
 # italic = true
@@ -406,7 +425,7 @@ project.
 
 ## Quick rules
 - `[[sections]]` in main.toml is required and is the slide index
-- styles precedence: `[styles.shape] < [styles.text] < [styles.<type>] < shape styles < shape keys`; `styles` accepts a string or a list and may be recursive (cycles are errors)
+- styles precedence: `[styles.shape] < [styles.<type>] < shape styles < shape keys`; `[styles.text]` applies only to `type = "text"` and `[styles.placeholder]` to master placeholders; shared text options belong in `[styles.shape]`; `styles` accepts a string or a list and may be recursive (cycles are errors)
 - shape types and marker names are snake_case (`round_rect`); option keys are
   snake_case (`font_size`)
 - text is markdown: `**bold**`, `*italic*`, `[link](url)`, a single `\n` is a
@@ -422,6 +441,11 @@ project.
 - to look at a slide, render it: `gwen render --page 1,3-5 --format png` writes
   `target/render/<slide-stem>.png`; features that are still approximated are
   reported on stderr
+- `gwen update .` refreshes template-owned files (`masters/`, `media/`,
+  `.agents/`) and merges the template's `[theme]` / `[styles.*]` into
+  main.toml; slides, sections and the title are never touched
+- `gwen fmt .` normalizes TOML whitespace in place (comments, key order and
+  multi-line strings are preserved); `gwen fmt . --check` only reports
 
 ## Full specification
 Read **references/toml-dsl.md** for the complete TOML DSL specification
@@ -465,12 +489,15 @@ deck/
 Precedence when building a shape's options:
 
 ```
-[styles.shape] < [styles.text] < [styles.<type>] < shape's own `styles` < shape keys
+[styles.shape] < [styles.<type>] < shape's own `styles` < shape keys
 ```
 
-- `[styles.shape]` is the base for every shape; `[styles.text]` layers onto it
-  for text-carrying shapes (type `text`, or a preset with a text value);
-  `[styles.<type>]` layers per type id (`text`, `image`, `rect`, `ellipse`, ...).
+- `[styles.shape]` is the base for every shape; `[styles.<type>]` layers per
+  type id (`text`, `image`, `placeholder`, `rect`, `ellipse`, ...).
+  `[styles.text]` is an ordinary type bucket: it applies only to
+  `type = "text"`. Text options shared by every shape (font, size, align,
+  margins) belong in `[styles.shape]`; master placeholders use
+  `[styles.placeholder]`.
 - A bucket may hold keys that only some shape types can apply: they take effect
   where valid and are dropped elsewhere (an `align` in `[styles.shape]` applies
   to text shapes but is ignored by image shapes, not an error). Buckets are

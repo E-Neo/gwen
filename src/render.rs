@@ -285,13 +285,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             if !matches!(ty, "chart") && opts::ctx_for_style_type(ty).is_none() {
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
             }
-            let mut opts = merge_opts(
-                main,
-                &obj.ty,
-                matches!(ty, "text" | "placeholder"),
-                &obj.styles,
-                &obj.opts,
-            )?;
+            let mut opts = merge_opts(main, &obj.ty, &obj.styles, &obj.opts)?;
             let (ordered_markers, unordered_markers) = take_markers(&mut opts);
             let where_ = format!("master `{stem}` shape `{}`", obj.ty);
             let ctx = match ty {
@@ -635,13 +629,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
             }
         }
     }
-    let mut merged = merge_opts(
-        ctx.main,
-        &shape.ty,
-        carries_text,
-        &shape.styles,
-        &shape.opts,
-    )?;
+    let mut merged = merge_opts(ctx.main, &shape.ty, &shape.styles, &shape.opts)?;
     let (ordered_markers, unordered_markers) = take_markers(&mut merged);
     if carries_text {
         merged
@@ -928,18 +916,17 @@ fn media_value(
     Ok((data, mime, preview))
 }
 
-/// Merge `[styles.<type>]` == `[styles.named.<name>]` == shape.opts (later
-/// wins). Text-carrying shapes layer `[styles.text]` beneath the type bucket,
-/// so type-specific styles win and text options fall back to `[styles.text]`.
-/// An unknown named-style reference is an error so typos are caught.
+/// Merge `[styles.shape]` < `[styles.<type>]` < named styles < shape.opts
+/// (later wins). `[styles.text]` is just the bucket for `type = "text"`;
+/// text options shared by every shape belong in `[styles.shape]`. An unknown
+/// named-style reference is an error so typos are caught.
 fn merge_opts(
     main: &Main,
     ty: &str,
-    carries_text: bool,
     styles: &[String],
     local: &toml::Table,
 ) -> Result<toml::Value> {
-    let mut merged = main.style_chain(ty, carries_text, styles)?;
+    let mut merged = main.style_chain(ty, styles)?;
     for (k, v) in local {
         merged.insert(k.clone(), v.clone());
     }

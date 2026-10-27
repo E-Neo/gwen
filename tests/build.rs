@@ -584,28 +584,65 @@ fn preset_style_bucket_allows_text_options() {
 }
 
 #[test]
-fn text_style_falls_back_for_text_carrying_shape() {
-    let dir = sample_project("textfallback");
+fn text_bucket_only_applies_to_the_text_type() {
+    let dir = sample_project("textbucket");
     let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = main
+        .replace(
+            "[styles.shape]\nfill = { color = \"C7000A\" }",
+            "[styles.shape]\nfont_face = \"Georgia\"\nfill = { color = \"C7000A\" }",
+        )
+        .replace(
+            "[styles.text]\nfont_face = \"Arial\"\ncolor = \"262626\"",
+            "[styles.text]\nfont_face = \"Courier New\"\ncolor = \"FF00FF\"",
+        );
     let main = format!("{main}\n[styles.rect]\nfont_size = 14\n");
     std::fs::write(dir.join("main.toml"), main).unwrap();
     write(
         &dir.join("slides").join("content.toml"),
         "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\ntext = \"**Bold** text\"\n",
     );
+    // A plain text shape, not a placeholder fill: the master placeholder's
+    // own font would otherwise win over the slide run.
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"0.8in\"\ny = \"1.5in\"\nw = \"7in\"\nh = \"1in\"\ntext = \"Plain text\"\n",
+    );
+
     let out = gwen::build(&dir).unwrap();
-    let xml =
-        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
-    let xml = String::from_utf8(xml).unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let slide2 =
+        String::from_utf8(zip_member(&bytes, "ppt/slides/slide2.xml").expect("slide2 in zip"))
+            .unwrap();
+    // A preset with text stays a preset: it gets [styles.shape] and
+    // [styles.rect], never [styles.text].
     assert!(
-        xml.contains("Arial"),
-        "font_face falls back to [styles.text]"
+        slide2.contains("Georgia"),
+        "text options come from [styles.shape]"
     );
     assert!(
-        xml.contains("sz=\"1400\""),
+        slide2.contains("sz=\"1400\""),
         "font_size from [styles.rect] wins"
     );
-    assert!(xml.contains("<a:t>Bold</a:t>"), "text rendered");
+    assert!(
+        !slide2.contains("Courier New"),
+        "[styles.text] must not leak into a rect"
+    );
+    assert!(
+        !slide2.contains("FF00FF"),
+        "[styles.text] color must not leak into a rect"
+    );
+    assert!(slide2.contains("<a:t>Bold</a:t>"), "text rendered");
+
+    // `type = "text"` still gets its own bucket, which wins over
+    // [styles.shape].
+    let slide1 =
+        String::from_utf8(zip_member(&bytes, "ppt/slides/slide1.xml").expect("slide1 in zip"))
+            .unwrap();
+    assert!(
+        slide1.contains("Courier New"),
+        "[styles.text] still styles type=text"
+    );
 }
 
 #[test]
@@ -1353,6 +1390,495 @@ fn gwen_new_uses_template() {
     let skill = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
     assert!(skill.starts_with("---\n") && skill.contains("name: gwen"));
     assert!(skill_dir.join("references").join("toml-dsl.md").is_file());
+}
+
+/// A template home for the `gwen update` tests: `main.toml` with comments,
+/// two style tables, a master, a slide and a media file.
+fn update_home(name: &str) -> PathBuf {
+    let home = tmp(name);
+    let template = home.join("template");
+    write(
+        &template.join("main.toml"),
+        r##"[presentation]
+title = "Ignored"
+
+[[sections]]
+title = "T"
+slides = ["a.toml"]
+
+# The type theme.
+[theme]
+major_font = "Arial Black"
+minor_font = "Arial"
+
+# Base shape style.
+[styles.shape]
+align = "left"
+
+# The card body.
+[styles.named.card]
+font_size = 12
+color = "000000"
+"##,
+    );
+    write(
+        &template.join("masters").join("a.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
+        &template.join("slides").join("a.toml"),
+        "master = \"a\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"from template\"\n",
+    );
+    write(&template.join("media").join("keep.txt"), "payload\n");
+    home
+}
+
+fn gwen_in(home: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gwen"));
+    command.env("GWEN_HOME", home);
+    for arg in args {
+        command.arg(arg);
+    }
+    command.output().unwrap()
+}
+
+/// `gwen update` refreshes template-owned files and merges `[theme]` /
+/// `[styles.*]` into `main.toml`, keeping comments, the title and the
+/// project's own styles. Slides are never touched.
+#[test]
+fn gwen_update_refreshes_template_files_and_keeps_project_content() {
+    let home = update_home("home-update");
+    let template = home.join("template");
+    let dir = tmp("update-project");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("new"), dir.as_os_str()]);
+    assert!(
+        out.status.success(),
+        "gwen new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The project adds a title of its own, a comment, a project-only key and
+    // a named style.
+    let main_path = dir.join("main.toml");
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let main = std::fs::read_to_string(&main_path).unwrap();
+    let main = main
+        .replace(
+            "# Base shape style.\n",
+            "# Base shape style.\n# Project: margins are handled per shape here.\n",
+        )
+        .replace(
+            "[styles.shape]\nalign = \"left\"\n",
+            "[styles.shape]\nalign = \"left\"\nmargin = 0\n",
+        );
+    let main = format!("{main}\n# Our own accent.\n[styles.named.custom]\ncolor = \"C7000A\"\n");
+    std::fs::write(&main_path, &main).unwrap();
+    let slide_path = dir.join("slides").join("a.toml");
+    std::fs::write(
+        &slide_path,
+        "master = \"a\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"project words\"\n",
+    )
+    .unwrap();
+
+    // The template moves on: a master changes, new files appear, a style key
+    // changes and a new style table is added.
+    write(
+        &template.join("masters").join("a.toml"),
+        "background = { color = \"F2F2F2\" }\n",
+    );
+    write(
+        &template.join("masters").join("b.toml"),
+        "background = { color = \"EEEEEE\" }\n",
+    );
+    write(&template.join("media").join("extra.txt"), "extra\n");
+    let tpl_main = std::fs::read_to_string(template.join("main.toml")).unwrap();
+    let tpl_main = tpl_main
+        .replace("font_size = 12\n", "font_size = 13\nbold = true\n")
+        .to_string()
+        + "\n# The frame style is new.\n[styles.named.frame]\nline = { color = \"D3D3D3\", width = 1 }\n";
+    std::fs::write(template.join("main.toml"), tpl_main).unwrap();
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("update"), dir.as_os_str()]);
+    assert!(
+        out.status.success(),
+        "gwen update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("updated"), "reports updates: {stderr}");
+    assert!(stderr.contains("created"), "reports creations: {stderr}");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("masters").join("a.toml")).unwrap(),
+        "background = { color = \"F2F2F2\" }\n",
+        "template master overwritten"
+    );
+    assert!(
+        dir.join("masters").join("b.toml").is_file(),
+        "new master created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("media").join("extra.txt")).unwrap(),
+        "extra\n",
+        "new media copied"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&slide_path).unwrap(),
+        "master = \"a\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"project words\"\n",
+        "slides are never touched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("target/update-backup/masters/a.toml")).unwrap(),
+        "background = { color = \"FFFFFF\" }\n",
+        "the replaced file is backed up"
+    );
+
+    let updated = std::fs::read_to_string(&main_path).unwrap();
+    assert!(
+        updated.contains(&format!("title = \"{name}\"")),
+        "title kept"
+    );
+    assert!(updated.contains("[[sections]]"), "sections kept");
+    assert!(
+        updated.contains("# The type theme."),
+        "template comments kept: {updated}"
+    );
+    assert!(
+        updated.contains("# Project: margins are handled per shape here."),
+        "project comments kept: {updated}"
+    );
+    assert!(
+        updated.contains("# Our own accent.") && updated.contains("[styles.named.custom]"),
+        "project-only style kept: {updated}"
+    );
+    assert!(updated.contains("margin = 0"), "project-only key kept");
+    assert!(updated.contains("font_size = 13"), "template value wins");
+    assert!(updated.contains("bold = true"), "template key added");
+    assert!(
+        updated.contains("# The frame style is new.") && updated.contains("[styles.named.frame]"),
+        "new template style added with its comment: {updated}"
+    );
+
+    // A second run is a no-op.
+    let before = std::fs::read_to_string(&main_path).unwrap();
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("update"), dir.as_os_str()]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already up to date"),
+        "second update is a no-op: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&main_path).unwrap(), before);
+}
+
+#[test]
+fn gwen_update_dry_run_writes_nothing() {
+    let home = update_home("home-update-dry");
+    let template = home.join("template");
+    let dir = tmp("update-dry");
+    let _ = std::fs::remove_dir_all(&dir);
+    write(
+        &dir.join("main.toml"),
+        "[presentation]\ntitle = \"P\"\n\n[[sections]]\nslides = []\n",
+    );
+    write(
+        &dir.join("masters").join("a.toml"),
+        "background = \"old\"\n",
+    );
+    write(
+        &template.join("masters").join("a.toml"),
+        "background = \"new\"\n",
+    );
+
+    let out = gwen_in(
+        &home,
+        &[
+            std::ffi::OsStr::new("update"),
+            std::ffi::OsStr::new("--dry-run"),
+            dir.as_os_str(),
+        ],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("would update"),
+        "dry run says what: {stderr}"
+    );
+    assert!(
+        stderr.contains("nothing written"),
+        "dry run footer: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("masters").join("a.toml")).unwrap(),
+        "background = \"old\"\n",
+        "dry run writes nothing"
+    );
+    assert!(
+        !dir.join("target").join("update-backup").exists(),
+        "dry run writes no backup"
+    );
+}
+
+#[test]
+fn gwen_update_rejects_broken_main_before_writing() {
+    let home = update_home("home-update-broken");
+    let template = home.join("template");
+    let dir = tmp("update-broken");
+    let _ = std::fs::remove_dir_all(&dir);
+    write(
+        &dir.join("main.toml"),
+        "[presentation]\ntitle = \"P\"\ntitle = \"Q\"\n\n[[sections]]\nslides = []\n",
+    );
+    write(
+        &dir.join("masters").join("a.toml"),
+        "background = \"old\"\n",
+    );
+    write(
+        &template.join("masters").join("a.toml"),
+        "background = \"new\"\n",
+    );
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("update"), dir.as_os_str()]);
+    assert!(!out.status.success(), "an invalid main.toml is an error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("main.toml"),
+        "stderr names the file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("masters").join("a.toml")).unwrap(),
+        "background = \"old\"\n",
+        "nothing is written when main.toml cannot be merged"
+    );
+}
+
+#[test]
+fn gwen_update_keep_styles_leaves_main_toml_alone() {
+    let home = update_home("home-update-styles");
+    let dir = tmp("update-styles");
+    let _ = std::fs::remove_dir_all(&dir);
+    write(
+        &dir.join("main.toml"),
+        "[presentation]\ntitle = \"P\"\n\n[[sections]]\nslides = []\n",
+    );
+    let main_path = dir.join("main.toml");
+    let before = std::fs::read_to_string(&main_path).unwrap();
+
+    let out = gwen_in(
+        &home,
+        &[
+            std::ffi::OsStr::new("update"),
+            std::ffi::OsStr::new("--keep-styles"),
+            dir.as_os_str(),
+        ],
+    );
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&main_path).unwrap(),
+        before,
+        "`--keep-styles` leaves main.toml alone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("masters").join("a.toml")).unwrap(),
+        "background = { color = \"FFFFFF\" }\n",
+        "template files are still synced"
+    );
+}
+
+#[test]
+fn gwen_update_without_template_errors() {
+    let home = tmp("home-update-none");
+    let dir = tmp("update-none");
+    let _ = std::fs::remove_dir_all(&dir);
+    write(
+        &dir.join("main.toml"),
+        "[presentation]\ntitle = \"P\"\n\n[[sections]]\nslides = []\n",
+    );
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("update"), dir.as_os_str()]);
+    assert!(!out.status.success(), "no template is an error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("template"),
+        "stderr mentions the template: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A project with deliberately messy TOML for the `gwen fmt` tests. The
+/// `target/` file must never be touched.
+fn fmt_project(name: &str) -> PathBuf {
+    let dir = tmp(name);
+    write(
+        &dir.join("main.toml"),
+        "\n\n[ presentation ]\ntitle=\"Fmt\"\n\n\n\n[[sections]]\ntitle=\"S\"\nslides=[\"s.toml\"]\n\n[theme]\nmajor_font=\"Arial\"   # heading\n",
+    );
+    write(
+        &dir.join("masters").join("m.toml"),
+        "background={color=\"FFFFFF\"}\n",
+    );
+    write(
+        &dir.join("slides").join("s.toml"),
+        "master=\"m\"\n\n[[shapes]]\ntype=\"text\"\ntext=\"  keep  \"\n\n# note\n[[shapes]]\ntype=\"rect\"\nmargin=[1,2,3,4]\n",
+    );
+    write(
+        &dir.join(".agents")
+            .join("skills")
+            .join("refs")
+            .join("r.toml"),
+        "a=1\n",
+    );
+    write(&dir.join("target").join("ignored.toml"), "a=1\n");
+    dir
+}
+
+/// `gwen fmt` rewrites every project TOML (including `.agents/`), leaves
+/// `target/` alone, and the project still builds.
+#[test]
+fn gwen_fmt_rewrites_project_toml() {
+    let home = tmp("home-fmt");
+    let dir = fmt_project("fmt-project");
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
+    assert!(
+        out.status.success(),
+        "gwen fmt failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("4 formatted, 0 unchanged"), "{stderr}");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("main.toml")).unwrap(),
+        "[presentation]\ntitle = \"Fmt\"\n\n[[sections]]\ntitle = \"S\"\nslides = [\"s.toml\"]\n\n[theme]\nmajor_font = \"Arial\" # heading\n",
+        "main.toml is normalized"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("masters").join("m.toml")).unwrap(),
+        "background = { color = \"FFFFFF\" }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("slides").join("s.toml")).unwrap(),
+        "master = \"m\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"  keep  \"\n\n# note\n[[shapes]]\ntype = \"rect\"\nmargin = [1, 2, 3, 4]\n",
+        "comments and string contents survive"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".agents/skills/refs/r.toml")).unwrap(),
+        "a = 1\n",
+        ".agents toml is formatted too"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("target/ignored.toml")).unwrap(),
+        "a=1\n",
+        "target/ is skipped"
+    );
+
+    gwen::build(&dir).expect("the formatted project still builds");
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("all 4 files already formatted"),
+        "a second run is a no-op: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn gwen_fmt_check_reports_without_writing() {
+    let home = tmp("home-fmt-check");
+    let dir = fmt_project("fmt-check");
+    let main = dir.join("main.toml");
+    let before = std::fs::read_to_string(&main).unwrap();
+
+    let out = gwen_in(
+        &home,
+        &[
+            std::ffi::OsStr::new("fmt"),
+            std::ffi::OsStr::new("--check"),
+            dir.as_os_str(),
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "`--check` exits 1 when work is needed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs format"), "{stderr}");
+    assert!(stderr.contains("4 of 4 files need formatting"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&main).unwrap(),
+        before,
+        "`--check` writes nothing"
+    );
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
+    assert!(out.status.success());
+
+    let out = gwen_in(
+        &home,
+        &[
+            std::ffi::OsStr::new("fmt"),
+            std::ffi::OsStr::new("--check"),
+            dir.as_os_str(),
+        ],
+    );
+    assert!(out.status.success(), "a clean project passes `--check`");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("all 4 files already formatted"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn gwen_fmt_reports_invalid_toml_and_keeps_going() {
+    let home = tmp("home-fmt-bad");
+    let dir = fmt_project("fmt-bad");
+    let broken = dir.join("slides").join("broken.toml");
+    write(
+        &broken,
+        "master = \"m\"\ntitle = \"one\"\ntitle = \"two\"\n",
+    );
+    let broken_before = std::fs::read_to_string(&broken).unwrap();
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
+    assert!(!out.status.success(), "a broken file makes the run fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("slides/broken.toml"),
+        "stderr names the file: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&broken).unwrap(),
+        broken_before,
+        "the broken file is left alone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("main.toml")).unwrap(),
+        "[presentation]\ntitle = \"Fmt\"\n\n[[sections]]\ntitle = \"S\"\nslides = [\"s.toml\"]\n\n[theme]\nmajor_font = \"Arial\" # heading\n",
+        "other files are still formatted"
+    );
+}
+
+#[test]
+fn gwen_fmt_requires_a_project() {
+    let home = tmp("home-fmt-none");
+    let dir = tmp("fmt-none");
+    write(&dir.join("slides").join("s.toml"), "a=1\n");
+
+    let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
+    assert!(!out.status.success(), "no main.toml is an error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("main.toml"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("slides").join("s.toml")).unwrap(),
+        "a=1\n",
+        "nothing is written"
+    );
 }
 
 /// A template may ship its own `.agents/skills/*`; they are copied verbatim

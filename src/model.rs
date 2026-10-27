@@ -310,25 +310,19 @@ impl Main {
     }
 
     /// The full style chain for a shape's options:
-    /// `[styles.shape]` < `[styles.text]` (text-carrying) < `[styles.<type>]`
-    /// < the shape's `styles` references; each bucket applies its own
-    /// `styles` references before its inline keys. Later layers win.
-    pub fn style_chain(
-        &self,
-        ty: &str,
-        carries_text: bool,
-        shape_styles: &[String],
-    ) -> Result<toml::Table> {
+    /// `[styles.shape]` < `[styles.<type>]` < the shape's `styles`
+    /// references; each bucket applies its own `styles` references before its
+    /// inline keys. Later layers win.
+    ///
+    /// `[styles.text]` is an ordinary type bucket: it applies to `type = "text"`
+    /// only. Text options shared by every shape belong in `[styles.shape]`,
+    /// which is validated against the union of shape and text options and has
+    /// inapplicable keys dropped per shape.
+    pub fn style_chain(&self, ty: &str, shape_styles: &[String]) -> Result<toml::Table> {
         let mut out = toml::Table::new();
         let mut path: Vec<String> = Vec::new();
         if let Some(bucket) = self.styles.by_type.get("shape") {
             self.apply_bucket(&mut out, bucket, &mut path)?;
-        }
-        if carries_text
-            && ty != "text"
-            && let Some(text) = self.styles.by_type.get("text")
-        {
-            self.apply_bucket(&mut out, text, &mut path)?;
         }
         if let Some(bucket) = self.styles.by_type.get(ty) {
             self.apply_bucket(&mut out, bucket, &mut path)?;
@@ -399,7 +393,7 @@ mod tests {
             "[styles.shape]\nfill = { color = \"C7000A\" }\ncolor = \"FFFFFF\"\n[styles.rect]\nfill = { color = \"112233\" }\n",
         );
         // rect inherits the shared `color` but its own `fill` wins.
-        let merged = main.style_chain("rect", false, &[]).unwrap();
+        let merged = main.style_chain("rect", &[]).unwrap();
         assert_eq!(merged.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(
             merged
@@ -412,25 +406,37 @@ mod tests {
                 == "112233"
         );
         // an unspecified preset falls back to [styles.shape] alone.
-        let ellipse = main.style_chain("ellipse", false, &[]).unwrap();
+        let ellipse = main.style_chain("ellipse", &[]).unwrap();
         assert_eq!(ellipse.get("color").unwrap().as_str().unwrap(), "FFFFFF");
         assert!(ellipse.get("fill").is_some());
     }
 
     #[test]
-    fn text_fallback_layers_beneath_type() {
+    fn text_bucket_is_only_for_the_text_type() {
         let main = main_toml(
-            "[styles.text]\nfont_face = \"Arial\"\nfont_size = 12\n[styles.rect]\nfont_size = 14\n",
+            "[styles.shape]\nfont_face = \"Arial\"\n[styles.text]\ncolor = \"FF0000\"\nfont_size = 12\n[styles.rect]\nfont_size = 14\n[styles.placeholder]\nline = { type = \"none\" }\n",
         );
-        // A text-carrying rect gets the text font_face but its own font_size.
-        let merged = main.style_chain("rect", true, &[]).unwrap();
-        assert_eq!(merged.get("font_face").unwrap().as_str().unwrap(), "Arial");
-        assert_eq!(merged.get("font_size").unwrap().as_integer().unwrap(), 14);
-        // A plain rect (no text) does NOT pick up the [styles.text] fallback,
-        // but still gets the [styles.rect] font_size.
-        let plain = main.style_chain("rect", false, &[]).unwrap();
-        assert!(plain.get("font_face").is_none());
-        assert_eq!(plain.get("font_size").unwrap().as_integer().unwrap(), 14);
+        // `[styles.text]` is an ordinary type bucket: its keys never leak into
+        // a rect, even when that rect carries text. Text options shared by
+        // every shape belong in `[styles.shape]`.
+        let rect = main.style_chain("rect", &[]).unwrap();
+        assert_eq!(rect.get("font_face").unwrap().as_str().unwrap(), "Arial");
+        assert_eq!(rect.get("font_size").unwrap().as_integer().unwrap(), 14);
+        assert!(rect.get("color").is_none(), "text bucket must not leak");
+        // The text type still gets its own bucket.
+        let text = main.style_chain("text", &[]).unwrap();
+        assert_eq!(text.get("font_face").unwrap().as_str().unwrap(), "Arial");
+        assert_eq!(text.get("font_size").unwrap().as_integer().unwrap(), 12);
+        assert_eq!(text.get("color").unwrap().as_str().unwrap(), "FF0000");
+        // Placeholders are their own type too; they only get their own bucket.
+        let placeholder = main.style_chain("placeholder", &[]).unwrap();
+        assert_eq!(
+            placeholder.get("font_face").unwrap().as_str().unwrap(),
+            "Arial"
+        );
+        assert!(placeholder.get("color").is_none());
+        assert!(placeholder.get("font_size").is_none());
+        assert!(placeholder.get("line").is_some());
     }
 
     #[test]
@@ -439,7 +445,7 @@ mod tests {
             "[styles.named.brand]\nfill = { color = \"C7000A\" }\n[styles.named.dark]\nstyles = [\"brand\"]\nfill = { color = \"111111\" }\n",
         );
         // dark inherits nothing else but its own fill wins over brand's.
-        let merged = main.style_chain("rect", false, &["dark".into()]).unwrap();
+        let merged = main.style_chain("rect", &["dark".into()]).unwrap();
         assert_eq!(
             merged
                 .get("fill")
@@ -456,16 +462,14 @@ mod tests {
     fn named_style_cycle_is_reported() {
         let main =
             main_toml("[styles.named.a]\nstyles = [\"b\"]\n[styles.named.b]\nstyles = [\"a\"]\n");
-        let err = main.style_chain("rect", false, &["a".into()]).unwrap_err();
+        let err = main.style_chain("rect", &["a".into()]).unwrap_err();
         assert!(err.to_string().contains("cycle"), "got: {err:?}");
     }
 
     #[test]
     fn unknown_named_style_is_reported() {
         let main = main_toml("[styles.named.a]\ncolor = \"111111\"\n");
-        let err = main
-            .style_chain("rect", false, &["nope".into()])
-            .unwrap_err();
+        let err = main.style_chain("rect", &["nope".into()]).unwrap_err();
         assert!(
             err.to_string().contains("unknown style `nope`"),
             "got: {err:?}"

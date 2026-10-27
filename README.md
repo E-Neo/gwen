@@ -16,6 +16,9 @@ and needs neither Node nor an embedded JavaScript runtime.
 ```sh
 gwen new <deck>          # scaffold a project
 gwen new <deck> --pptx a.pptx   # import masters/slides/media from an existing deck
+gwen update <deck>       # sync an existing project with the installed template
+gwen fmt <deck>          # normalize the project's TOML whitespace
+gwen fmt <deck> --check  # report only; exits 1 if a file would change
 gwen build <deck>        # render <deck>/target/<title>.pptx
 gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
 gwen clean <deck>        # remove the generated <deck>/target/ directory
@@ -32,6 +35,25 @@ is copied from it - `template/main.toml` (required, with its
 recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
+
+`gwen update <deck>` brings an existing project up to date with that template:
+`masters/`, `media/` and the template's skills are refreshed, and the template's
+`[theme]` / `[styles.*]` are merged into `main.toml` key by key - comments and
+project-only keys survive. `slides/`, `[[sections]]` and the `[presentation]`
+table are never touched, and files the template no longer ships are reported as
+stale rather than deleted. Overwritten files are backed up under
+`target/update-backup/`; `--dry-run` reports without writing anything and
+`--keep-styles` skips the `main.toml` merge.
+
+`gwen fmt <deck>` tidies the whitespace in every `*.toml` under the project -
+`main.toml`, `masters/`, `slides/` and `.agents/`, skipping `target/`. It puts
+one space around `=`, canonicalizes inline tables and single-line arrays, keeps
+multi-line arrays one element per line with a trailing comma, collapses runs of
+blank lines to one (and puts exactly one before each table header), strips
+trailing whitespace and ends the file with a single newline. Comments, key
+order and `[[shapes]]` / `[[sections]]` order never change, and multi-line
+strings are left byte-for-byte alone. `--check` writes nothing and exits 1 when
+a file would change, so it works as a CI gate.
 
 ## Previewing slides
 
@@ -111,9 +133,12 @@ slides = ["title.toml", "content.toml"]   # paths relative to slides/
 [styles.shape]       # base style for EVERY shape (text, image, presets)
 fill = { color = "C7000A" }
 
-[styles.text]        # layered over [styles.shape] for text shapes
+[styles.text]        # type bucket for `type = "text"` only
 font_face = "Arial"
 color = "262626"
+
+[styles.placeholder] # type bucket for master placeholders
+line = { type = "none" }
 
 [styles.image]       # layered over [styles.shape] for images
 sizing = { type = "contain" }
@@ -131,13 +156,15 @@ Option keys are snake_case and map to the pptxgenjs camelCase properties
 pptxgenjs accepts can be set.
 
 Precedence when building a shape's options:
-`[styles.shape]` < `[styles.text]` < `[styles.<type>]` < the shape's `styles` <
-the shape's own keys. Shape-preset buckets (`[styles.rect]`, `[styles.ellipse]`,
-...) may also carry text options (`font_face`, `font_size`, ...), since those
-presets can contain text; shapes that carry text fall back to `[styles.text]`
-for any text option the type bucket doesn't set. A `styles` reference to a
-`[styles.named.<name>]` block that doesn't exist is an error, as is a reference
-cycle.
+`[styles.shape]` < `[styles.<type>]` < the shape's `styles` < the shape's own
+keys. `[styles.text]` is an ordinary type bucket: it applies to `type = "text"`
+only. Text options shared by every shape (`font_face`, `font_size`, `align`,
+`margin`, ...) belong in `[styles.shape]`, which is validated against the union
+of shape and text options and has inapplicable keys dropped per shape. Shape
+presets (`[styles.rect]`, `[styles.ellipse]`, ...) may also carry text options
+and override the shape bucket for that preset. Master placeholders use
+`[styles.placeholder]`. A `styles` reference to a `[styles.named.<name>]` block
+that doesn't exist is an error, as is a reference cycle.
 
 A style bucket may hold keys that only some shape types can apply - they take
 effect where valid and are ignored elsewhere. For example, an `align` in
@@ -363,6 +390,10 @@ indent level is configured in style buckets:
 ordered_markers = ["1.", "A.", "i)"]     # auto-number patterns per level
 unordered_markers = ["\u25BA", "\u2022"] # bullet runes per level
 ```
+
+These are gwen-owned options and follow the same buckets as any other style
+key. Put them in `[styles.shape]` if lists can also appear on preset shapes;
+`[styles.text]` only applies to `type = "text"`.
 
 - `ordered_markers` entries are display patterns (`"1"`, `"1."`, `"1)"`,
   `"(1)"`, `"a."`, `"A."`, `"a)"`, `"A)"`, `"(a)"`, `"(A)"`, `"i."`, `"I."`,

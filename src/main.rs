@@ -1,7 +1,9 @@
 //! The `gwen` command line: `new` scaffolds a TOML project (from a user
 //! template when one exists), `build` compiles it.
 
+mod fmt;
 mod scaffold;
+mod update;
 
 use std::path::Path;
 
@@ -35,6 +37,33 @@ enum Commands {
         /// instead of the template/built-in scaffold.
         #[arg(long)]
         pptx: Option<String>,
+    },
+    /// Sync a project with the installed template: refresh `masters/`,
+    /// `media/` and the template's skills, and merge its `[theme]` /
+    /// `[styles.*]` into `main.toml`. Slides, sections and the presentation
+    /// title are never touched.
+    Update {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Leave `main.toml` (theme and styles) as it is.
+        #[arg(long)]
+        keep_styles: bool,
+    },
+    /// Format the TOML files in a project: canonical spacing, one blank line
+    /// before table headers, no trailing whitespace. Values, key order and
+    /// comments are never changed; multi-line strings are kept verbatim.
+    Fmt {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+        /// Report what would change without writing anything; exits 1 when a
+        /// file needs formatting.
+        #[arg(long)]
+        check: bool,
     },
     /// Build `target/<title>.pptx` from a project.
     Build {
@@ -73,6 +102,17 @@ fn main() -> miette::Result<()> {
             no_template,
             pptx,
         } => new_project(&project, no_template, pptx.as_deref()),
+        Commands::Update {
+            project,
+            dry_run,
+            keep_styles,
+        } => update::update(&project, dry_run, keep_styles),
+        Commands::Fmt { project, check } => {
+            if fmt::format(&project, check)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Commands::Build { project } => {
             let out = gwen::build(Path::new(&project))?;
             eprintln!("built {}", out.display());
