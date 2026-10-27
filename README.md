@@ -386,14 +386,17 @@ character (`\- item`, `\> note`) to show it literally. The marker style per
 indent level is configured in style buckets:
 
 ```toml
-[styles.text]
+[styles.shape]
 ordered_markers = ["1.", "A.", "i)"]     # auto-number patterns per level
 unordered_markers = ["\u25BA", "\u2022"] # bullet runes per level
+bullet_indent = 10                       # points between marker and text; default 27
 ```
 
 These are gwen-owned options and follow the same buckets as any other style
-key. Put them in `[styles.shape]` if lists can also appear on preset shapes;
-`[styles.text]` only applies to `type = "text"`.
+key. `[styles.shape]` covers `type = "text"` and preset shapes that carry
+text; `[styles.text]` only applies to `type = "text"`. `bullet_indent` is the
+hanging indent (the gap between the marker and the item text); a paragraph's
+`bullet = { indent = 20 }` or `bullet_indent = 20` overrides it.
 
 - `ordered_markers` entries are display patterns (`"1"`, `"1."`, `"1)"`,
   `"(1)"`, `"a."`, `"A."`, `"a)"`, `"A)"`, `"(a)"`, `"(A)"`, `"i."`, `"I."`,

@@ -646,6 +646,100 @@ fn text_bucket_only_applies_to_the_text_type() {
 }
 
 #[test]
+fn unit_string_margins_are_emitted_as_emu() {
+    let dir = sample_project("marginunits");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\ntext = \"Padded\"\nmargin = [\"0.13cm\", \"0.25cm\", \"0.13cm\", \"0.25cm\"]\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        xml.contains("lIns=\"90000\" tIns=\"46800\" rIns=\"90000\" bIns=\"46800\""),
+        "unit-string margins become EMU with top/left in the documented order: {xml}"
+    );
+}
+
+#[test]
+fn bullet_indent_applies_to_markdown_lists() {
+    let dir = sample_project("bulletindent");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = main.replace(
+        "[styles.shape]\nfill = { color = \"C7000A\" }",
+        "[styles.shape]\nbullet_indent = 10\nfill = { color = \"C7000A\" }",
+    );
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"0.8in\"\ny = \"1.5in\"\nw = \"7in\"\nh = \"4in\"\ntext = \"- one\\n  - two\"\n",
+    );
+
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        xml.contains("marL=\"127000\" indent=\"-127000\""),
+        "10pt hanging indent on the top-level item: {xml}"
+    );
+    assert!(
+        xml.contains("marL=\"254000\" indent=\"-127000\""),
+        "nested item adds one 10pt step: {xml}"
+    );
+}
+
+#[test]
+fn explicit_bullet_indent_overrides_the_style_default() {
+    let dir = sample_project("bulletindentoverride");
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let main = main.replace(
+        "[styles.shape]\nfill = { color = \"C7000A\" }",
+        "[styles.shape]\nbullet_indent = 10\nfill = { color = \"C7000A\" }",
+    );
+    std::fs::write(dir.join("main.toml"), main).unwrap();
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"text\"\nx = \"0.8in\"\ny = \"1.5in\"\nw = \"7in\"\nh = \"4in\"\n\n[[shapes.paragraphs]]\ntext = \"custom\"\nbullet = { indent = 20 }\n\n[[shapes.paragraphs]]\ntext = \"custom two\"\nbullet = true\nbullet_indent = 30\n",
+    );
+
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        xml.contains("marL=\"254000\" indent=\"-254000\""),
+        "an explicit bullet.indent wins over bullet_indent: {xml}"
+    );
+    assert!(
+        xml.contains("marL=\"381000\" indent=\"-381000\""),
+        "a paragraph bullet_indent also wins over the style default: {xml}"
+    );
+}
+
+#[test]
+fn bare_number_margins_stay_in_points() {
+    let dir = sample_project("marginpoints");
+    write(
+        &dir.join("slides").join("content.toml"),
+        "master = \"brand\"\n\n[[shapes]]\ntype = \"rect\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\ntext = \"Padded\"\nmargin = [5, 10, 5, 10]\n",
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    assert!(
+        xml.contains("lIns=\"127000\" tIns=\"63500\" rIns=\"127000\" bIns=\"63500\""),
+        "bare-number margins are pptxgenjs points: {xml}"
+    );
+}
+
+#[test]
 fn bad_ph_type_is_reported() {
     let dir = sample_project("badphtype");
     write(

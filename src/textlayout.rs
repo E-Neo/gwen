@@ -15,6 +15,16 @@ use crate::fonts::Fonts;
 use crate::scene::{Align, Bullet, Fit, Run, TextBlock, TextDirection, Valign};
 
 const PT_PER_IN: f64 = 72.0;
+
+/// Point preview runs at the family that will actually be rasterized. The
+/// scene keeps the deck's requested family (for the PPTX); the preview must
+/// measure and draw with the installed fallback, or bold CJK runs get regular
+/// metrics that do not match the painted glyphs.
+pub fn normalize_fonts(block: &mut TextBlock, fonts: &Fonts) {
+    for run in &mut block.runs {
+        run.font = fonts.preview_family(&run.font, &run.text);
+    }
+}
 const DEFAULT_TAB_IN: f64 = 1.0;
 const MIN_SHRINK: f64 = 0.3;
 

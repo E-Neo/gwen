@@ -23,6 +23,9 @@ pub struct Fonts {
     face_fonts: Mutex<HashMap<ID, harfrust::Font>>,
     fallbacks: Vec<ID>,
     default_family: String,
+    /// A CJK family that is actually installed, used by the preview when the
+    /// requested family is missing (e.g. `Microsoft YaHei` on Linux).
+    cjk_family: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +94,17 @@ impl Fonts {
         db.set_serif_family(&serif);
         db.set_monospace_family(&mono);
         let db = Arc::new(db);
+        let cjk_family = available_family(
+            &db,
+            &[
+                "Noto Sans CJK SC",
+                "Noto Sans CJK JP",
+                "Noto Sans CJK TC",
+                "Noto Sans SC",
+                "Noto Sans JP",
+                "Source Han Sans SC",
+            ],
+        );
         let fallbacks = [
             "Noto Sans CJK SC",
             "Noto Sans CJK JP",
@@ -115,7 +129,37 @@ impl Fonts {
             face_fonts: Mutex::new(HashMap::new()),
             fallbacks,
             default_family: sans,
+            cjk_family,
         }
+    }
+
+    /// Whether a family is installed. Unlike [`Fonts::face`] this does not
+    /// fall back to the default family.
+    fn has_family(&self, family: &str) -> bool {
+        self.db
+            .query(&Query {
+                families: &[Family::Name(family)],
+                weight: Weight::NORMAL,
+                stretch: Stretch::Normal,
+                style: Style::Normal,
+            })
+            .is_some()
+    }
+
+    /// The family used to paint preview text. A missing family falls back to
+    /// the installed CJK family for CJK runs (so bold and italic keep a real
+    /// face) and to the generic sans family for Latin-only runs (so arrows and
+    /// digits keep their normal baseline).
+    pub fn preview_family(&self, family: &str, text: &str) -> String {
+        if self.has_family(family) {
+            return family.to_string();
+        }
+        if text.chars().any(is_cjk)
+            && let Some(cjk) = &self.cjk_family
+        {
+            return cjk.clone();
+        }
+        self.default_family.clone()
     }
 
     /// The font database, shared with usvg so rendering and measuring select
@@ -380,5 +424,18 @@ mod tests {
         let w = fonts.measure("Hello", &family, false, false, 24.0);
         assert!(w > 0.0, "advance {w}");
         assert_eq!(fonts.measure("", &family, false, false, 24.0), 0.0);
+    }
+
+    #[test]
+    fn preview_family_falls_back_to_an_installed_face() {
+        let dir = std::env::temp_dir().join("gwen-fonts-preview-test");
+        let fonts = Fonts::load(&dir);
+        for text in ["plain", "中文"] {
+            let family = fonts.preview_family("__gwen_missing_family__", text);
+            assert!(
+                fonts.has_family(&family),
+                "preview fallback `{family}` is not installed"
+            );
+        }
     }
 }

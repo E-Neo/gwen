@@ -297,7 +297,7 @@ fn option_fields() -> String {
         group("Image", Some(gwen::opts::IMAGE_KEYS)),
         group("Background", Some(gwen::opts::BACKGROUND_KEYS)),
         format!(
-            "- **Nested objects**: {}\n- **Gwen-only keys** (never sent to pptxgenjs): `styles`, `ordered_markers`, `unordered_markers`",
+            "- **Nested objects**: {}\n- **Gwen-only keys** (never sent to pptxgenjs): `styles`, `ordered_markers`, `unordered_markers`, `bullet_indent`",
             nested.join("; ")
         ),
     ]
@@ -328,6 +328,7 @@ slides = ["title.toml", "intro.toml"]
 # [styles.text] only applies to `type = "text"`; shared text options belong in
 # [styles.shape]. Master placeholders use [styles.placeholder].
 # [styles.shape]
+# bullet_indent = 10
 # fill = { color = "C7000A" }
 # [styles.text]
 # font_face = "Arial"
@@ -611,7 +612,9 @@ backslash (`\- item`, `\+ item`, `\> note`) to show it literally.
 Marker styles come from `[styles.*]` `ordered_markers` (patterns like `"1."`,
 `"(1)"`, `"A."`) and `unordered_markers` (unicode runes, e.g. `"\u25BA"`),
 indexed by indent level; missing levels fall back to the last marker, then
-defaults.
+defaults. The gap between a marker and the item text is `bullet_indent`
+(points, default 27) on a shape, style bucket or paragraph; a paragraph's
+`bullet = { indent = ... }` overrides it.
 
 A `<span class="name">` applies a `[styles.named.name]` to the runs it wraps:
 `black with <span class="red">**bold and red**</span>` makes the inner run

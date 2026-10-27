@@ -212,7 +212,9 @@ fn collect_layout_approximations(scene: &mut Scene, fonts: &Fonts) {
     let mut messages = Vec::new();
     for item in &scene.items {
         if let ItemKind::Text(block) = &item.kind {
-            let layout = crate::textlayout::layout(block, item.rect.w, item.rect.h, fonts);
+            let mut block = block.clone();
+            crate::textlayout::normalize_fonts(&mut block, fonts);
+            let layout = crate::textlayout::layout(&block, item.rect.w, item.rect.h, fonts);
             messages.extend(layout.approximations);
         }
     }

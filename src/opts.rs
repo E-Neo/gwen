@@ -280,6 +280,7 @@ pub const TEXT_KEYS: &[&str] = &[
     "bold",
     "break_line",
     "bullet",
+    "bullet_indent",
     "color",
     "font_face",
     "font_size",
@@ -343,6 +344,7 @@ pub const TEXTSHAPE_KEYS: &[&str] = &[
     "bold",
     "break_line",
     "bullet",
+    "bullet_indent",
     "color",
     "font_face",
     "font_size",
@@ -441,6 +443,7 @@ const STYLE_KEYS: &[&str] = &[
     "bold",
     "break_line",
     "bullet",
+    "bullet_indent",
     "color",
     "font_face",
     "font_size",
@@ -665,7 +668,6 @@ pub fn bullet_schema() -> &'static [(&'static str, Kind)] {
             ("number_type", Kind::Enum(BULLET_NUMBER_TYPE)),
             ("number_start_at", num()),
             ("code", Kind::Str),
-            ("margin_pt", num()),
             ("start_at", num()),
             ("style", Kind::Str),
         ]
@@ -761,8 +763,8 @@ fn kind_for(ctx: Ctx, key: &str) -> Option<Kind> {
         | "size"
         | "width"
         | "indent"
+        | "bullet_indent"
         | "number_start_at"
-        | "margin_pt"
         | "start_at"
         | "slide" => num(),
         "color" | "highlight" => Kind::Color,
@@ -1211,7 +1213,7 @@ pub fn retain_ctx_keys(ctx: Ctx, value: &mut toml::Value) {
     let mut accept: Vec<&str> = keys.to_vec();
     accept.extend(POSITION);
     accept.extend(extra);
-    accept.extend(["ordered_markers", "unordered_markers"]);
+    accept.extend(["bullet_indent", "ordered_markers", "unordered_markers"]);
     let drop: Vec<String> = table
         .keys()
         .filter(|k| !accept.contains(&k.as_str()))

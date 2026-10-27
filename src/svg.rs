@@ -428,6 +428,9 @@ fn paint_text(
     defs: &mut Defs,
     fonts: &Fonts,
 ) {
+    let mut normalized = block.clone();
+    textlayout::normalize_fonts(&mut normalized, fonts);
+    let block = &normalized;
     let rect = item.rect;
     let fx = defs.effect(item.shadow.as_ref(), None, 1.0);
     let item_filter = fx

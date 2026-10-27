@@ -286,7 +286,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
             }
             let mut opts = merge_opts(main, &obj.ty, &obj.styles, &obj.opts)?;
-            let (ordered_markers, unordered_markers) = take_markers(&mut opts);
+            let list = take_list_options(&mut opts);
             let where_ = format!("master `{stem}` shape `{}`", obj.ty);
             let ctx = match ty {
                 "text" => Some(Ctx::Text),
@@ -361,8 +361,7 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                     "runs".into(),
                     flatten_runs(
                         &paragraphs,
-                        &ordered_markers,
-                        &unordered_markers,
+                        &list,
                         &main.styles.named,
                         &file_src,
                         idx,
@@ -630,7 +629,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
         }
     }
     let mut merged = merge_opts(ctx.main, &shape.ty, &shape.styles, &shape.opts)?;
-    let (ordered_markers, unordered_markers) = take_markers(&mut merged);
+    let list = take_list_options(&mut merged);
     if carries_text {
         merged
             .as_table_mut()
@@ -671,10 +670,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
     match kind {
         Kind::Text => {
             value.insert("kind".into(), json!("text"));
-            value.insert(
-                "runs".into(),
-                runs_value(ctx, idx, shape, &ordered_markers, &unordered_markers)?,
-            );
+            value.insert("runs".into(), runs_value(ctx, idx, shape, &list)?);
             for (k, v) in opts.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }
@@ -736,6 +732,25 @@ struct TextPara<'a> {
     index: usize,
 }
 
+/// Per-shape list configuration shared by slide and master text.
+struct ListOptions {
+    ordered: Vec<String>,
+    unordered: Vec<String>,
+    indent: Option<f64>,
+}
+
+/// Apply a style-level `bullet_indent` to a run's bullet. A paragraph's own
+/// `bullet = { indent = ... }` wins.
+fn apply_default_bullet_indent(bullet: &mut Value, indent: f64) {
+    match bullet {
+        Value::Bool(true) => *bullet = json!({ "indent": indent }),
+        Value::Object(map) if !map.contains_key("indent") => {
+            map.insert("indent".into(), json!(indent));
+        }
+        _ => {}
+    }
+}
+
 /// Build the flat run list for text - pptxgenjs's native text model. Shared by
 /// slide text and master/placeholder text so they behave identically.
 ///
@@ -750,8 +765,7 @@ struct TextPara<'a> {
 /// always have content.
 fn flatten_runs(
     paragraphs: &[TextPara<'_>],
-    ordered_markers: &[String],
-    unordered_markers: &[String],
+    list: &ListOptions,
     styles: &BTreeMap<String, toml::Table>,
     file_src: &FileSrc,
     idx: usize,
@@ -767,9 +781,16 @@ fn flatten_runs(
     struct Group {
         runs: Vec<richtext::Run>,
         opts: serde_json::Map<String, Value>,
+        bullet_indent: Option<f64>,
     }
     let mut groups: Vec<Group> = Vec::new();
     for para in paragraphs {
+        let para_indent = match para.opts.get("bullet_indent") {
+            Some(toml::Value::Integer(i)) => Some(*i as f64),
+            Some(toml::Value::Float(f)) => Some(*f),
+            _ => None,
+        };
+        let bullet_indent = para_indent.or(list.indent);
         let mut para_value = toml::Value::Table(para.opts.clone());
         opts::finalize_opts(Ctx::Text, &mut para_value)?;
         let para_opts = to_pptxgen(&para_value);
@@ -777,16 +798,16 @@ fn flatten_runs(
             .as_object()
             .unwrap()
             .iter()
-            .filter(|(k, _)| k.as_str() != "align")
+            .filter(|(k, _)| k.as_str() != "align" && k.as_str() != "bulletIndent")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Map<_, _>>();
-        for runs in
-            richtext::parse_paragraphs(para.text, ordered_markers, unordered_markers, styles)
-                .map_err(|msg| text_error(file_src, idx, para.index, &where_(para.index), msg))?
+        for runs in richtext::parse_paragraphs(para.text, &list.ordered, &list.unordered, styles)
+            .map_err(|msg| text_error(file_src, idx, para.index, &where_(para.index), msg))?
         {
             groups.push(Group {
                 runs,
                 opts: para_opts.clone(),
+                bullet_indent,
             });
         }
     }
@@ -804,6 +825,11 @@ fn flatten_runs(
                 for (k, v) in &group.opts {
                     obj.insert(k.clone(), v.clone());
                 }
+                if let Some(indent) = group.bullet_indent
+                    && let Some(bullet) = obj.get_mut("bullet")
+                {
+                    apply_default_bullet_indent(bullet, indent);
+                }
             }
             runs.push(Value::Object(obj));
         }
@@ -820,13 +846,7 @@ fn flatten_runs(
 }
 
 /// Build the run list for a slide text shape.
-fn runs_value(
-    ctx: &SlideCtx,
-    idx: usize,
-    shape: &Shape,
-    ordered_markers: &[String],
-    unordered_markers: &[String],
-) -> Result<Value> {
+fn runs_value(ctx: &SlideCtx, idx: usize, shape: &Shape, list: &ListOptions) -> Result<Value> {
     let mut paragraphs: Vec<TextPara> = Vec::new();
     let empty = toml::Table::new();
     if !shape.paragraphs.is_empty() {
@@ -854,8 +874,7 @@ fn runs_value(
     let base_where = format!("slide `{}` shape `{}`", ctx.file, shape.ty);
     flatten_runs(
         &paragraphs,
-        ordered_markers,
-        unordered_markers,
+        list,
         &ctx.main.styles.named,
         ctx.file_src,
         idx,
@@ -933,10 +952,15 @@ fn merge_opts(
     Ok(toml::Value::Table(merged))
 }
 
-/// Remove the gwen-owned list-marker options from a merged options table,
-/// returning them (they configure markdown list rendering, not pptxgenjs).
-fn take_markers(merged: &mut toml::Value) -> (Vec<String>, Vec<String>) {
+/// Remove the gwen-owned list options from a merged options table, returning
+/// them (they configure markdown list rendering, not pptxgenjs).
+fn take_list_options(merged: &mut toml::Value) -> ListOptions {
     let table = merged.as_table_mut().unwrap();
+    let bullet_indent = match table.remove("bullet_indent") {
+        Some(toml::Value::Integer(i)) => Some(i as f64),
+        Some(toml::Value::Float(f)) => Some(f),
+        _ => None,
+    };
     let mut strings = |key: &str| -> Vec<String> {
         match table.remove(key) {
             Some(toml::Value::Array(items)) => items
@@ -946,7 +970,11 @@ fn take_markers(merged: &mut toml::Value) -> (Vec<String>, Vec<String>) {
             _ => Vec::new(),
         }
     };
-    (strings("ordered_markers"), strings("unordered_markers"))
+    ListOptions {
+        ordered: strings("ordered_markers"),
+        unordered: strings("unordered_markers"),
+        indent: bullet_indent,
+    }
 }
 
 /// snake_case -> camelCase recursively over the pptxgenjs option object.

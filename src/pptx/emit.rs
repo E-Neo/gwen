@@ -953,16 +953,10 @@ fn slide_number_xml(target: &Target, deck: &Deck) -> String {
     out.push_str("</p:spPr>");
     out.push_str("<p:txBody>");
     out.push_str("<a:bodyPr");
-    if let Some(Value::Array(m)) = props.get("margin") {
-        let at = |i: usize| m.get(i).cloned().unwrap_or(json!(0));
-        out.push_str(&format!(" lIns=\"{}\"", val_to_pts(&at(3))));
-        out.push_str(&format!(" tIns=\"{}\"", val_to_pts(&at(0))));
-        out.push_str(&format!(" rIns=\"{}\"", val_to_pts(&at(1))));
-        out.push_str(&format!(" bIns=\"{}\"", val_to_pts(&at(2))));
-    } else if let Some(m) = props.get("margin").filter(|v| v.is_number()) {
-        let m = val_to_pts(m);
+    if let Some(m) = props.get("margin") {
+        let [top, right, bottom, left] = margin_emus(m);
         out.push_str(&format!(
-            " lIns=\"{m}\" tIns=\"{m}\" rIns=\"{m}\" bIns=\"{m}\""
+            " lIns=\"{left}\" tIns=\"{top}\" rIns=\"{right}\" bIns=\"{bottom}\""
         ));
     }
     if let Some(v) = props.get("valign").filter(|v| truthy(Some(v))) {
@@ -1109,17 +1103,12 @@ fn slide_object_xml(target: &Target, deck: &Deck, placeholders: &[PlaceholderInf
                     .and_then(Value::as_object)
                     .cloned()
                     .unwrap_or_default();
-                if let Some(Value::Array(m)) = obj.options.get("margin") {
-                    let at = |i: usize| m.get(i).cloned().unwrap_or(json!(0));
-                    body.insert("lIns".into(), json!(val_to_pts(&at(0))));
-                    body.insert("rIns".into(), json!(val_to_pts(&at(1))));
-                    body.insert("bIns".into(), json!(val_to_pts(&at(2))));
-                    body.insert("tIns".into(), json!(val_to_pts(&at(3))));
-                } else if let Some(m) = obj.options.get("margin").filter(|v| v.is_number()) {
-                    let m = val_to_pts(m);
-                    for k in ["lIns", "rIns", "bIns", "tIns"] {
-                        body.insert(k.into(), json!(m));
-                    }
+                if let Some(m) = obj.options.get("margin") {
+                    let [top, right, bottom, left] = margin_emus(m);
+                    body.insert("lIns".into(), json!(left));
+                    body.insert("tIns".into(), json!(top));
+                    body.insert("rIns".into(), json!(right));
+                    body.insert("bIns".into(), json!(bottom));
                 }
                 obj.options.insert("_bodyProp".into(), Value::Object(body));
 

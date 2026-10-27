@@ -141,6 +141,32 @@ pub(crate) fn val_to_pts(v: &Value) -> f64 {
     if n.is_nan() { 0.0 } else { js_round(n * ONEPT) }
 }
 
+/// Convert a shape `margin` option to `[top, right, bottom, left]` in EMU.
+///
+/// `opts::coerce_len` normalizes unit strings (`"0.25cm"`) to fractional
+/// inches, while bare numbers stay in pptxgenjs points. Mirror the preview's
+/// `margins_value`: if any entry is fractional the whole array is inches,
+/// otherwise it is points. Both the PPTX and the preview must use the same
+/// interpretation or the exported file will not match the rendered preview.
+pub(crate) fn margin_emus(v: &Value) -> [f64; 4] {
+    let mut units = [0.0f64; 4];
+    match v {
+        Value::Array(items) => {
+            for (slot, item) in units.iter_mut().zip(items) {
+                let n = js_number(item);
+                *slot = if n.is_nan() { 0.0 } else { n };
+            }
+        }
+        other => {
+            let n = js_number(other);
+            units = [if n.is_nan() { 0.0 } else { n }; 4];
+        }
+    }
+    let inches = units.iter().any(|n| n.fract().abs() > 1e-9);
+    let scale = if inches { EMU } else { ONEPT };
+    units.map(|n| js_round(n * scale))
+}
+
 pub(crate) fn convert_rotation_degrees(v: &Value) -> f64 {
     let mut d = js_number(v);
     if d.is_nan() {
