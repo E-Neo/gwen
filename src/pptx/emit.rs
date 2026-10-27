@@ -803,6 +803,98 @@ fn image_shadow_xml(opts: &Opts) -> String {
     )
 }
 
+/// Geometry for a `custGeom` shape, built from its `points` list.
+///
+/// The path box is the shape's extent in EMU and every point is
+/// shape-local (points arrive as inches, exactly like pptxgenjs). The
+/// element order and nested attributes mirror pptxgenjs's writer.
+fn cust_geom_xml(opts: &Opts, cx: f64, cy: f64, layout: (f64, f64)) -> String {
+    let mut out = String::from(
+        "<a:custGeom><a:avLst/><a:gdLst></a:gdLst><a:ahLst/><a:cxnLst></a:cxnLst>\
+         <a:rect l=\"l\" t=\"t\" r=\"r\" b=\"b\"/><a:pathLst>",
+    );
+    out.push_str(&format!(
+        "<a:path w=\"{}\" h=\"{}\">",
+        js_round(cx) as i64,
+        js_round(cy) as i64
+    ));
+    let points = opts
+        .get("points")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for (idx, point) in points.iter().enumerate() {
+        let coord =
+            |key: &str, axis: char| smart_number(point.get(key).unwrap_or(&json!(0)), axis, layout);
+        if truthy(point.get("close")) {
+            out.push_str("<a:close/>");
+            continue;
+        }
+        if let Some(curve) = point.get("curve").filter(|c| c.is_object()) {
+            let curve_num = |key: &str, axis: char| {
+                smart_number(curve.get(key).unwrap_or(&json!(0)), axis, layout)
+            };
+            match curve.get("type").and_then(Value::as_str) {
+                Some("arc") => out.push_str(&format!(
+                    "<a:arcTo hR=\"{}\" wR=\"{}\" stAng=\"{}\" swAng=\"{}\" />",
+                    curve_num("hR", 'Y'),
+                    curve_num("wR", 'X'),
+                    convert_rotation_degrees(curve.get("stAng").unwrap_or(&json!(0))),
+                    convert_rotation_degrees(curve.get("swAng").unwrap_or(&json!(0))),
+                )),
+                Some("cubic") => {
+                    out.push_str("<a:cubicBezTo>");
+                    out.push_str(&format!(
+                        "<a:pt x=\"{}\" y=\"{}\" />",
+                        curve_num("x1", 'X'),
+                        curve_num("y1", 'Y')
+                    ));
+                    out.push_str(&format!(
+                        "<a:pt x=\"{}\" y=\"{}\" />",
+                        curve_num("x2", 'X'),
+                        curve_num("y2", 'Y')
+                    ));
+                    out.push_str(&format!(
+                        "<a:pt x=\"{}\" y=\"{}\" />",
+                        coord("x", 'X'),
+                        coord("y", 'Y')
+                    ));
+                    out.push_str("</a:cubicBezTo>");
+                }
+                Some("quadratic") => {
+                    out.push_str("<a:quadBezTo>");
+                    out.push_str(&format!(
+                        "<a:pt x=\"{}\" y=\"{}\" />",
+                        curve_num("x1", 'X'),
+                        curve_num("y1", 'Y')
+                    ));
+                    out.push_str(&format!(
+                        "<a:pt x=\"{}\" y=\"{}\" />",
+                        coord("x", 'X'),
+                        coord("y", 'Y')
+                    ));
+                    out.push_str("</a:quadBezTo>");
+                }
+                _ => {}
+            }
+        } else if truthy(point.get("moveTo")) || idx == 0 {
+            out.push_str(&format!(
+                "<a:moveTo><a:pt x=\"{}\" y=\"{}\" /></a:moveTo>",
+                coord("x", 'X'),
+                coord("y", 'Y')
+            ));
+        } else {
+            out.push_str(&format!(
+                "<a:lnTo><a:pt x=\"{}\" y=\"{}\" /></a:lnTo>",
+                coord("x", 'X'),
+                coord("y", 'Y')
+            ));
+        }
+    }
+    out.push_str("</a:path></a:pathLst></a:custGeom>");
+    out
+}
+
 fn line_xml(opts: &Opts) -> String {
     let Some(line) = opts.get("line").and_then(Value::as_object) else {
         return String::new();
@@ -1085,30 +1177,34 @@ fn slide_object_xml(target: &Target, deck: &Deck, placeholders: &[PlaceholderInf
                 out.push_str(&format!(
                     "<a:xfrm{location}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>"
                 ));
-                out.push_str(&format!("<a:prstGeom prst=\"{}\"><a:avLst>", obj.shape));
-                if let Some(radius) = opt_num(&obj.options, "rectRadius") {
-                    out.push_str(&format!(
-                        "<a:gd name=\"adj\" fmla=\"val {}\"/>",
-                        js_round((radius * EMU * 100_000.0) / cx.min(cy))
-                    ));
-                } else if let Some(Value::Array(range)) = obj.options.get("angleRange") {
-                    for i in 0..2 {
-                        if let Some(angle) = range.get(i) {
+                if obj.shape == "custGeom" {
+                    out.push_str(&cust_geom_xml(&obj.options, cx, cy, deck.layout_size()));
+                } else {
+                    out.push_str(&format!("<a:prstGeom prst=\"{}\"><a:avLst>", obj.shape));
+                    if let Some(radius) = opt_num(&obj.options, "rectRadius") {
+                        out.push_str(&format!(
+                            "<a:gd name=\"adj\" fmla=\"val {}\"/>",
+                            js_round((radius * EMU * 100_000.0) / cx.min(cy))
+                        ));
+                    } else if let Some(Value::Array(range)) = obj.options.get("angleRange") {
+                        for i in 0..2 {
+                            if let Some(angle) = range.get(i) {
+                                out.push_str(&format!(
+                                    "<a:gd name=\"adj{}\" fmla=\"val {}\" />",
+                                    i + 1,
+                                    convert_rotation_degrees(angle)
+                                ));
+                            }
+                        }
+                        if let Some(v) = obj.options.get("arcThicknessRatio") {
                             out.push_str(&format!(
-                                "<a:gd name=\"adj{}\" fmla=\"val {}\" />",
-                                i + 1,
-                                convert_rotation_degrees(angle)
+                                "<a:gd name=\"adj3\" fmla=\"val {}\" />",
+                                js_round(js_number(v) * 50_000.0)
                             ));
                         }
                     }
-                    if let Some(v) = obj.options.get("arcThicknessRatio") {
-                        out.push_str(&format!(
-                            "<a:gd name=\"adj3\" fmla=\"val {}\" />",
-                            js_round(js_number(v) * 50_000.0)
-                        ));
-                    }
+                    out.push_str("</a:avLst></a:prstGeom>");
                 }
-                out.push_str("</a:avLst></a:prstGeom>");
                 if let Some(fill) = obj.options.get("fill").filter(|v| truthy(Some(v))) {
                     out.push_str(&gen_xml_color_selection(fill));
                 } else {

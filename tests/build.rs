@@ -352,6 +352,78 @@ text = "**Bold** and plain"
 }
 
 #[test]
+fn custom_geometry_emits_cust_geom_path() {
+    let dir = sample_project("custgeom");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "cust_geom"
+x = "1cm"
+y = "1cm"
+w = "3.8cm"
+h = "1.6cm"
+line = { color = "A6A6A6", width = 2 }
+points = [
+  { x = "0cm", y = "1.6cm" },
+  { x = "3.8cm", y = "0cm", curve = { type = "cubic", x1 = "0.985cm", y1 = "0.752cm", x2 = "2.405cm", y2 = "0.119cm" } },
+]
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("<a:custGeom>"), "custom geometry emitted");
+    assert!(xml.contains("<a:cubicBezTo>"), "cubic segment emitted");
+    assert!(
+        xml.contains("<a:moveTo>"),
+        "path starts with an explicit move"
+    );
+    assert!(
+        !xml.contains("prst=\"custGeom\""),
+        "custGeom must not be emitted as a preset geometry"
+    );
+    assert!(
+        !xml.contains("<a:close/>"),
+        "an open custom path must not be closed"
+    );
+}
+
+#[test]
+fn closed_custom_geometry_emits_close() {
+    let dir = sample_project("custgeomclose");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "cust_geom"
+x = "1cm"
+y = "1cm"
+w = "2cm"
+h = "1cm"
+fill = { color = "CCECFF" }
+line = { color = "000000", width = 1 }
+points = [
+  { x = "0cm", y = "0cm", moveTo = true },
+  { x = "2cm", y = "0cm" },
+  { x = "2cm", y = "1cm" },
+  { close = true },
+]
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml =
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").expect("slide2 in zip");
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("<a:custGeom>"), "custom geometry emitted");
+    assert!(xml.contains("<a:lnTo>"), "line segments emitted");
+    assert!(xml.contains("<a:close/>"), "closed path emitted");
+}
+
+#[test]
 fn build_produces_a_pptx_package() {
     let dir = sample_project("basic");
     let out = gwen::build(&dir).unwrap();

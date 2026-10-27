@@ -406,16 +406,15 @@ fn build_slide(
     // A shape that asks for an unknown preset still needs a visible box: draw
     // a dashed rectangle and say so instead of silently dropping the shape.
     for item in &mut items {
-        if let ItemKind::Shape { preset, .. } = &item.kind
-            && presets::path(
-                preset,
-                item.rect.w.max(0.01),
-                item.rect.h.max(0.01),
-                &GeomOpts::default(),
-            )
-            .is_none()
-        {
-            approximations.push(format!("shape `{preset}` drawn as a box"));
+        let fallback = if let ItemKind::Shape { preset, geom } = &item.kind {
+            presets::path(preset, item.rect.w.max(0.01), item.rect.h.max(0.01), geom).is_none()
+        } else {
+            false
+        };
+        if fallback {
+            if let ItemKind::Shape { preset, .. } = &item.kind {
+                approximations.push(format!("shape `{preset}` drawn as a box"));
+            }
             item.fill = None;
             item.line = Some(Stroke {
                 color: Color::new(0x80, 0x80, 0x80),

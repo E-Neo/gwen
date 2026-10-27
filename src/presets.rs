@@ -1552,7 +1552,6 @@ fn cust_geom(w: f64, h: f64, opts: &GeomOpts) -> Option<String> {
         }
     }
     let _ = (w, h);
-    out.push_str(" Z");
     Some(out.trim().to_string())
 }
 
@@ -1707,6 +1706,36 @@ mod tests {
         assert!(path.contains("M 0 0"));
         assert!(path.contains("L 2 0"));
         assert!(path.trim_end().ends_with('Z'));
+    }
+
+    #[test]
+    fn open_custom_geometry_is_not_closed() {
+        let opts = GeomOpts {
+            points: Some(vec![
+                Point {
+                    x: 0.0,
+                    y: 1.0,
+                    move_to: true,
+                    ..Point::default()
+                },
+                Point {
+                    x: 2.0,
+                    y: 0.0,
+                    curve: Some(Curve::Cubic {
+                        x1: 0.5,
+                        y1: 0.5,
+                        x2: 1.5,
+                        y2: 0.1,
+                    }),
+                    ..Point::default()
+                },
+            ]),
+            ..GeomOpts::default()
+        };
+        let path = path("custGeom", 2.0, 1.0, &opts).unwrap();
+        assert!(path.starts_with("M 0 1"), "path: {path}");
+        assert!(path.contains(" C "), "path: {path}");
+        assert!(!path.contains('Z'), "open path must not close: {path}");
     }
 
     #[test]
