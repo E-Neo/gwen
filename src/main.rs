@@ -91,6 +91,10 @@ enum Commands {
         /// default; SVG is only written when requested.
         #[arg(long, value_name = "LIST", default_value = "png")]
         format: String,
+        /// Also write `target/render/index.html`, a self-contained slideshow
+        /// embedding the first format. Press `f` there to present full screen.
+        #[arg(long)]
+        html: bool,
     },
 }
 
@@ -131,6 +135,7 @@ fn main() -> miette::Result<()> {
             project,
             page,
             format,
+            html,
         } => {
             let pages = match page.as_deref() {
                 Some(raw) => {
@@ -139,7 +144,7 @@ fn main() -> miette::Result<()> {
                 None => None,
             };
             let formats = gwen::preview::Formats::parse(&format).map_err(|e| miette::miette!(e))?;
-            let out = gwen::preview::render(Path::new(&project), pages.as_ref(), formats)?;
+            let out = gwen::preview::render(Path::new(&project), pages.as_ref(), formats, html)?;
             for path in out {
                 eprintln!("wrote {}", path.display());
             }

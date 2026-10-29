@@ -3515,3 +3515,137 @@ fn gwen_clean_requires_a_gwen_project() {
         "the unrelated target/ is untouched"
     );
 }
+
+fn run_render(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("render")
+        .arg(dir.as_os_str())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn gwen_render_html_is_self_contained() {
+    let dir = sample_project("render-html");
+    let out = run_render(&dir, &["--html"]);
+    assert!(
+        out.status.success(),
+        "render --html failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let target = dir.join("target").join("render");
+    assert!(target.join("title.png").exists(), "PNGs are still written");
+    assert!(target.join("content.png").exists());
+
+    let html = std::fs::read_to_string(target.join("index.html")).unwrap();
+    assert!(html.starts_with("<!doctype html>"), "html document");
+    assert!(html.contains("<title>deck</title>"), "deck title");
+    assert_eq!(
+        html.matches("data:image/png;base64,").count(),
+        2,
+        "both slides are embedded"
+    );
+    assert!(html.contains("alt=\"title\""), "slide stems label images");
+    assert!(html.contains("alt=\"content\""));
+    for stem in ["title", "content"] {
+        let caption = format!("<figcaption>{stem}</figcaption>");
+        let image = format!("alt=\"{stem}\"");
+        assert!(html.contains(&caption), "caption for {stem}: {html}");
+        assert!(
+            html.find(&caption).unwrap() < html.find(&image).unwrap(),
+            "caption comes before the {stem} slide"
+        );
+    }
+    assert!(
+        html.contains("body.presenting .slide figcaption { display: none; }"),
+        "captions are hidden while presenting"
+    );
+    assert!(
+        !html.contains("src=\"title.png\"") && !html.contains("src=\"content.png\""),
+        "images are embedded, not linked: {html}"
+    );
+    assert!(html.contains("requestFullscreen"), "fullscreen support");
+    assert!(html.contains("key === 'f'"), "f toggles presentation mode");
+    assert!(html.contains("ArrowRight"), "keyboard navigation");
+    assert!(html.contains("Escape"), "Esc leaves presentation mode");
+    assert!(
+        !html.contains("id=\"hud\""),
+        "presentation shows only the slide"
+    );
+}
+
+#[test]
+fn gwen_render_html_uses_the_first_format() {
+    let dir = sample_project("render-html-format");
+    let png_first = run_render(&dir, &["--format", "png,svg", "--html"]);
+    assert!(
+        png_first.status.success(),
+        "png,svg failed: {}",
+        String::from_utf8_lossy(&png_first.stderr)
+    );
+    let target = dir.join("target").join("render");
+    let html = std::fs::read_to_string(target.join("index.html")).unwrap();
+    assert!(html.contains("data:image/png;base64,"), "first is PNG");
+    assert!(
+        !html.contains("data:image/svg+xml;base64,"),
+        "SVG is not embedded when PNG comes first"
+    );
+    assert!(target.join("title.png").exists() && target.join("title.svg").exists());
+
+    let svg_first = run_render(&dir, &["--format", "svg,png", "--html"]);
+    assert!(
+        svg_first.status.success(),
+        "svg,png failed: {}",
+        String::from_utf8_lossy(&svg_first.stderr)
+    );
+    let html = std::fs::read_to_string(target.join("index.html")).unwrap();
+    assert!(html.contains("data:image/svg+xml;base64,"), "first is SVG");
+    assert!(
+        !html.contains("data:image/png;base64,"),
+        "PNG is not embedded when SVG comes first"
+    );
+}
+
+#[test]
+fn gwen_render_html_respects_page_selection() {
+    let dir = sample_project("render-html-pages");
+    let out = run_render(&dir, &["--page", "2", "--html"]);
+    assert!(
+        out.status.success(),
+        "render --page failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let target = dir.join("target").join("render");
+    let html = std::fs::read_to_string(target.join("index.html")).unwrap();
+    assert_eq!(
+        html.matches("data:image/png;base64,").count(),
+        1,
+        "only the selected slide is embedded"
+    );
+    assert!(html.contains("alt=\"content\""));
+    assert!(html.contains("<figcaption>content</figcaption>"));
+    assert!(!html.contains("alt=\"title\""));
+    assert!(!html.contains("<figcaption>title</figcaption>"));
+    assert!(
+        !target.join("title.png").exists(),
+        "unselected not rendered"
+    );
+}
+
+#[test]
+fn gwen_render_without_html_removes_a_stale_slideshow() {
+    let dir = sample_project("render-html-stale");
+    assert!(run_render(&dir, &["--html"]).status.success());
+    let target = dir.join("target").join("render");
+    assert!(target.join("index.html").exists());
+
+    assert!(run_render(&dir, &[]).status.success());
+    assert!(
+        !target.join("index.html").exists(),
+        "a plain render does not leave a stale slideshow"
+    );
+    assert!(target.join("title.png").exists());
+}

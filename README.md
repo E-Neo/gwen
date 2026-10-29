@@ -21,6 +21,7 @@ gwen fmt <deck>          # normalize the project's TOML whitespace
 gwen fmt <deck> --check  # report only; exits 1 if a file would change
 gwen build <deck>        # render <deck>/target/<title>.pptx
 gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
+gwen render <deck> --html  # PNG previews plus target/render/index.html
 gwen clean <deck>        # remove the generated <deck>/target/ directory
 ```
 
@@ -57,9 +58,9 @@ a file would change, so it works as a CI gate.
 
 ## Previewing slides
 
-`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg]` paints the
-deck straight from the TOML spec, without LibreOffice, PowerPoint or any other
-office suite. Outputs are named after the source slide TOML:
+`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg] [--html]`
+paints the deck straight from the TOML spec, without LibreOffice, PowerPoint or
+any other office suite. Outputs are named after the source slide TOML:
 
 ```
 <deck>/target/render/01-trend.png   # default format, from slides/01-trend.toml
@@ -71,6 +72,15 @@ at 2x for readable text. SVG is never written unless requested. `--page`
 accepts 1-based numbers and ranges (`1`, `3-5`), and stale rendered images
 from an earlier run are removed so the directory always reflects the current
 invocation.
+
+`--html` also writes `target/render/index.html`: a self-contained slideshow
+with the selected slides embedded as data URIs, so it works offline and from
+`file://`. The embedded format is the first `--format` entry, PNG when no
+`--format` is given. The overview labels each slide with its source file name;
+presentation mode hides the labels. Open the page and press `f` to present full
+screen; use the arrow keys, space, PageUp/PageDown, Home and End to navigate,
+and press `f` or Esc to leave. A render without `--html` removes a previous
+`index.html` along with the stale images.
 
 Fonts are loaded from `<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system.
 An unknown family falls back to an available sans-serif face instead of

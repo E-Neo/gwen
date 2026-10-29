@@ -440,8 +440,9 @@ project.
 - gwen validates strictly: unknown fields/options/`styles` references/cycles
   and wrong option value types are loud errors - read the diagnostics
 - to look at a slide, render it: `gwen render --page 1,3-5 --format png` writes
-  `target/render/<slide-stem>.png`; features that are still approximated are
-  reported on stderr
+  `target/render/<slide-stem>.png`; add `--html` for a self-contained slideshow
+  at `target/render/index.html` (press `f` to present full screen); features
+  that are still approximated are reported on stderr
 - `gwen update .` refreshes template-owned files (`masters/`, `media/`,
   `.agents/`) and merges the template's `[theme]` / `[styles.*]` into
   main.toml; slides, sections and the title are never touched
@@ -650,13 +651,18 @@ snake_case in the DSL (`round_rect`, `flow_chart_process`, `arabicPeriod` is
 
 ## Preview
 
-`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg]` paints the
-same spec directly to `<deck>/target/render/<slide-stem>.{png,svg}`, named
-after the source TOML (`slides/01-trend.toml` becomes `01-trend.png`). PNG is
-the default and is rasterized at 2x; SVG is only written when requested. Page
-numbers are 1-based and accept ranges (`--page 1,3-5`). Fonts come from
-`<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system. Any feature the
-renderer still approximates is printed to stderr.
+`gwen render [project] [--page N[,N-R]] [--format png|svg|png,svg] [--html]`
+paints the same spec directly to `<deck>/target/render/<slide-stem>.{png,svg}`,
+named after the source TOML (`slides/01-trend.toml` becomes `01-trend.png`).
+PNG is the default and is rasterized at 2x; SVG is only written when
+requested. Page numbers are 1-based and accept ranges (`--page 1,3-5`). Fonts
+come from `<deck>/fonts`, then `$GWEN_HOME/fonts`, then the system. Any feature
+the renderer still approximates is printed to stderr.
+
+`--html` also writes `<deck>/target/render/index.html`, a self-contained
+slideshow that embeds the slides in the first `--format` (PNG by default).
+Press `f` to present full screen, navigate with arrows, space,
+PageUp/PageDown, Home and End, and press `f` or Esc to exit.
 
 ## Validation
 
