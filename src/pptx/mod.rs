@@ -204,7 +204,26 @@ pub(crate) enum ObjKind {
     Text,
     Placeholder,
     Image,
+    Table,
     Notes,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Table {
+    /// Rectangular grid. Origin cells carry text and span counts; filler cells
+    /// mark the continuation of a horizontal or vertical merge.
+    pub rows: Vec<Vec<TableCell>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TableCell {
+    pub runs: Vec<Run>,
+    pub options: Opts,
+    pub colspan: usize,
+    pub rowspan: usize,
+    pub hmerge: bool,
+    pub vmerge: bool,
+    pub origin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -235,6 +254,7 @@ pub(crate) struct Obj {
     pub kind: ObjKind,
     pub options: Opts,
     pub text: Option<Vec<Run>>,
+    pub table: Option<Table>,
     pub shape: String,
     /// pptxgenjs's `newObject.image` (used as the image `descr` fallback).
     pub image: Option<String>,
@@ -589,6 +609,7 @@ impl Deck {
             },
             options: std::mem::take(&mut shape_opts),
             text: Some(text),
+            table: None,
             shape,
             image: None,
             image_rid: None,
@@ -641,6 +662,7 @@ impl Deck {
             kind: ObjKind::Text,
             options,
             text: None,
+            table: None,
             shape: shape.into(),
             image: None,
             image_rid: None,
@@ -876,10 +898,77 @@ impl Deck {
             kind: ObjKind::Image,
             options,
             text: None,
+            table: None,
             shape: "rect".into(),
             image: Some(image),
             image_rid: Some(image_rid),
             hyperlink,
+            has_custom_prompt: false,
+        });
+    }
+
+    fn add_table_definition(&mut self, target: &mut Target, mut options: Opts, rows: &Value) {
+        let count = target
+            .objects
+            .iter()
+            .filter(|o| o.kind == ObjKind::Table)
+            .count();
+        if truthy(options.get("objectName")) {
+            let name = encode_xml(options.get("objectName").unwrap());
+            options.insert("objectName".into(), Value::String(name));
+        } else {
+            options.insert("objectName".into(), Value::String(format!("Table {count}")));
+        }
+        let mut table_rows = Vec::new();
+        if let Some(rows) = rows.as_array() {
+            for row in rows {
+                let mut cells = Vec::new();
+                if let Some(row) = row.as_array() {
+                    for cell in row {
+                        let Some(cell) = cell.as_object() else {
+                            continue;
+                        };
+                        let origin = cell.contains_key("options");
+                        if origin {
+                            let mut runs = bridge_runs(cell.get("runs"));
+                            create_text_hyperlink_rels(target, &mut runs);
+                            let cell_opts = cell
+                                .get("options")
+                                .and_then(Value::as_object)
+                                .cloned()
+                                .unwrap_or_default();
+                            cells.push(TableCell {
+                                runs,
+                                options: cell_opts,
+                                colspan: cell.get("colspan").and_then(Value::as_u64).unwrap_or(1)
+                                    as usize,
+                                rowspan: cell.get("rowspan").and_then(Value::as_u64).unwrap_or(1)
+                                    as usize,
+                                hmerge: false,
+                                vmerge: false,
+                                origin: true,
+                            });
+                        } else {
+                            cells.push(TableCell {
+                                hmerge: cell.get("hmerge").is_some_and(|v| truthy(Some(v))),
+                                vmerge: cell.get("vmerge").is_some_and(|v| truthy(Some(v))),
+                                ..TableCell::default()
+                            });
+                        }
+                    }
+                }
+                table_rows.push(cells);
+            }
+        }
+        target.objects.push(Obj {
+            kind: ObjKind::Table,
+            options,
+            text: None,
+            table: Some(Table { rows: table_rows }),
+            shape: "rect".into(),
+            image: None,
+            image_rid: None,
+            hyperlink: None,
             has_custom_prompt: false,
         });
     }
@@ -892,6 +981,7 @@ impl Deck {
                 text: notes,
                 options: Opts::new(),
             }]),
+            table: None,
             shape: "rect".into(),
             image: None,
             image_rid: None,
@@ -1186,7 +1276,9 @@ fn build_deck(spec_json: &str) -> Result<Deck> {
                 let kind = sh.get("kind").and_then(Value::as_str).unwrap_or("");
                 let mut opts = Opts::new();
                 for (k, v) in sh {
-                    if matches!(k.as_str(), "kind" | "runs" | "type" | "preview") || v.is_null() {
+                    if matches!(k.as_str(), "kind" | "runs" | "rows" | "type" | "preview")
+                        || v.is_null()
+                    {
                         continue;
                     }
                     opts.insert(k.clone(), v.clone());
@@ -1210,6 +1302,10 @@ fn build_deck(spec_json: &str) -> Result<Deck> {
                         let data = sh.get("data").and_then(Value::as_str);
                         let preview = sh.get("preview").and_then(Value::as_str);
                         deck.add_image_definition(&mut slide, &opts, data, preview);
+                    }
+                    "table" => {
+                        let rows = sh.get("rows").cloned().unwrap_or(Value::Array(Vec::new()));
+                        deck.add_table_definition(&mut slide, opts, &rows);
                     }
                     _ => {}
                 }

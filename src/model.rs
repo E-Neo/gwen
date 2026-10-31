@@ -171,8 +171,8 @@ pub struct Slide {
 }
 
 /// A positioned element used by both slides and masters. `type` is `text`,
-/// `image` or a pptxgenjs `ShapeType` preset (`rect`, `roundRect`, `line`,
-/// ...). Reserved `chart`, `table` and `media` are recognised but not yet
+/// `image`, `table` or a pptxgenjs `ShapeType` preset (`rect`, `roundRect`,
+/// `line`, ...). Reserved `chart` and `media` are recognised but not yet
 /// implemented. In a master, `type = "placeholder"` defines a placeholder the
 /// slide content can fill (`name` + `ph_type`: `title|body|pic|chart|tbl|media`).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -190,6 +190,16 @@ pub struct Shape {
     pub paragraphs: Vec<Para>,
     #[serde(default)]
     pub src: Option<String>,
+    /// `type = "table"` contents: rows of cells. A cell is a string, a number,
+    /// or an inline table with `text` plus cell options.
+    #[serde(default)]
+    pub rows: Vec<Vec<toml::Value>>,
+    /// Per-column table width and style overlays (`w` plus style keys).
+    #[serde(default)]
+    pub col_styles: Vec<toml::Table>,
+    /// Per-row table height and style overlays (`h` plus style keys).
+    #[serde(default)]
+    pub row_styles: Vec<toml::Table>,
     #[serde(default)]
     pub x: Option<Coord>,
     #[serde(default)]
@@ -249,6 +259,7 @@ pub enum Kind {
     Text,
     Shape,
     Image,
+    Table,
 }
 
 impl Shape {
@@ -256,9 +267,8 @@ impl Shape {
         match self.ty.as_str() {
             "text" => Ok(Kind::Text),
             "image" => Ok(Kind::Image),
-            "chart" | "table" | "media" => {
-                Err(format!("shape type `{}` is not supported yet", self.ty))
-            }
+            "table" => Ok(Kind::Table),
+            "chart" | "media" => Err(format!("shape type `{}` is not supported yet", self.ty)),
             _ => Ok(Kind::Shape),
         }
     }

@@ -418,6 +418,9 @@ project.
 - a line that starts with `-`, `+`, `*`, `>`, or `1.` is a markdown list or
   quote marker; escape the leading character (`\- item`, `\> note`) to show
   it literally
+- tables: `type = "table"` with `rows` content; `col_styles`/`row_styles`
+  set each column's `w` and each row's `h` plus style keys; `colspan`/`rowspan`
+  live on cells
 - coordinates: EMU integers or `"1in"` / `"2.5cm"` / `"25mm"` / `"72pt"` /
   `"50%"`
 - gwen validates strictly: unknown fields/options/`styles` references/cycles
@@ -554,12 +557,50 @@ shape's display size, so older PowerPoint still shows the image.
 
 A shape preset that carries `text` draws the shape with the text inside it
 (fill/line/font options all apply); equivalently `shape = "rect"` on a text
-shape. `chart`, `table` and `media` types are not supported yet.
+shape. `chart` and `media` types are not supported yet.
+
+Tables use their own shape type:
+
+```toml
+[[shapes]]
+type = "table"
+x = "0.5in"; y = "1in"; w = "12in"
+col_styles = [{ w = "4in" }, { w = "4in", align = "right" }, { w = "4in" }]
+row_styles = [{ h = "0.5in", bold = true, align = "center" }, { h = "0.4in" }, { h = "0.4in" }]
+border = { color = "D9D9D9", width = 1 }
+rows = [
+  ["Name", "Qty", "Notes"],
+  ["Widget", 3, "delivered"],
+  [{ text = "Merged", colspan = 2 }, "tail"],
+]
+```
+
+`rows` is the content: cells are strings, numbers, or inline tables with `text`
+plus cell options. Cell text is markdown. `col_styles` has one entry per column
+with `w`; `row_styles` has one entry per row with `h`. Both accept table style
+keys (`align`, `valign`, `bold`, `color`, `fill`, `font_face`, `font_size`,
+`margin`, `border`, `underline`, `text_direction`, `lang`, `italic`, `strike`,
+`char_spacing`, paragraph spacing). Precedence is table < column < row < cell.
+`colspan`/`rowspan` are cell keys; ragged rows, overlaps and spans past the
+table are errors. Omitted widths share the remaining table width; omitted row
+heights are automatic. Defaults are 0.5in x/y, slide width minus 1in, 12pt,
+black, `margin = [0.05, 0.1, 0.05, 0.1]`, and no borders. `auto_page` is not
+supported. Tables are allowed on slides, not masters.
+
+`border` draws per-cell lines (`a:lnT/lnR/lnB/lnL`), not a shape outline. A side
+uses `type = "solid" | "none"`, `color`, `width` (points, like `line.width`) and
+`dash_type`. It accepts a flat side, named sides, or four side tables:
+
+```toml
+border = { color = "D9D9D9", width = 1 }
+border = { top = { width = 2 }, bottom = { width = 1 } }
+border = [{ width = 1 }, { type = "none" }, { width = 1 }, { type = "none" }]
+```
 
 ## Supported shapes and options
 
-A shape's `type` is `text`, `image`, a master `placeholder`, or any of these
-preset ids (snake_case or camelCase both work):
+A shape's `type` is `text`, `image`, `table`, a master `placeholder`, or any of
+these preset ids (snake_case or camelCase both work):
 `{{shape_types}}`
 For example: `type = "rect"`, `type = "round_rect"`, `type = "star5"`,
 `type = "flow_chart_process"`.

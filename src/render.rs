@@ -22,6 +22,9 @@ const SHAPE_SKIP: &[&str] = &[
     "text",
     "paragraphs",
     "src",
+    "rows",
+    "col_styles",
+    "row_styles",
     "x",
     "y",
     "w",
@@ -285,6 +288,11 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
             if !matches!(ty, "chart") && opts::ctx_for_style_type(ty).is_none() {
                 return Err(miette!("master `{stem}`: unknown shape type `{}`", obj.ty));
             }
+            if ty == "table" {
+                return Err(miette!(
+                    "master `{stem}`: table shapes are only supported on slides"
+                ));
+            }
             let mut opts = merge_opts(main, &obj.ty, &obj.styles, &obj.opts)?;
             let list = take_list_options(&mut opts);
             let where_ = format!("master `{stem}` shape `{}`", obj.ty);
@@ -348,6 +356,13 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                             text: &para.text,
                             opts: &para.opts,
                             index: j,
+                            span: shape_tables
+                                .get(idx)
+                                .and_then(|t| t.get("paragraphs"))
+                                .and_then(|i| i.as_array_of_tables())
+                                .and_then(|a| a.get(j))
+                                .and_then(|t| t.get("text"))
+                                .and_then(|i| i.span()),
                         });
                     }
                 } else if let Some(text) = &obj.text {
@@ -355,18 +370,15 @@ fn load_masters(project: &Project, width: i64, height: i64, main: &Main) -> Resu
                         text,
                         opts: &empty,
                         index: usize::MAX,
+                        span: shape_tables
+                            .get(idx)
+                            .and_then(|t| t.get("text"))
+                            .and_then(|i| i.span()),
                     });
                 }
                 out.insert(
                     "runs".into(),
-                    flatten_runs(
-                        &paragraphs,
-                        &list,
-                        &main.styles.named,
-                        &file_src,
-                        idx,
-                        &where_,
-                    )?,
+                    flatten_runs(&paragraphs, &list, &main.styles.named, &file_src, &where_)?,
                 );
             } else {
                 out.insert("text".into(), json!(obj.text));
@@ -592,6 +604,14 @@ fn build_slide(
 fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
     let file = ctx.file;
     let mut kind = shape.kind().map_err(|e| miette!("slide `{file}`: {e}"))?;
+    if kind == Kind::Table {
+        return table_value(ctx, shape, idx);
+    }
+    if !shape.rows.is_empty() || !shape.col_styles.is_empty() || !shape.row_styles.is_empty() {
+        return Err(miette!(
+            "slide `{file}`: `rows`, `col_styles` and `row_styles` are only valid for `type = \"table\"`"
+        ));
+    }
     if matches!(kind, Kind::Shape) && !opts::is_shape_type(&shape.ty) {
         return Err(miette!("slide `{file}`: unknown shape type `{}`", shape.ty));
     }
@@ -608,6 +628,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
         Kind::Text => Ctx::Text,
         Kind::Image => Ctx::Image,
         Kind::Shape => Ctx::TextShape,
+        Kind::Table => Ctx::Table,
     };
     let where_ = format!("slide `{file}` shape `{}`", shape.ty);
     let src = ctx.file_src.src();
@@ -694,8 +715,630 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
                 value.insert(k.clone(), v.clone());
             }
         }
+        Kind::Table => unreachable!("table shapes return early"),
     }
     Ok(Value::Object(value))
+}
+
+#[derive(Clone, Default)]
+struct TableCellInput {
+    text: String,
+    opts: toml::Table,
+    colspan: usize,
+    rowspan: usize,
+    span: Option<std::ops::Range<usize>>,
+    origin_row: usize,
+    origin_col: usize,
+}
+
+#[derive(Clone, Copy)]
+enum TableSlot {
+    Origin(usize),
+    Filler { hmerge: bool, vmerge: bool },
+}
+
+const BORDER_SIDES: &[&str] = &["top", "right", "bottom", "left"];
+
+fn table_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
+    let file = ctx.file;
+    let where_ = format!("slide `{file}` table");
+    if shape.text.is_some() || !shape.paragraphs.is_empty() {
+        return Err(miette!(
+            "{where_}: table shapes use `rows` for content, not `text` or `paragraphs`"
+        ));
+    }
+    if shape.src.is_some() {
+        return Err(miette!("{where_}: table shapes do not take `src`"));
+    }
+    reject_auto_page(&shape.opts, &where_)?;
+
+    let src = ctx.file_src.src();
+    let shape_edit = ctx.shape_table(idx);
+    if let Some(table) = shape_edit {
+        opts::validate_source(Ctx::Table, table, &src, &where_, SHAPE_SKIP)?;
+    }
+    let mut merged = merge_opts(ctx.main, &shape.ty, &shape.styles, &shape.opts)?;
+    let list = take_list_options(&mut merged);
+    reject_auto_page(merged.as_table().unwrap_or(&toml::Table::new()), &where_)?;
+    opts::retain_ctx_keys(Ctx::Table, &mut merged);
+    opts::validate_ctx(Ctx::Table, &merged, &where_)?;
+    opts::finalize_opts(Ctx::Table, &mut merged)?;
+    let mut table_style = merged.as_table().cloned().unwrap_or_default();
+    let object_name = table_style
+        .remove("object_name")
+        .and_then(|v| v.as_str().map(String::from));
+
+    // Parse and validate the cell rows. The model rows provide the values;
+    // the toml_edit rows provide byte spans for diagnostics.
+    if shape.rows.is_empty() {
+        return Err(miette!("{where_}: `rows` must not be empty"));
+    }
+    let edit_rows = shape_edit
+        .and_then(|t| t.get("rows"))
+        .and_then(|i| i.as_value())
+        .and_then(|v| v.as_array());
+    let mut raw_rows: Vec<Vec<TableCellInput>> = Vec::new();
+    for (r, row) in shape.rows.iter().enumerate() {
+        let mut cells = Vec::new();
+        for (c, value) in row.iter().enumerate() {
+            let cell_where = format!("{where_} row {} cell {}", r + 1, c + 1);
+            let mut cell = parse_table_cell(value, &cell_where)?;
+            let edit_cell = edit_rows
+                .and_then(|rows| rows.get(r))
+                .and_then(|row| row.as_array())
+                .and_then(|cells| cells.get(c));
+            cell.span = edit_cell.and_then(cell_text_span);
+            if let Some(toml_edit::Value::InlineTable(t)) = edit_cell {
+                let table = inline_to_table(t);
+                opts::validate_source(Ctx::Cell, &table, &src, &cell_where, &["text"])?;
+            }
+            let mut cell_value = toml::Value::Table(cell.opts.clone());
+            opts::finalize_opts(Ctx::Cell, &mut cell_value)?;
+            cell.opts = cell_value.as_table().cloned().unwrap_or_default();
+            cells.push(cell);
+        }
+        raw_rows.push(cells);
+    }
+
+    let cols: usize = raw_rows[0].iter().map(|c| c.colspan).sum();
+    if cols == 0 {
+        return Err(miette!("{where_}: the first row has no columns"));
+    }
+    let row_count = raw_rows.len();
+    let mut occupied = vec![vec![false; cols]; row_count];
+    let mut cover: Vec<Vec<Option<usize>>> = vec![vec![None; cols]; row_count];
+    let mut origins: Vec<TableCellInput> = Vec::new();
+    for r in 0..row_count {
+        let mut c = 0usize;
+        for cell in &raw_rows[r] {
+            while c < cols && occupied[r][c] {
+                c += 1;
+            }
+            if c + cell.colspan > cols {
+                return Err(miette!(
+                    "{where_}: row {} overflows the table width; its cells span more than {cols} columns",
+                    r + 1
+                ));
+            }
+            if r + cell.rowspan > row_count {
+                return Err(miette!(
+                    "{where_}: row {} has a cell with `rowspan` past the last row",
+                    r + 1
+                ));
+            }
+            let origin_idx = origins.len();
+            for rr in r..r + cell.rowspan {
+                for cc in c..c + cell.colspan {
+                    if occupied[rr][cc] {
+                        return Err(miette!(
+                            "{where_}: row {} cell {} overlaps another merged cell",
+                            r + 1,
+                            c + 1
+                        ));
+                    }
+                    occupied[rr][cc] = true;
+                    cover[rr][cc] = Some(origin_idx);
+                }
+            }
+            let mut origin = cell.clone();
+            origin.origin_row = r;
+            origin.origin_col = c;
+            origins.push(origin);
+            c += cell.colspan;
+        }
+        if !occupied[r].iter().all(|filled| *filled) {
+            return Err(miette!(
+                "{where_}: row {} is missing cells for the table width ({cols} columns)",
+                r + 1
+            ));
+        }
+    }
+
+    // Per-column and per-row overlays. Geometry is removed before the rest is
+    // merged into cells as style options.
+    let col_edit = shape_edit
+        .and_then(|t| t.get("col_styles"))
+        .and_then(|i| i.as_value())
+        .and_then(|v| v.as_array());
+    let row_edit = shape_edit
+        .and_then(|t| t.get("row_styles"))
+        .and_then(|i| i.as_value())
+        .and_then(|v| v.as_array());
+    if !shape.col_styles.is_empty() && shape.col_styles.len() != cols {
+        return Err(miette!(
+            "{where_}: `col_styles` has {} entries but the table has {cols} columns",
+            shape.col_styles.len()
+        ));
+    }
+    if !shape.row_styles.is_empty() && shape.row_styles.len() != row_count {
+        return Err(miette!(
+            "{where_}: `row_styles` has {} entries but the table has {row_count} rows",
+            shape.row_styles.len()
+        ));
+    }
+    let mut col_widths: Vec<Option<f64>> = vec![None; cols];
+    let mut col_style_opts: Vec<Option<toml::Table>> = vec![None; cols];
+    for (i, raw) in shape.col_styles.iter().enumerate() {
+        let style_where = format!("{where_} column style {}", i + 1);
+        if let Some(toml_edit::Value::InlineTable(t)) = col_edit.and_then(|a| a.get(i)) {
+            let table = inline_to_table(t);
+            opts::validate_source(Ctx::ColStyle, &table, &src, &style_where, &[])?;
+        }
+        let mut style = raw.clone();
+        if let Some(v) = style.remove("w") {
+            col_widths[i] = Some(table_coord_inches(&v, ctx.width, "w", &style_where)?);
+        }
+        let mut value = toml::Value::Table(style);
+        opts::finalize_opts(Ctx::ColStyle, &mut value)?;
+        col_style_opts[i] = value.as_table().cloned();
+    }
+    let mut row_heights: Vec<Option<f64>> = vec![None; row_count];
+    let mut row_style_opts: Vec<Option<toml::Table>> = vec![None; row_count];
+    for (i, raw) in shape.row_styles.iter().enumerate() {
+        let style_where = format!("{where_} row style {}", i + 1);
+        if let Some(toml_edit::Value::InlineTable(t)) = row_edit.and_then(|a| a.get(i)) {
+            let table = inline_to_table(t);
+            opts::validate_source(Ctx::RowStyle, &table, &src, &style_where, &[])?;
+        }
+        let mut style = raw.clone();
+        if let Some(v) = style.remove("h") {
+            row_heights[i] = Some(table_coord_inches(&v, ctx.height, "h", &style_where)?);
+        }
+        let mut value = toml::Value::Table(style);
+        opts::finalize_opts(Ctx::RowStyle, &mut value)?;
+        row_style_opts[i] = value.as_table().cloned();
+    }
+
+    let shape_w = shape
+        .w
+        .as_ref()
+        .map(|c| c.inches(ctx.width))
+        .transpose()
+        .map_err(|e| miette!("{where_}: invalid `w`: {e}"))?;
+    let shape_h = shape
+        .h
+        .as_ref()
+        .map(|c| c.inches(ctx.height))
+        .transpose()
+        .map_err(|e| miette!("{where_}: invalid `h`: {e}"))?;
+    let default_w = (ctx.width as f64 / EMU_PER_IN - 1.0).max(0.0);
+    let (widths, table_w) = resolve_columns(cols, &col_widths, shape_w, default_w, &where_)?;
+    let (heights, table_h) = resolve_rows(row_count, &row_heights, shape_h, &where_)?;
+    reject_negative_extent(table_w, "w", &where_)?;
+    reject_negative_extent(table_h, "h", &where_)?;
+
+    // Build the rectangular grid with merge flags for the writer/preview.
+    let mut grid: Vec<Vec<TableSlot>> = vec![
+        vec![
+            TableSlot::Filler {
+                hmerge: false,
+                vmerge: false
+            };
+            cols
+        ];
+        row_count
+    ];
+    for (r, row) in cover.iter().enumerate() {
+        for (c, slot) in row.iter().enumerate() {
+            if let Some(origin_idx) = slot {
+                let origin = &origins[*origin_idx];
+                if origin.origin_row == r && origin.origin_col == c {
+                    grid[r][c] = TableSlot::Origin(*origin_idx);
+                } else {
+                    grid[r][c] = TableSlot::Filler {
+                        hmerge: origin.origin_col < c,
+                        vmerge: origin.origin_row < r,
+                    };
+                }
+            }
+        }
+    }
+
+    // Effective cell styles and markdown runs.
+    let named = &ctx.main.styles.named;
+    let empty = toml::Table::new();
+    let mut rows_json: Vec<Value> = Vec::new();
+    for grid_row in &grid {
+        let mut row_json = Vec::new();
+        for slot in grid_row {
+            match *slot {
+                TableSlot::Filler { hmerge, vmerge } => {
+                    row_json.push(json!({"hmerge": hmerge, "vmerge": vmerge}));
+                }
+                TableSlot::Origin(origin_idx) => {
+                    let cell = &origins[origin_idx];
+                    let mut effective = table_style.clone();
+                    if let Some(style) =
+                        col_style_opts.get(cell.origin_col).and_then(|s| s.as_ref())
+                    {
+                        effective.extend(style.clone());
+                    }
+                    if let Some(style) =
+                        row_style_opts.get(cell.origin_row).and_then(|s| s.as_ref())
+                    {
+                        effective.extend(style.clone());
+                    }
+                    effective.extend(cell.opts.clone());
+                    effective
+                        .entry("font_size")
+                        .or_insert(toml::Value::Integer(12));
+                    effective
+                        .entry("color")
+                        .or_insert_with(|| toml::Value::String("000000".into()));
+                    effective
+                        .entry("valign")
+                        .or_insert_with(|| toml::Value::String("top".into()));
+                    if !effective.contains_key("margin") {
+                        effective.insert(
+                            "margin".into(),
+                            toml::Value::Array(vec![
+                                toml::Value::Float(0.05),
+                                toml::Value::Float(0.1),
+                                toml::Value::Float(0.05),
+                                toml::Value::Float(0.1),
+                            ]),
+                        );
+                    }
+                    let border = effective.remove("border");
+                    let border = table_border(border.as_ref(), &where_)?;
+                    let mut options = to_pptxgen(&toml::Value::Table(effective));
+                    options
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("border".into(), border);
+                    let cell_where = format!(
+                        "{where_} row {} column {}",
+                        cell.origin_row + 1,
+                        cell.origin_col + 1
+                    );
+                    let runs = flatten_runs(
+                        &[TextPara {
+                            text: &cell.text,
+                            opts: &empty,
+                            index: usize::MAX,
+                            span: cell.span.clone(),
+                        }],
+                        &list,
+                        named,
+                        ctx.file_src,
+                        &cell_where,
+                    )?;
+                    row_json.push(json!({
+                        "colspan": cell.colspan,
+                        "rowspan": cell.rowspan,
+                        "runs": runs,
+                        "options": options,
+                    }));
+                }
+            }
+        }
+        rows_json.push(Value::Array(row_json));
+    }
+
+    let x = shape
+        .x
+        .as_ref()
+        .map(|c| c.inches(ctx.width))
+        .transpose()
+        .map_err(|e| miette!("{where_}: invalid `x`: {e}"))?
+        .unwrap_or(0.5);
+    let y = shape
+        .y
+        .as_ref()
+        .map(|c| c.inches(ctx.height))
+        .transpose()
+        .map_err(|e| miette!("{where_}: invalid `y`: {e}"))?
+        .unwrap_or(0.5);
+    let mut value = Map::new();
+    value.insert("kind".into(), json!("table"));
+    value.insert("x".into(), json!(x));
+    value.insert("y".into(), json!(y));
+    value.insert("w".into(), json!(table_w));
+    value.insert("h".into(), json!(table_h));
+    value.insert("colW".into(), json!(widths));
+    value.insert("rowH".into(), json!(heights));
+    value.insert("rows".into(), Value::Array(rows_json));
+    if let Some(name) = object_name {
+        value.insert("objectName".into(), json!(name));
+    }
+    Ok(Value::Object(value))
+}
+
+fn parse_table_cell(value: &toml::Value, where_: &str) -> Result<TableCellInput> {
+    let mut cell = TableCellInput {
+        colspan: 1,
+        rowspan: 1,
+        ..TableCellInput::default()
+    };
+    match value {
+        toml::Value::String(s) => cell.text = s.clone(),
+        toml::Value::Integer(i) => cell.text = i.to_string(),
+        toml::Value::Float(f) => cell.text = f.to_string(),
+        toml::Value::Table(t) => {
+            if let Some(text) = t.get("text") {
+                cell.text = match text {
+                    toml::Value::String(s) => s.clone(),
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => f.to_string(),
+                    _ => {
+                        return Err(miette!(
+                            "{where_}: cell `text` must be a string or a number"
+                        ));
+                    }
+                };
+            }
+            cell.opts = t.clone();
+            cell.opts.remove("text");
+            if let Some(v) = cell.opts.remove("colspan") {
+                cell.colspan = parse_span(&v, where_, "colspan")?;
+            }
+            if let Some(v) = cell.opts.remove("rowspan") {
+                cell.rowspan = parse_span(&v, where_, "rowspan")?;
+            }
+        }
+        _ => {
+            return Err(miette!(
+                "{where_}: a table cell must be a string, a number or an inline table"
+            ));
+        }
+    }
+    Ok(cell)
+}
+
+fn parse_span(value: &toml::Value, where_: &str, key: &str) -> Result<usize> {
+    match value {
+        toml::Value::Integer(n) if *n >= 1 => Ok(*n as usize),
+        _ => Err(miette!("{where_}: `{key}` must be a positive integer")),
+    }
+}
+
+fn cell_text_span(value: &toml_edit::Value) -> Option<std::ops::Range<usize>> {
+    match value {
+        toml_edit::Value::InlineTable(t) => t
+            .get("text")
+            .and_then(|v| v.span())
+            .or_else(|| value.span()),
+        _ => value.span(),
+    }
+}
+
+fn reject_auto_page(opts: &toml::Table, where_: &str) -> Result<()> {
+    for key in opts.keys() {
+        if key == "auto_page" || key.starts_with("auto_page_") {
+            return Err(miette!(
+                "{where_}: `{key}` is not supported; tables are static"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn table_coord_inches(
+    value: &toml::Value,
+    slide_emu: i64,
+    axis: &str,
+    where_: &str,
+) -> Result<f64> {
+    match value {
+        toml::Value::Integer(emu) => Ok(*emu as f64 / EMU_PER_IN),
+        toml::Value::String(text) => Coord::Text(text.clone())
+            .inches(slide_emu)
+            .map_err(|e| miette!("{where_}: invalid `{axis}`: {e}")),
+        _ => Err(miette!(
+            "{where_}: `{axis}` must be an EMU integer or a length string"
+        )),
+    }
+}
+
+fn resolve_columns(
+    count: usize,
+    widths: &[Option<f64>],
+    total: Option<f64>,
+    default_total: f64,
+    where_: &str,
+) -> Result<(Vec<f64>, f64)> {
+    let fixed_count = widths.iter().filter(|w| w.is_some()).count();
+    let fixed_sum: f64 = widths.iter().flatten().sum();
+    if widths.iter().flatten().any(|w| *w < 0.0) {
+        return Err(miette!("{where_}: column widths must not be negative"));
+    }
+    let total = match total {
+        Some(t) => {
+            if fixed_count == count && (fixed_sum - t).abs() > 1e-6 {
+                return Err(miette!(
+                    "{where_}: column widths sum to {fixed_sum}in but `w` is {t}in"
+                ));
+            }
+            if fixed_count < count && fixed_count > 0 && t - fixed_sum <= 0.0 {
+                return Err(miette!(
+                    "{where_}: fixed column widths leave no room for the remaining columns"
+                ));
+            }
+            t
+        }
+        None => {
+            if fixed_count == count {
+                fixed_sum
+            } else {
+                default_total
+            }
+        }
+    };
+    if total <= 0.0 {
+        return Err(miette!("{where_}: table width must be positive"));
+    }
+    let missing = count - fixed_count;
+    let each = if missing > 0 {
+        let remaining = total - fixed_sum;
+        if remaining <= 0.0 {
+            return Err(miette!(
+                "{where_}: fixed column widths exceed the table width"
+            ));
+        }
+        remaining / missing as f64
+    } else {
+        0.0
+    };
+    let widths = widths.iter().map(|w| w.unwrap_or(each)).collect();
+    Ok((widths, total))
+}
+
+fn resolve_rows(
+    count: usize,
+    heights: &[Option<f64>],
+    total: Option<f64>,
+    where_: &str,
+) -> Result<(Vec<f64>, f64)> {
+    let fixed_count = heights.iter().filter(|h| h.is_some()).count();
+    let fixed_sum: f64 = heights.iter().flatten().sum();
+    if heights.iter().flatten().any(|h| *h < 0.0) {
+        return Err(miette!("{where_}: row heights must not be negative"));
+    }
+    let (mut heights, total) = match total {
+        Some(t) => {
+            if fixed_count == count && (fixed_sum - t).abs() > 1e-6 {
+                return Err(miette!(
+                    "{where_}: row heights sum to {fixed_sum}in but `h` is {t}in"
+                ));
+            }
+            let missing = count - fixed_count;
+            if missing > 0 && fixed_count > 0 && t - fixed_sum <= 0.0 {
+                return Err(miette!(
+                    "{where_}: fixed row heights leave no room for the remaining rows"
+                ));
+            }
+            let each = if missing > 0 {
+                let remaining = t - fixed_sum;
+                if remaining <= 0.0 {
+                    return Err(miette!(
+                        "{where_}: fixed row heights exceed the table height"
+                    ));
+                }
+                remaining / missing as f64
+            } else {
+                0.0
+            };
+            (
+                heights
+                    .iter()
+                    .map(|h| h.unwrap_or(each))
+                    .collect::<Vec<f64>>(),
+                t,
+            )
+        }
+        None => {
+            let total = if fixed_count == count { fixed_sum } else { 0.0 };
+            (
+                heights
+                    .iter()
+                    .map(|h| h.unwrap_or(0.0))
+                    .collect::<Vec<f64>>(),
+                total,
+            )
+        }
+    };
+    if total < 0.0 {
+        return Err(miette!("{where_}: table height must not be negative"));
+    }
+    Ok((std::mem::take(&mut heights), total))
+}
+
+fn table_border(value: Option<&toml::Value>, where_: &str) -> Result<Value> {
+    let none = || json!({"type": "none"});
+    let sides = match value {
+        None => vec![none(), none(), none(), none()],
+        Some(toml::Value::Table(t)) => {
+            if t.keys().any(|k| BORDER_SIDES.contains(&k.as_str())) {
+                let mut sides = Vec::new();
+                for side in BORDER_SIDES {
+                    sides.push(match t.get(*side) {
+                        Some(v) => border_side(v, where_)?,
+                        None => none(),
+                    });
+                }
+                sides
+            } else {
+                let side = border_side(&toml::Value::Table(t.clone()), where_)?;
+                vec![side.clone(), side.clone(), side.clone(), side]
+            }
+        }
+        Some(toml::Value::Array(items)) => {
+            if items.len() != 4 {
+                return Err(miette!("{where_}: `border` needs exactly four sides"));
+            }
+            items
+                .iter()
+                .map(|v| border_side(v, where_))
+                .collect::<Result<Vec<_>>>()?
+        }
+        _ => return Err(miette!("{where_}: invalid `border`")),
+    };
+    Ok(Value::Array(sides))
+}
+
+fn border_side(value: &toml::Value, where_: &str) -> Result<Value> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| miette!("{where_}: a border side must be a table"))?;
+    let ty = table
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("solid");
+    let mut out = Map::new();
+    if ty == "none" {
+        out.insert("type".into(), json!("none"));
+        return Ok(Value::Object(out));
+    }
+    out.insert("type".into(), json!("solid"));
+    out.insert(
+        "color".into(),
+        json!(
+            table
+                .get("color")
+                .and_then(|v| v.as_str())
+                .unwrap_or("666666")
+        ),
+    );
+    let width = table
+        .get("width")
+        .and_then(|v| match v {
+            toml::Value::Integer(i) => Some(*i as f64),
+            toml::Value::Float(f) => Some(*f),
+            _ => None,
+        })
+        .unwrap_or(1.0);
+    out.insert("width".into(), json!(width));
+    if let Some(dash) = table.get("dash_type").and_then(|v| v.as_str())
+        && dash != "solid"
+    {
+        out.insert("dashType".into(), json!(dash));
+    }
+    for key in ["transparency", "alpha"] {
+        if let Some(v) = table.get(key) {
+            out.insert(key.into(), to_pptxgen(v));
+        }
+    }
+    Ok(Value::Object(out))
 }
 
 /// A located diagnostic for a rich-text parse error, pointing at the `text`
@@ -703,23 +1346,10 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
 /// `text` shorthand, otherwise a `[[shapes.paragraphs]]` entry).
 fn text_error(
     file_src: &FileSrc,
-    idx: usize,
-    para_idx: usize,
+    span: Option<std::ops::Range<usize>>,
     where_: &str,
     msg: String,
 ) -> miette::Report {
-    let span = file_src.shape_at(idx).and_then(|shape| {
-        if para_idx == usize::MAX {
-            shape.get("text").and_then(|t| t.span())
-        } else {
-            shape
-                .get("paragraphs")
-                .and_then(|p| p.as_array_of_tables())
-                .and_then(|a| a.get(para_idx))
-                .and_then(|t| t.get("text"))
-                .and_then(|t| t.span())
-        }
-    });
     opts::located(span, &file_src.src(), format!("{where_}: {msg}"))
 }
 
@@ -730,6 +1360,8 @@ struct TextPara<'a> {
     text: &'a str,
     opts: &'a toml::Table,
     index: usize,
+    /// Byte span of the source `text` value, for located markdown errors.
+    span: Option<std::ops::Range<usize>>,
 }
 
 /// Per-shape list configuration shared by slide and master text.
@@ -768,7 +1400,6 @@ fn flatten_runs(
     list: &ListOptions,
     styles: &BTreeMap<String, toml::Table>,
     file_src: &FileSrc,
-    idx: usize,
     base_where: &str,
 ) -> Result<Value> {
     let where_ = |index: usize| -> String {
@@ -802,7 +1433,7 @@ fn flatten_runs(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Map<_, _>>();
         for runs in richtext::parse_paragraphs(para.text, &list.ordered, &list.unordered, styles)
-            .map_err(|msg| text_error(file_src, idx, para.index, &where_(para.index), msg))?
+            .map_err(|msg| text_error(file_src, para.span.clone(), &where_(para.index), msg))?
         {
             groups.push(Group {
                 runs,
@@ -862,6 +1493,13 @@ fn runs_value(ctx: &SlideCtx, idx: usize, shape: &Shape, list: &ListOptions) -> 
                 text: &para.text,
                 opts: &para.opts,
                 index: j,
+                span: ctx
+                    .shape_table(idx)
+                    .and_then(|t| t.get("paragraphs"))
+                    .and_then(|i| i.as_array_of_tables())
+                    .and_then(|a| a.get(j))
+                    .and_then(|t| t.get("text"))
+                    .and_then(|i| i.span()),
             });
         }
     } else if let Some(text) = &shape.text {
@@ -869,6 +1507,10 @@ fn runs_value(ctx: &SlideCtx, idx: usize, shape: &Shape, list: &ListOptions) -> 
             text,
             opts: &empty,
             index: usize::MAX,
+            span: ctx
+                .shape_table(idx)
+                .and_then(|t| t.get("text"))
+                .and_then(|i| i.span()),
         });
     }
     let base_where = format!("slide `{}` shape `{}`", ctx.file, shape.ty);
@@ -877,7 +1519,6 @@ fn runs_value(ctx: &SlideCtx, idx: usize, shape: &Shape, list: &ListOptions) -> 
         list,
         &ctx.main.styles.named,
         ctx.file_src,
-        idx,
         &base_where,
     )
 }

@@ -260,7 +260,7 @@ notes = "presenter notes"
 # last shape, not the slide.
 
 [[shapes]]
-type = "text"                       # text | image | a pptxgenjs shape preset (rect, ...)
+type = "text"                       # text | image | table | a pptxgenjs shape preset (rect, ...)
 placeholder = "Title"               # fills a master placeholder (geometry inherited)
 x = "1in"
 y = "2.6in"
@@ -292,7 +292,66 @@ real vector picture (PowerPoint 2016+ renders it natively) *and* as a rasterized
 PNG preview (rendered by gwen with `resvg` at the shape's display size, so older
 PowerPoint still shows the image).
 
-`chart`, `table` and `media` shape types are recognised but not supported yet.
+`chart` and `media` shape types are recognised but not supported yet. Tables have
+their own shape type, described below.
+
+### Tables
+
+```toml
+[[shapes]]
+type = "table"
+x = "0.5in"
+y = "1.2in"
+w = "12.33in"
+col_styles = [
+  { w = "4in" },
+  { w = "2in", align = "right", valign = "middle" },
+  { w = "6.33in" },
+]
+row_styles = [
+  { h = "0.5in", bold = true, align = "center" },
+  { h = "0.45in" },
+  { h = "0.45in" },
+]
+border = { color = "D9D9D9", width = 1 }
+rows = [
+  ["Name", "Qty", "Notes"],
+  ["Widget", 3, "delivered"],
+  [{ text = "Merged", colspan = 2 }, "tail"],
+]
+```
+
+- `rows` holds the content. A cell is a string, a number, or an inline table with
+  `text` plus cell options. Cell text is markdown, like any other text shape.
+- `col_styles` has one entry per table column; `w` is that column's width.
+- `row_styles` has one entry per row; `h` is that row's height.
+- Both arrays accept the table style keys (`align`, `valign`, `bold`, `color`,
+  `fill`, `font_face`, `font_size`, `margin`, `border`, `underline`,
+  `text_direction`, `lang`, `italic`, `strike`, `char_spacing`, and paragraph
+  spacing). Precedence is `table options < col_styles < row_styles < cell`.
+- Omitted column widths share the remaining table width equally. Omitted row
+  heights are automatic (`a:tr h="0"`; the preview measures them).
+- If every column/row size is given and table `w`/`h` is omitted, the frame
+  takes their sum. If `w`/`h` is given, fixed sizes cannot exceed it.
+- `colspan` and `rowspan` are cell keys. Rows must resolve to the same grid;
+  ragged rows, overlapping merges and spans past the table are build errors.
+- Defaults: `x`/`y` 0.5in, `w` slide width minus 1in, 12pt text, black,
+  `margin = [0.05, 0.1, 0.05, 0.1]` (`[top, right, bottom, left]`, same units as
+  every other `margin`), no borders.
+- Tables are supported on slides, not masters. `auto_page` is not supported.
+
+`border` draws per-cell grid lines (`a:lnT/lnR/lnB/lnL`), not a shape outline.
+It accepts a flat side, named sides, or the pptxgenjs four-element array:
+
+```toml
+border = { color = "D9D9D9", width = 1 }            # all four sides
+border = { top = { width = 2 }, bottom = { width = 1 } }  # horizontal only
+border = [ { width = 1 }, { type = "none" }, { width = 1 }, { type = "none" } ]
+```
+
+A side uses `type = "solid" | "none"`, `color`, `width` (points, same as
+`line.width`) and `dash_type` (same values as `line`). Unspecified sides in the
+named form are `none`. Cell `border` overrides row, column and table borders.
 
 A shape preset that carries `text` draws the shape **with** the text inside it
 (markdown works, and the shape's `fill`/`line`/font options all apply):

@@ -13,12 +13,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::color::Color;
 use crate::defaults::{Defaults, LevelStyle};
+use crate::fonts::Fonts;
 use crate::media;
 use crate::presets::{self, Curve, GeomOpts, Point};
+use crate::textlayout;
 
 const PT_PER_IN: f64 = 72.0;
 
@@ -276,7 +278,12 @@ impl Bullet {
 
 /// Build every slide in the spec (all pages; selection is applied by the
 /// caller so it can report the right indices).
-pub fn build(spec: &Value, defaults: &Defaults, project_dir: &Path) -> Result<Vec<Scene>, String> {
+pub fn build(
+    spec: &Value,
+    defaults: &Defaults,
+    project_dir: &Path,
+    fonts: &Fonts,
+) -> Result<Vec<Scene>, String> {
     let width = spec.get("width").and_then(Value::as_f64).unwrap_or(10.0);
     let height = spec.get("height").and_then(Value::as_f64).unwrap_or(7.5);
 
@@ -290,6 +297,15 @@ pub fn build(spec: &Value, defaults: &Defaults, project_dir: &Path) -> Result<Ve
         let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
         masters.insert(name.to_string(), master(m, project_dir)?);
     }
+
+    let ctx = SceneCtx {
+        width,
+        height,
+        masters: &masters,
+        defaults,
+        dir: project_dir,
+        fonts,
+    };
 
     let mut scenes = Vec::new();
     let mut page = 0usize;
@@ -306,15 +322,7 @@ pub fn build(spec: &Value, defaults: &Defaults, project_dir: &Path) -> Result<Ve
             .unwrap_or(&[])
         {
             page += 1;
-            scenes.push(build_slide(
-                slide,
-                page,
-                width,
-                height,
-                &masters,
-                defaults,
-                project_dir,
-            )?);
+            scenes.push(build_slide(slide, page, &ctx)?);
         }
     }
     Ok(scenes)
@@ -326,6 +334,15 @@ struct Master {
     slide_number: Option<Value>,
     chrome: Vec<Value>,
     placeholders: BTreeMap<String, Value>,
+}
+
+struct SceneCtx<'a> {
+    width: f64,
+    height: f64,
+    masters: &'a BTreeMap<String, Master>,
+    defaults: &'a Defaults,
+    dir: &'a Path,
+    fonts: &'a Fonts,
 }
 
 fn master(m: &Value, dir: &Path) -> Result<Master, String> {
@@ -354,20 +371,12 @@ fn master(m: &Value, dir: &Path) -> Result<Master, String> {
     })
 }
 
-fn build_slide(
-    slide: &Value,
-    page: usize,
-    width: f64,
-    height: f64,
-    masters: &BTreeMap<String, Master>,
-    defaults: &Defaults,
-    dir: &Path,
-) -> Result<Scene, String> {
+fn build_slide(slide: &Value, page: usize, ctx: &SceneCtx<'_>) -> Result<Scene, String> {
     let master = slide
         .get("master")
         .and_then(Value::as_str)
-        .and_then(|name| masters.get(name));
-    let slide_bg = background(slide.get("background"), dir)?;
+        .and_then(|name| ctx.masters.get(name));
+    let slide_bg = background(slide.get("background"), ctx.dir)?;
     let (background, mut items) = match master {
         Some(m) => (
             if matches!(slide_bg, Background::None) {
@@ -378,7 +387,14 @@ fn build_slide(
             {
                 let mut items = Vec::new();
                 for obj in &m.chrome {
-                    items.extend(resolve(obj, None, Some(m), defaults, dir)?);
+                    items.extend(resolve(
+                        obj,
+                        None,
+                        Some(m),
+                        ctx.defaults,
+                        ctx.dir,
+                        ctx.fonts,
+                    )?);
                 }
                 items
             },
@@ -388,7 +404,7 @@ fn build_slide(
     let mut approximations = Vec::new();
 
     if let Some(sn) = master.and_then(|m| m.slide_number.as_ref()) {
-        items.push(slide_number_item(sn, page, defaults));
+        items.push(slide_number_item(sn, page, ctx.defaults));
     }
 
     for obj in slide
@@ -400,7 +416,7 @@ fn build_slide(
         let ph = obj_get(obj, "placeholder")
             .and_then(Value::as_str)
             .and_then(|name| master.and_then(|m| m.placeholders.get(name)));
-        items.extend(resolve(obj, ph, master, defaults, dir)?);
+        items.extend(resolve(obj, ph, master, ctx.defaults, ctx.dir, ctx.fonts)?);
     }
 
     // A shape that asks for an unknown preset still needs a visible box: draw
@@ -436,8 +452,8 @@ fn build_slide(
     }
 
     Ok(Scene {
-        width,
-        height,
+        width: ctx.width,
+        height: ctx.height,
         background,
         items,
         page,
@@ -456,6 +472,7 @@ fn resolve(
     master: Option<&Master>,
     defaults: &Defaults,
     dir: &Path,
+    fonts: &Fonts,
 ) -> Result<Vec<Item>, String> {
     let kind = obj
         .get("kind")
@@ -473,6 +490,9 @@ fn resolve(
         ""
     };
 
+    if kind == "table" {
+        return table_items(obj, defaults, fonts);
+    }
     if kind == "chart" || kind == "tbl" || kind == "media" || kind == "placeholder" {
         return Ok(Vec::new());
     }
@@ -625,6 +645,226 @@ fn resolve(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+struct TableCellScene {
+    row: usize,
+    col: usize,
+    colspan: usize,
+    rowspan: usize,
+    block: TextBlock,
+    options: Value,
+}
+
+fn table_items(obj: &Value, defaults: &Defaults, fonts: &Fonts) -> Result<Vec<Item>, String> {
+    let rows = obj
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row_count = rows.len();
+    let cols = rows[0].as_array().map(Vec::len).unwrap_or(0);
+    if cols == 0 {
+        return Ok(Vec::new());
+    }
+    let x = number(obj.get("x")).unwrap_or(0.0);
+    let y = number(obj.get("y")).unwrap_or(0.0);
+    let w = number(obj.get("w")).unwrap_or(0.0).max(0.0);
+    let mut col_w: Vec<f64> = obj
+        .get("colW")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| number(Some(v)).unwrap_or(0.0)).collect())
+        .unwrap_or_default();
+    if col_w.len() != cols || col_w.iter().all(|v| *v <= 0.0) {
+        col_w = vec![w / cols as f64; cols];
+    }
+    let mut row_h: Vec<f64> = obj
+        .get("rowH")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| number(Some(v)).unwrap_or(0.0)).collect())
+        .unwrap_or_default();
+    if row_h.len() != row_count {
+        row_h = vec![0.0; row_count];
+    }
+    let auto_rows: Vec<bool> = row_h.iter().map(|h| *h <= 0.0).collect();
+
+    let mut cells = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        for (c, cell) in row.iter().enumerate() {
+            if cell.get("options").is_none() {
+                continue;
+            }
+            let colspan = cell.get("colspan").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let rowspan = cell.get("rowspan").and_then(Value::as_u64).unwrap_or(1) as usize;
+            if colspan == 0 || rowspan == 0 || c + colspan > cols || r + rowspan > row_count {
+                continue;
+            }
+            let options = cell.get("options").cloned().unwrap_or_else(|| json!({}));
+            let block = text_block(
+                &json!({
+                    "runs": cell.get("runs").cloned().unwrap_or_else(|| json!([])),
+                    "options": options.clone(),
+                }),
+                None,
+                None,
+                defaults,
+                Path::new(""),
+            )?;
+            cells.push(TableCellScene {
+                row: r,
+                col: c,
+                colspan,
+                rowspan,
+                block,
+                options,
+            });
+        }
+    }
+
+    // Size automatic rows from the same text layout the painter uses.
+    for cell in &cells {
+        let width: f64 = col_w[cell.col..cell.col + cell.colspan].iter().sum();
+        if width <= 0.0 {
+            continue;
+        }
+        let layout = textlayout::layout(&cell.block, width, 1000.0, fonts);
+        let need = (layout.height + cell.block.margin.top + cell.block.margin.bottom).max(0.2);
+        let have: f64 = row_h[cell.row..cell.row + cell.rowspan].iter().sum();
+        if need > have
+            && let Some(last) = (cell.row..cell.row + cell.rowspan)
+                .rev()
+                .find(|r| auto_rows[*r])
+        {
+            row_h[last] += need - have;
+        }
+    }
+    for h in &mut row_h {
+        if *h <= 0.0 {
+            *h = 0.25;
+        }
+    }
+
+    let mut items = Vec::new();
+    for cell in cells {
+        let cell_x: f64 = x + col_w[..cell.col].iter().sum::<f64>();
+        let cell_y: f64 = y + row_h[..cell.row].iter().sum::<f64>();
+        let cell_w: f64 = col_w[cell.col..cell.col + cell.colspan].iter().sum();
+        let cell_h: f64 = row_h[cell.row..cell.row + cell.rowspan].iter().sum();
+        let rect = Rect {
+            x: cell_x,
+            y: cell_y,
+            w: cell_w,
+            h: cell_h,
+        };
+        if let Some(fill) = fill_value(cell.options.get("fill"), defaults) {
+            items.push(Item {
+                rect,
+                rotate: 0.0,
+                flip_h: false,
+                flip_v: false,
+                fill: Some(fill),
+                line: None,
+                shadow: None,
+                even_odd: false,
+                kind: ItemKind::Shape {
+                    preset: "rect".into(),
+                    geom: GeomOpts::default(),
+                },
+            });
+        }
+        if let Some(borders) = cell.options.get("border").and_then(Value::as_array) {
+            let sides = [
+                Rect {
+                    x: cell_x,
+                    y: cell_y,
+                    w: cell_w,
+                    h: 0.0,
+                },
+                Rect {
+                    x: cell_x + cell_w,
+                    y: cell_y,
+                    w: 0.0,
+                    h: cell_h,
+                },
+                Rect {
+                    x: cell_x,
+                    y: cell_y + cell_h,
+                    w: cell_w,
+                    h: 0.0,
+                },
+                Rect {
+                    x: cell_x,
+                    y: cell_y,
+                    w: 0.0,
+                    h: cell_h,
+                },
+            ];
+            for (idx, side) in borders.iter().enumerate() {
+                let Some(stroke) = border_stroke(Some(side), defaults) else {
+                    continue;
+                };
+                items.push(Item {
+                    rect: sides[idx],
+                    rotate: 0.0,
+                    flip_h: false,
+                    flip_v: false,
+                    fill: None,
+                    line: Some(stroke),
+                    shadow: None,
+                    even_odd: false,
+                    kind: ItemKind::Shape {
+                        preset: "line".into(),
+                        geom: GeomOpts::default(),
+                    },
+                });
+            }
+        }
+        if cell.block.runs.iter().any(|run| !run.text.is_empty()) {
+            items.push(Item {
+                rect,
+                rotate: 0.0,
+                flip_h: false,
+                flip_v: false,
+                fill: None,
+                line: None,
+                shadow: None,
+                even_odd: false,
+                kind: ItemKind::Text(Box::new(cell.block)),
+            });
+        }
+    }
+    Ok(items)
+}
+
+fn border_stroke(side: Option<&Value>, defaults: &Defaults) -> Option<Stroke> {
+    let side = side?;
+    if side.get("type").and_then(Value::as_str) == Some("none") {
+        return None;
+    }
+    let color = side
+        .get("color")
+        .and_then(Value::as_str)
+        .and_then(|color| resolve_color_name(color, defaults))
+        .unwrap_or(Color::BLACK);
+    let width = number(side.get("width")).unwrap_or(1.0);
+    let dash = side
+        .get("dashType")
+        .and_then(Value::as_str)
+        .filter(|dash| *dash != "solid")
+        .map(String::from);
+    Some(Stroke {
+        color,
+        width,
+        dash,
+        head: None,
+        tail: None,
+    })
 }
 
 fn text_block(

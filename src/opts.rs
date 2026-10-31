@@ -248,6 +248,7 @@ pub fn ctx_for_style_type(ty: &str) -> Option<Ctx> {
         "shape" => Some(Ctx::Style),
         "text" => Some(Ctx::Text),
         "image" => Some(Ctx::Image),
+        "table" => Some(Ctx::Table),
         "placeholder" => Some(Ctx::Placeholder),
         p if SHAPE_PRESETS.contains(&p) => Some(Ctx::TextShape),
         _ => None,
@@ -267,6 +268,14 @@ pub enum Ctx {
     TextShape,
     /// Images.
     Image,
+    /// Table-level options.
+    Table,
+    /// One entry of a table's `col_styles` array: styles plus `w`.
+    ColStyle,
+    /// One entry of a table's `row_styles` array: styles plus `h`.
+    RowStyle,
+    /// One table cell's inline options.
+    Cell,
     /// Slide/master backgrounds.
     Background,
     /// Named styles: the union of text, shape and image options.
@@ -278,6 +287,7 @@ const POSITION: &[&str] = &["x", "y", "w", "h"];
 pub const TEXT_KEYS: &[&str] = &[
     "align",
     "bold",
+    "border",
     "break_line",
     "bullet",
     "bullet_indent",
@@ -405,6 +415,73 @@ pub const TEXTSHAPE_KEYS: &[&str] = &[
     "sizing",
 ];
 
+/// Style keys shared by tables, rows, columns and cells.
+const TABLE_STYLE_KEYS: &[&str] = &[
+    "align",
+    "baseline",
+    "bold",
+    "border",
+    "char_spacing",
+    "color",
+    "fill",
+    "font_face",
+    "font_size",
+    "highlight",
+    "italic",
+    "lang",
+    "line_spacing",
+    "line_spacing_multiple",
+    "margin",
+    "para_space_after",
+    "para_space_before",
+    "strike",
+    "text_direction",
+    "transparency",
+    "underline",
+    "valign",
+];
+
+fn table_keys() -> &'static [&'static str] {
+    static KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = TABLE_STYLE_KEYS.to_vec();
+        keys.extend([
+            "object_name",
+            "ordered_markers",
+            "unordered_markers",
+            "bullet_indent",
+        ]);
+        keys
+    })
+}
+
+fn col_style_keys() -> &'static [&'static str] {
+    static KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = TABLE_STYLE_KEYS.to_vec();
+        keys.push("w");
+        keys
+    })
+}
+
+fn row_style_keys() -> &'static [&'static str] {
+    static KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = TABLE_STYLE_KEYS.to_vec();
+        keys.push("h");
+        keys
+    })
+}
+
+fn cell_keys() -> &'static [&'static str] {
+    static KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = TABLE_STYLE_KEYS.to_vec();
+        keys.extend(["colspan", "rowspan"]);
+        keys
+    })
+}
+
 pub const IMAGE_KEYS: &[&str] = &[
     "alt_text",
     "flip_h",
@@ -520,6 +597,8 @@ pub enum Kind {
     Enum(&'static [&'static str]),
     /// A shape preset id (snake or camel).
     ShapePreset,
+    /// A table border: one side object, named sides, or four side objects.
+    Border,
     /// EMU integer, a unit string (`"1cm"`) or a percentage (`"50%"`).
     Coord,
     /// A number or a 4-number `[top, right, bottom, left]`.
@@ -618,6 +697,90 @@ pub fn fill_schema() -> &'static [(&'static str, Kind)] {
         ]
     })
     .as_slice()
+}
+
+pub fn border_schema() -> &'static [(&'static str, Kind)] {
+    static V: std::sync::OnceLock<Vec<(&'static str, Kind)>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        vec![
+            ("type", Kind::Enum(&["solid", "none"])),
+            ("color", Kind::Color),
+            ("width", rng(0.0, 1000.0)),
+            ("dash_type", Kind::Enum(LINE_DASH)),
+            ("transparency", rng(0.0, 100.0)),
+            ("alpha", rng(0.0, 100.0)),
+        ]
+    })
+    .as_slice()
+}
+
+const BORDER_SIDES: &[&str] = &["top", "right", "bottom", "left"];
+const BORDER_FLAT: &[&str] = &[
+    "type",
+    "color",
+    "width",
+    "dash_type",
+    "transparency",
+    "alpha",
+];
+
+/// Validate a table border: one flat side, named sides, or four side objects.
+fn validate_border(table: &toml::Table, where_: &str) -> Result<()> {
+    let named = table.keys().any(|k| BORDER_SIDES.contains(&k.as_str()));
+    let flat = table.keys().any(|k| BORDER_FLAT.contains(&k.as_str()));
+    if named && flat {
+        return Err(miette!(
+            "{where_}: `border` cannot mix side names with `type`/`color`/`width`"
+        ));
+    }
+    if named {
+        for (k, v) in table {
+            if !BORDER_SIDES.contains(&k.as_str()) {
+                return Err(miette!("{where_}: unknown `border` side `{k}`"));
+            }
+            let Some(t) = v.as_table() else {
+                return Err(miette!("{where_}: `border.{k}` must be a table"));
+            };
+            validate_object(border_schema(), t, &format!("border.{k}"), where_)?;
+        }
+    } else {
+        validate_object(border_schema(), table, "border", where_)?;
+    }
+    Ok(())
+}
+
+fn validate_border_edit(table: &toml_edit::InlineTable, src: &Src, where_: &str) -> Result<()> {
+    let named = table.iter().any(|(k, _)| BORDER_SIDES.contains(&k));
+    let flat = table.iter().any(|(k, _)| BORDER_FLAT.contains(&k));
+    if named && flat {
+        return Err(located(
+            table.span(),
+            src,
+            format!("{where_}: `border` cannot mix side names with `type`/`color`/`width`"),
+        ));
+    }
+    if named {
+        for (k, v) in table.iter() {
+            if !BORDER_SIDES.contains(&k) {
+                return Err(located(
+                    v.span(),
+                    src,
+                    format!("{where_}: unknown `border` side `{k}`"),
+                ));
+            }
+            let toml_edit::Value::InlineTable(t) = v else {
+                return Err(located(
+                    v.span(),
+                    src,
+                    format!("{where_}: `border.{k}` must be a table"),
+                ));
+            };
+            validate_object_edit(border_schema(), t, &format!("border.{k}"), src, where_)?;
+        }
+    } else {
+        validate_object_edit(border_schema(), table, "border", src, where_)?;
+    }
+    Ok(())
 }
 
 pub fn line_schema() -> &'static [(&'static str, Kind)] {
@@ -774,6 +937,8 @@ fn kind_for(ctx: Ctx, key: &str) -> Option<Kind> {
         }
         "x" | "y" | "w" | "h" => Kind::Coord,
         "margin" => Kind::Margin,
+        "border" => Kind::Border,
+        "colspan" | "rowspan" => rng(1.0, 1000.0),
         "points" => Kind::Points,
         "tab_stops" => Kind::TabStops,
         "fill" => Kind::ObjOrStr(fill_schema()),
@@ -899,6 +1064,26 @@ fn check_value(kind: Kind, key: &str, value: &toml::Value, where_: &str) -> Resu
                 }
             }
             _ => bad!("must be a number, a length, or a 4-value margin"),
+        },
+        Kind::Border => match value {
+            V::Table(t) => validate_border(t, where_)?,
+            V::Array(items) => {
+                if items.len() != 4 {
+                    bad!("must have exactly four sides (top, right, bottom, left)");
+                }
+                for (i, item) in items.iter().enumerate() {
+                    let Some(t) = item.as_table() else {
+                        bad!(format!("side {} must be a table", i + 1));
+                    };
+                    validate_object(
+                        border_schema(),
+                        t,
+                        &format!("border side {}", i + 1),
+                        where_,
+                    )?;
+                }
+            }
+            _ => bad!("must be a side table, named sides, or four side tables"),
         },
         Kind::Num2(lo, hi) => {
             if let Some(items) = value.as_array()
@@ -1193,6 +1378,10 @@ fn ctx_parts(
         Ctx::Placeholder => (TEXT_KEYS, "placeholder", &["name", "ph_type"]),
         Ctx::TextShape => (TEXTSHAPE_KEYS, "shape", &[]),
         Ctx::Image => (IMAGE_KEYS, "image", &[]),
+        Ctx::Table => (table_keys(), "table", &[]),
+        Ctx::ColStyle => (col_style_keys(), "column style", &[]),
+        Ctx::RowStyle => (row_style_keys(), "row style", &[]),
+        Ctx::Cell => (cell_keys(), "cell", &[]),
         Ctx::Background => (BACKGROUND_KEYS, "background", &[]),
         Ctx::Style => (STYLE_KEYS, "style", &[]),
     }
@@ -1409,6 +1598,27 @@ fn check_value_edit(
                 }
             }
             _ => bad!("must be a number, a length, or a 4-value margin"),
+        },
+        Kind::Border => match value {
+            V::InlineTable(t) => validate_border_edit(t, src, where_)?,
+            V::Array(items) => {
+                if items.len() != 4 {
+                    bad!("must have exactly four sides (top, right, bottom, left)");
+                }
+                for (i, item) in items.iter().enumerate() {
+                    let V::InlineTable(t) = item else {
+                        bad!(format!("side {} must be a table", i + 1));
+                    };
+                    validate_object_edit(
+                        border_schema(),
+                        t,
+                        &format!("border side {}", i + 1),
+                        src,
+                        where_,
+                    )?;
+                }
+            }
+            _ => bad!("must be a side table, named sides, or four side tables"),
         },
         Kind::Num2(lo, hi) => {
             if let Some(items) = value.as_array()
@@ -1629,6 +1839,7 @@ pub fn finalize_opts(ctx: Ctx, value: &mut toml::Value) -> Result<()> {
         match kind {
             Kind::Coord => coerce_len(item),
             Kind::Margin => coerce_margin(item),
+            Kind::Border => {}
             Kind::Tables(schema)
             | Kind::ObjOrStr(schema)
             | Kind::BoolOrObj(schema)

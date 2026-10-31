@@ -101,7 +101,7 @@ pub fn render(
         &project.main.theme.major_font,
         &project.main.theme.minor_font,
     )?;
-    let scenes = scene::build(&spec, &defaults, project_dir).map_err(|e| miette!("{e}"))?;
+    let scenes = scene::build(&spec, &defaults, project_dir, &fonts).map_err(|e| miette!("{e}"))?;
 
     let mut selected: BTreeSet<usize> = BTreeSet::new();
     match pages {

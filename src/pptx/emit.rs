@@ -920,6 +920,282 @@ fn line_xml(opts: &Opts) -> String {
     out
 }
 
+fn table_xml(obj: &Obj, idx: usize, x: f64, y: f64, cx: f64, cy: f64) -> String {
+    let Some(table) = obj.table.as_ref() else {
+        return String::new();
+    };
+    let cols = table.rows.first().map(Vec::len).unwrap_or(0);
+    if cols == 0 {
+        return String::new();
+    }
+    let cy = if cy > 0.0 { cy } else { EMU };
+    let name = obj
+        .options
+        .get("objectName")
+        .map(js_to_string)
+        .unwrap_or_default();
+    let mut out = String::new();
+    out.push_str("<p:graphicFrame>");
+    out.push_str("<p:nvGraphicFramePr>");
+    out.push_str(&format!("<p:cNvPr id=\"{}\" name=\"{name}\"/>", idx + 2));
+    out.push_str("<p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr>");
+    out.push_str(
+        "<p:nvPr><p:extLst><p:ext uri=\"{D42A27DB-BD31-4B8C-83A1-F6EECF244321}\"><p14:modId xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\" val=\"1579011935\"/></p:ext></p:extLst></p:nvPr>",
+    );
+    out.push_str("</p:nvGraphicFramePr>");
+    out.push_str(&format!(
+        "<p:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></p:xfrm>",
+        js_round(x),
+        js_round(y),
+        js_round(cx),
+        js_round(cy)
+    ));
+    out.push_str(
+        "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr/>",
+    );
+    let widths: Vec<f64> = obj
+        .options
+        .get("colW")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(js_number).collect())
+        .unwrap_or_default();
+    out.push_str("<a:tblGrid>");
+    for c in 0..cols {
+        let width = widths
+            .get(c)
+            .copied()
+            .filter(|w| *w > 0.0)
+            .map(|w| js_round(w * EMU))
+            .unwrap_or_else(|| js_round(cx / cols as f64));
+        out.push_str(&format!("<a:gridCol w=\"{width}\"/>"));
+    }
+    out.push_str("</a:tblGrid>");
+    let heights: Vec<f64> = obj
+        .options
+        .get("rowH")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(js_number).collect())
+        .unwrap_or_default();
+    for (r, row) in table.rows.iter().enumerate() {
+        let height = heights
+            .get(r)
+            .copied()
+            .filter(|h| *h > 0.0)
+            .map(|h| js_round(h * EMU))
+            .unwrap_or(0.0);
+        out.push_str(&format!("<a:tr h=\"{}\">", js_round(height)));
+        for cell in row {
+            let mut attrs = String::new();
+            if cell.origin {
+                if cell.colspan > 1 {
+                    attrs.push_str(&format!(" gridSpan=\"{}\"", cell.colspan));
+                }
+                if cell.rowspan > 1 {
+                    attrs.push_str(&format!(" rowSpan=\"{}\"", cell.rowspan));
+                }
+            } else {
+                if cell.hmerge {
+                    attrs.push_str(" hMerge=\"1\"");
+                }
+                if cell.vmerge {
+                    attrs.push_str(" vMerge=\"1\"");
+                }
+            }
+            out.push_str(&format!("<a:tc{attrs}>"));
+            if cell.origin {
+                out.push_str(&gen_xml_table_cell_text(cell));
+                out.push_str(&table_cell_props(&cell.options));
+            } else {
+                out.push_str("<a:tcPr/>");
+            }
+            out.push_str("</a:tc>");
+        }
+        out.push_str("</a:tr>");
+    }
+    out.push_str("</a:tbl></a:graphicData></a:graphic></p:graphicFrame>");
+    out
+}
+
+fn table_cell_props(opts: &Opts) -> String {
+    let [top, right, bottom, left] = margin_emus(opts.get("margin").unwrap_or(&Value::Null));
+    let mut out = format!(
+        "<a:tcPr marL=\"{}\" marR=\"{}\" marT=\"{}\" marB=\"{}\"",
+        js_round(left),
+        js_round(right),
+        js_round(top),
+        js_round(bottom)
+    );
+    if let Some(valign) = opts.get("valign").and_then(Value::as_str) {
+        let anchor = match valign {
+            "middle" | "center" | "c" | "m" => "ctr",
+            "bottom" | "btm" | "b" => "b",
+            _ => "t",
+        };
+        out.push_str(&format!(" anchor=\"{anchor}\""));
+    }
+    if let Some(direction) = opts.get("textDirection").and_then(Value::as_str)
+        && direction != "horz"
+    {
+        out.push_str(&format!(" vert=\"{direction}\""));
+    }
+    out.push('>');
+    let borders = opts.get("border").and_then(Value::as_array);
+    for (tag, side) in [("lnL", 3usize), ("lnR", 1), ("lnT", 0), ("lnB", 2)] {
+        out.push_str(&table_border_line(tag, borders.and_then(|b| b.get(side))));
+    }
+    if let Some(fill) = opts.get("fill").filter(|v| truthy(Some(v))) {
+        out.push_str(&gen_xml_color_selection(fill));
+    }
+    out.push_str("</a:tcPr>");
+    out
+}
+
+fn table_border_line(tag: &str, side: Option<&Value>) -> String {
+    let none =
+        format!("<a:{tag} w=\"0\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:noFill/></a:{tag}>");
+    let Some(side) = side else {
+        return none;
+    };
+    if side.get("type").and_then(Value::as_str) == Some("none") {
+        return none;
+    }
+    let width = side.get("width").map(js_number).unwrap_or(1.0);
+    let dash = side
+        .get("dashType")
+        .and_then(Value::as_str)
+        .unwrap_or("solid");
+    let mut out = format!(
+        "<a:{tag} w=\"{}\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\">",
+        js_round(width * ONEPT)
+    );
+    out.push_str(&gen_xml_color_selection(side));
+    out.push_str(&format!(
+        "<a:prstDash val=\"{dash}\"/><a:round/><a:headEnd type=\"none\" w=\"med\" len=\"med\"/><a:tailEnd type=\"none\" w=\"med\" len=\"med\"/></a:{tag}>"
+    ));
+    out
+}
+
+fn gen_xml_table_cell_text(cell: &TableCell) -> String {
+    let opts = &cell.options;
+    let mut out = String::from("<a:txBody><a:bodyPr/><a:lstStyle/>");
+    let mut arr: Vec<Run> = Vec::new();
+    for (idx, mut run) in cell.runs.clone().into_iter().enumerate() {
+        let text = run
+            .text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', "\r\n");
+        if idx == 0
+            && !truthy(run.options.get("bullet"))
+            && let Some(b) = opts.get("bullet").filter(|v| truthy(Some(v)))
+        {
+            run.options.insert("bullet".into(), b.clone());
+        }
+        if text.contains("\r\n") && !text.ends_with('\n') {
+            for line in text.split("\r\n") {
+                run.options.insert("breakLine".into(), Value::Bool(true));
+                arr.push(Run {
+                    text: line.to_string(),
+                    options: run.options.clone(),
+                });
+            }
+        } else {
+            run.text = text;
+            arr.push(run);
+        }
+    }
+
+    let mut lines: Vec<Vec<Run>> = Vec::new();
+    let mut current: Vec<Run> = Vec::new();
+    for idx in 0..arr.len() {
+        let has_align = truthy(arr[idx].options.get("align")) || truthy(opts.get("align"));
+        if !current.is_empty() && has_align {
+            let prev_align = arr[idx - 1].options.get("align");
+            if arr[idx].options.get("align") != prev_align {
+                lines.push(std::mem::take(&mut current));
+            }
+        } else if !current.is_empty() && truthy(arr[idx].options.get("bullet")) {
+            lines.push(std::mem::take(&mut current));
+            arr[idx]
+                .options
+                .insert("breakLine".into(), Value::Bool(false));
+        }
+        current.push(arr[idx].clone());
+        if !current.is_empty() && truthy(arr[idx].options.get("breakLine")) && idx + 1 < arr.len() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if idx + 1 == arr.len() {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+
+    for line in lines {
+        let mut needs_size = false;
+        out.push_str("<a:p>");
+        for (idx, mut run) in line.into_iter().enumerate() {
+            if idx > 0 && truthy(run.options.get("softBreakBefore")) {
+                out.push_str("<a:br/>");
+            }
+            for key in [
+                "align",
+                "lineSpacing",
+                "lineSpacingMultiple",
+                "indentLevel",
+                "paraSpaceBefore",
+                "paraSpaceAfter",
+            ] {
+                if !truthy(run.options.get(key))
+                    && let Some(v) = opts.get(key)
+                {
+                    run.options.insert(key.into(), v.clone());
+                }
+            }
+            out.push_str(
+                &gen_xml_paragraph_properties(&run.options, false).replace("<a:pPr></a:pPr>", ""),
+            );
+            for (key, val) in opts {
+                if key == "bullet" {
+                    continue;
+                }
+                if !truthy(run.options.get(key)) {
+                    run.options.insert(key.clone(), val.clone());
+                }
+            }
+            out.push_str(&gen_xml_text_run(&run));
+            if (run.text.is_empty() && truthy(opts.get("fontSize")))
+                || truthy(run.options.get("fontSize"))
+            {
+                needs_size = true;
+            }
+        }
+        let lang = opts
+            .get("lang")
+            .filter(|v| truthy(Some(v)))
+            .map(js_to_string)
+            .unwrap_or_else(|| "en-US".into());
+        let size = opt_num(opts, "fontSize")
+            .map(|n| format!(" sz=\"{}\"", js_round(n * 100.0)))
+            .unwrap_or_default();
+        if let Some(face) = opts.get("fontFace").and_then(Value::as_str) {
+            out.push_str(&format!(
+                "<a:endParaRPr lang=\"{lang}\"{size} dirty=\"0\"><a:latin typeface=\"{face}\" charset=\"0\"/><a:ea typeface=\"{face}\" charset=\"0\"/><a:cs typeface=\"{face}\" charset=\"0\"/></a:endParaRPr>"
+            ));
+        } else if needs_size {
+            out.push_str(&format!(
+                "<a:endParaRPr lang=\"{lang}\"{size} dirty=\"0\"/>"
+            ));
+        } else {
+            out.push_str(&format!("<a:endParaRPr lang=\"{lang}\" dirty=\"0\"/>"));
+        }
+        out.push_str("</a:p>");
+    }
+    if !out.contains("<a:p>") {
+        out.push_str("<a:p><a:endParaRPr/></a:p>");
+    }
+    out.push_str("</a:txBody>");
+    out
+}
+
 fn slide_number_xml(target: &Target, deck: &Deck) -> String {
     let Some(props) = target.slide_number.as_ref() else {
         return String::new();
@@ -1337,6 +1613,9 @@ fn slide_object_xml(target: &Target, deck: &Deck, placeholders: &[PlaceholderInf
                 out.push_str(&image_shadow_xml(&obj.options));
                 out.push_str("</p:spPr>");
                 out.push_str("</p:pic>");
+            }
+            ObjKind::Table => {
+                out.push_str(&table_xml(&obj, idx, x, y, cx, cy));
             }
             ObjKind::Notes => {}
         }

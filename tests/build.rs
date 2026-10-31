@@ -2828,3 +2828,342 @@ fn gwen_render_without_html_removes_a_stale_slideshow() {
     );
     assert!(target.join("title.png").exists());
 }
+
+/// A one-slide project whose slide TOML is the given table shape.
+fn table_project(name: &str, shape: &str) -> PathBuf {
+    let dir = tmp(name);
+    write(
+        &dir.join("main.toml"),
+        r##"[presentation]
+title = "table"
+width = "13.333in"
+height = "7.5in"
+
+[theme]
+major_font = "Arial"
+minor_font = "Arial"
+
+[[sections]]
+title = "T"
+slides = ["table.toml"]
+"##,
+    );
+    write(
+        &dir.join("masters").join("base.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
+        &dir.join("slides").join("table.toml"),
+        &format!("master = \"base\"\n\n{shape}"),
+    );
+    dir
+}
+
+fn slide_xml(bytes: &[u8], part: &str) -> String {
+    String::from_utf8(zip_member(bytes, part).unwrap()).unwrap()
+}
+
+#[test]
+fn table_emits_graphic_frame_cells_and_styles() {
+    let dir = table_project(
+        "table-frame",
+        r##"[[shapes]]
+type = "table"
+x = "0.5in"
+y = "1in"
+w = "10in"
+col_styles = [{ w = "3in" }, { w = "3in", align = "right" }, { w = "4in" }]
+row_styles = [{ h = "0.5in", bold = true, align = "center" }, { h = "0.5in" }]
+border = { color = "999999", width = 1 }
+fill = { color = "FFFFFF" }
+rows = [
+  ["Name", "Qty", "Notes"],
+  ["Widget", 3, "ok"],
+]
+"##,
+    );
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = slide_xml(&bytes, "ppt/slides/slide1.xml");
+    assert!(xml.contains("<p:graphicFrame>"), "table frame: {xml}");
+    assert!(xml.contains("<a:tbl><a:tblPr/>"), "table body: {xml}");
+    assert!(
+        xml.contains("name=\"Table 0\""),
+        "default object name: {xml}"
+    );
+    assert_eq!(xml.matches("<a:gridCol").count(), 3);
+    assert!(
+        xml.contains("<a:gridCol w=\"2743200\"/>"),
+        "3in column: {xml}"
+    );
+    assert!(
+        xml.contains("<a:gridCol w=\"3657600\"/>"),
+        "4in column: {xml}"
+    );
+    assert_eq!(xml.matches("<a:tr h=\"457200\">").count(), 2);
+    for text in ["Name", "Qty", "Notes", "Widget"] {
+        assert!(xml.contains(&format!("<a:t>{text}</a:t>")), "{text}: {xml}");
+    }
+    assert!(xml.contains("b=\"1\""), "header row bold: {xml}");
+    assert!(xml.contains("algn=\"ctr\""), "header row centered: {xml}");
+    assert!(
+        xml.contains("algn=\"r\""),
+        "Qty column right aligned: {xml}"
+    );
+    assert!(
+        xml.contains("srgbClr val=\"999999\""),
+        "border color: {xml}"
+    );
+    assert!(
+        xml.contains("<a:solidFill><a:srgbClr val=\"FFFFFF\"/></a:solidFill>"),
+        "cell fill: {xml}"
+    );
+    assert!(xml.contains("marL=\"91440\""), "default margins: {xml}");
+    assert!(
+        xml.contains("<a:ext cx=\"9144000\" cy=\"914400\"/>"),
+        "frame size: {xml}"
+    );
+}
+
+#[test]
+fn table_merges_emit_span_and_continuation_cells() {
+    let dir = table_project(
+        "table-merge",
+        r##"[[shapes]]
+type = "table"
+x = "1in"
+y = "1in"
+w = "6in"
+rows = [
+  ["A", "B", "C"],
+  [{ text = "Merged", colspan = 2, rowspan = 2 }, "D"],
+  ["E"],
+]
+"##,
+    );
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = slide_xml(&bytes, "ppt/slides/slide1.xml");
+    assert!(
+        xml.contains("<a:tc gridSpan=\"2\" rowSpan=\"2\">"),
+        "origin span: {xml}"
+    );
+    assert!(
+        xml.contains("<a:tc hMerge=\"1\">"),
+        "horizontal continuation: {xml}"
+    );
+    assert!(
+        xml.contains("<a:tc vMerge=\"1\">"),
+        "vertical continuation: {xml}"
+    );
+    assert_eq!(xml.matches("<a:t>Merged</a:t>").count(), 1);
+    assert!(xml.contains("<a:t>E</a:t>"), "cell after a rowspan: {xml}");
+}
+
+#[test]
+fn table_defaults_match_pptxgenjs() {
+    let dir = table_project(
+        "table-defaults",
+        r##"[[shapes]]
+type = "table"
+x = "1in"
+y = "1in"
+w = "6in"
+rows = [["a", "b"], ["c", "d"]]
+"##,
+    );
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = slide_xml(&bytes, "ppt/slides/slide1.xml");
+    assert_eq!(xml.matches("<a:gridCol w=\"2743200\"/>").count(), 2);
+    assert_eq!(
+        xml.matches("<a:tr h=\"0\">").count(),
+        2,
+        "automatic row heights: {xml}"
+    );
+    assert!(
+        xml.contains("<a:ext cx=\"5486400\" cy=\"914400\"/>"),
+        "frame height fallback: {xml}"
+    );
+    assert!(xml.contains("sz=\"1200\""), "default 12pt: {xml}");
+    assert!(
+        xml.contains("<a:srgbClr val=\"000000\"/>"),
+        "default black: {xml}"
+    );
+    assert_eq!(
+        xml.matches("<a:lnL w=\"0\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:noFill/></a:lnL>")
+            .count(),
+        4,
+        "default no borders on every cell: {xml}"
+    );
+}
+
+#[test]
+fn table_named_and_type_styles_apply() {
+    let dir = table_project(
+        "table-styles",
+        r##"[[shapes]]
+type = "table"
+x = "1in"
+y = "1in"
+w = "6in"
+styles = "loud"
+rows = [["a", "b"]]
+"##,
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    std::fs::write(
+        dir.join("main.toml"),
+        format!("{main}\n[styles.table]\nfont_size = 16\n\n[styles.named.loud]\ncolor = \"FF0000\"\nitalic = true\n"),
+    )
+    .unwrap();
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = slide_xml(&bytes, "ppt/slides/slide1.xml");
+    assert!(xml.contains("sz=\"1600\""), "table type style size: {xml}");
+    assert!(xml.contains("srgbClr val=\"FF0000\""), "named color: {xml}");
+    assert!(xml.contains("i=\"1\""), "named italic: {xml}");
+}
+
+#[test]
+fn table_reports_bad_rows_and_options() {
+    for (name, shape, want) in [
+        (
+            "table-empty",
+            "[[shapes]]\ntype = \"table\"\nrows = []\n",
+            "must not be empty",
+        ),
+        (
+            "table-ragged",
+            "[[shapes]]\ntype = \"table\"\nrows = [[\"a\", \"b\"], [\"c\"]]\n",
+            "missing cells",
+        ),
+        (
+            "table-overflow",
+            "[[shapes]]\ntype = \"table\"\nrows = [[\"a\", \"b\"], [{ text = \"x\", colspan = 3 }]]\n",
+            "overflows",
+        ),
+        (
+            "table-rowspan",
+            "[[shapes]]\ntype = \"table\"\nrows = [[{ text = \"x\", rowspan = 2 }]]\n",
+            "past the last",
+        ),
+        (
+            "table-cols",
+            "[[shapes]]\ntype = \"table\"\ncol_styles = [{ w = \"1in\" }]\nrows = [[\"a\", \"b\"]]\n",
+            "col_styles",
+        ),
+        (
+            "table-rows",
+            "[[shapes]]\ntype = \"table\"\nrow_styles = [{ h = \"1in\" }]\nrows = [[\"a\"], [\"b\"]]\n",
+            "row_styles",
+        ),
+        (
+            "table-autopage",
+            "[[shapes]]\ntype = \"table\"\nauto_page = true\nrows = [[\"a\"]]\n",
+            "not supported",
+        ),
+        (
+            "table-cell-key",
+            "[[shapes]]\ntype = \"table\"\nrows = [[{ text = \"a\", fount_size = 12 }]]\n",
+            "unknown cell option",
+        ),
+        (
+            "table-border-mix",
+            "[[shapes]]\ntype = \"table\"\nborder = { type = \"solid\", top = { width = 1 } }\nrows = [[\"a\"]]\n",
+            "cannot mix",
+        ),
+        (
+            "table-width-mismatch",
+            "[[shapes]]\ntype = \"table\"\nw = \"10in\"\ncol_styles = [{ w = \"2in\" }, { w = \"2in\" }]\nrows = [[\"a\", \"b\"]]\n",
+            "sum to",
+        ),
+    ] {
+        let dir = table_project(name, shape);
+        let err = gwen::build(&dir).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains(want), "{name}: wanted `{want}` in: {msg}");
+    }
+}
+
+#[test]
+fn table_renders_fills_borders_and_text_in_previews() {
+    let dir = table_project(
+        "table-preview",
+        r##"[[shapes]]
+type = "table"
+x = "1in"
+y = "1in"
+w = "6in"
+col_styles = [{ w = "3in" }, { w = "3in" }]
+row_styles = [{ h = "0.5in" }, { h = "0.5in" }]
+border = { color = "0000FF", width = 1 }
+rows = [
+  [{ text = "Hello", fill = { color = "FF0000" } }, "World"],
+  ["one", "two"],
+]
+"##,
+    );
+    let out = run_render(&dir, &["--format", "svg", "--page", "1"]);
+    assert!(
+        out.status.success(),
+        "table render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let svg = std::fs::read_to_string(dir.join("target/render/table.svg")).unwrap();
+    for text in ["Hello", "World", "one", "two"] {
+        assert!(svg.contains(text), "{text} painted: {svg}");
+    }
+    assert!(svg.to_lowercase().contains("#ff0000"), "cell fill: {svg}");
+    assert!(svg.to_lowercase().contains("#0000ff"), "cell border: {svg}");
+}
+
+#[test]
+fn table_allows_rows_fully_covered_by_rowspans() {
+    let dir = table_project(
+        "table-covered-row",
+        r##"[[shapes]]
+type = "table"
+x = "1in"
+y = "1in"
+w = "6in"
+rows = [
+  ["A", "B"],
+  [{ text = "C", rowspan = 2 }, { text = "D", rowspan = 2 }],
+  [],
+]
+"##,
+    );
+    let bytes = std::fs::read(gwen::build(&dir).unwrap()).unwrap();
+    let xml = slide_xml(&bytes, "ppt/slides/slide1.xml");
+    assert_eq!(xml.matches("<a:tc vMerge=\"1\">").count(), 2);
+    assert_eq!(xml.matches("<a:t>C</a:t>").count(), 1);
+    assert_eq!(xml.matches("<a:t>D</a:t>").count(), 1);
+}
+
+#[test]
+fn table_is_rejected_on_masters_and_non_table_shapes() {
+    let dir = table_project(
+        "table-master",
+        "[[shapes]]\ntype = \"text\"\ntext = \"x\"\n",
+    );
+    write(
+        &dir.join("masters").join("base.toml"),
+        "background = { color = \"FFFFFF\" }\n\n[[shapes]]\ntype = \"table\"\nrows = [[\"a\"]]\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("only supported on slides"),
+        "master table rejected: {err:?}"
+    );
+
+    write(
+        &dir.join("masters").join("base.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
+        &dir.join("slides").join("table.toml"),
+        "master = \"base\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"x\"\nrows = [[\"a\"]]\n",
+    );
+    let err = gwen::build(&dir).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("only valid"),
+        "rows on a text shape rejected: {err:?}"
+    );
+}
