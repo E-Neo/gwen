@@ -30,29 +30,12 @@ pub fn template_dir() -> Option<PathBuf> {
 }
 
 /// Scaffold a new project into `root` (which must not exist yet). `name` is
-/// the directory name, written into `[presentation] title`. When `pptx` is
-/// given, masters/slides/media (and main.toml) are imported from that file
-/// instead of copied from the template/built-in; the skills and .gitignore are
-/// still created as usual.
-pub fn scaffold(root: &Path, name: &str, no_template: bool, pptx: Option<&Path>) -> Result<()> {
+/// the directory name, written into `[presentation] title`. The project comes
+/// from the template when one is installed, otherwise from the built-in
+/// starter deck.
+pub fn scaffold(root: &Path, name: &str, no_template: bool) -> Result<()> {
     create_dir(root)?;
     let template = (!no_template).then(template_dir).flatten();
-    if let Some(pptx) = pptx {
-        scaffold_project_skill(root, template.as_deref(), name)?;
-        gwen::import_pptx(pptx, root, Some(name))?;
-        write_gitignore(root)?;
-        eprintln!(
-            "created project `{}` from `{}`",
-            root.display(),
-            pptx.display()
-        );
-        eprintln!(
-            "  edit {}/main.toml and slides/*.toml, then run `gwen build {}`",
-            root.display(),
-            root.display()
-        );
-        return Ok(());
-    }
     if let Some(template) = template {
         scaffold_from_template(root, &template, name)?;
         write_gitignore(root)?;

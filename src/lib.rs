@@ -10,7 +10,6 @@ pub mod color;
 pub mod defaults;
 pub mod error;
 pub mod fonts;
-pub mod import;
 pub mod media;
 pub mod model;
 pub mod opts;
@@ -26,8 +25,6 @@ pub mod textlayout;
 pub mod units;
 pub mod xml;
 pub mod zip;
-
-pub use crate::import::import_pptx;
 
 use std::path::Path;
 

@@ -29,4 +29,3 @@ unicode-bidi = "0.3.18"
 usvg = "0.48.1"
 unicode-linebreak = "0.1.5"
 unicode-script = "0.5.8"
-zip = { version = "9", default-features = false, features = ["deflate"] }

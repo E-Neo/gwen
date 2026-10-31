@@ -27,8 +27,8 @@ impl Color {
     }
 
     /// Parse `#RGB`, `RGB`, or `RRGGBBAA` (CSS 8-digit, alpha included).
-    /// Three-digit shorthand is expanded. `AARRGGBB` (OOXML's order) is not
-    /// accepted: importers convert those to six digits before gwen sees them.
+    /// Three-digit shorthand is expanded. `AARRGGBB` (OOXML's order) must be
+    /// converted to `RRGGBB` before gwen sees it.
     pub fn hex(text: &str) -> Option<Self> {
         let s = text.trim().trim_start_matches('#');
         let parse = |part: &str| u8::from_str_radix(part, 16).ok();
