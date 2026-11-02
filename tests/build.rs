@@ -3167,3 +3167,196 @@ fn table_is_rejected_on_masters_and_non_table_shapes() {
         "rows on a text shape rejected: {err:?}"
     );
 }
+
+#[test]
+fn gwen_init_scaffolds_an_existing_directory() {
+    let home = tmp("init-empty-home");
+    let dir = tmp("init-existing");
+    std::fs::write(dir.join("README.md"), "keep me\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("init")
+        .arg(dir.as_os_str())
+        .arg("--no-template")
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("README.md")).unwrap(),
+        "keep me\n",
+        "unrelated files are kept"
+    );
+    assert!(dir.join("main.toml").is_file());
+    assert!(dir.join("slides").join("title.toml").is_file());
+    assert!(dir.join("masters").join("base.toml").is_file());
+    assert!(dir.join(".agents/skills/gwen/SKILL.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+        "target/\n"
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        main.contains(&format!("title = \"{name}\"")),
+        "title uses the directory name: {main}"
+    );
+    gwen::build(&dir).unwrap();
+}
+
+#[test]
+fn gwen_init_defaults_to_the_current_directory() {
+    let home = tmp("init-cwd-home");
+    let dir = tmp("init-cwd");
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("init")
+        .arg("--no-template")
+        .env("GWEN_HOME", &home)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen init . failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(main.contains(&format!("title = \"{name}\"")), "{main}");
+}
+
+#[test]
+fn gwen_init_creates_a_missing_directory() {
+    let home = tmp("init-missing-home");
+    let base = tmp("init-missing");
+    let dir = base.join("deck");
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("init")
+        .arg(dir.as_os_str())
+        .arg("--no-template")
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen init missing dir failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("main.toml").is_file());
+    gwen::build(&dir).unwrap();
+}
+
+#[test]
+fn gwen_init_refuses_an_existing_project() {
+    let home = tmp("init-twice-home");
+    let dir = tmp("init-twice");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_gwen"))
+            .arg("init")
+            .arg(dir.as_os_str())
+            .arg("--no-template")
+            .env("GWEN_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success());
+    let again = run();
+    assert!(!again.status.success(), "second init is refused");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("already a gwen project"),
+        "clear refusal: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}
+
+#[test]
+fn gwen_init_preserves_existing_scaffold_files() {
+    let home = tmp("init-preserve-home");
+    let dir = tmp("init-preserve");
+    write(
+        &dir.join("slides").join("title.toml"),
+        "master = \"base\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"4in\"\nh = \"1in\"\ntext = \"custom\"\n",
+    );
+    write(
+        &dir.join("masters").join("base.toml"),
+        "background = { color = \"FFFFFF\" }\n",
+    );
+    write(
+        &dir.join(".agents")
+            .join("skills")
+            .join("gwen")
+            .join("SKILL.md"),
+        "custom skill\n",
+    );
+    write(&dir.join(".gitignore"), "node_modules/\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("init")
+        .arg(dir.as_os_str())
+        .arg("--no-template")
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let title = std::fs::read_to_string(dir.join("slides").join("title.toml")).unwrap();
+    assert!(
+        title.contains("text = \"custom\""),
+        "slide preserved: {title}"
+    );
+    assert!(
+        dir.join("slides").join("intro.toml").is_file(),
+        "missing scaffold added"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".agents/skills/gwen/SKILL.md")).unwrap(),
+        "custom skill\n",
+        "skill preserved"
+    );
+    let ignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert!(
+        ignore.contains("node_modules/") && ignore.contains("target/"),
+        "gitignore merged: {ignore}"
+    );
+    gwen::build(&dir).unwrap();
+}
+
+#[test]
+fn gwen_init_uses_the_template_when_one_is_installed() {
+    let home = template_home("init-template-home");
+    let dir = tmp("init-template");
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("init")
+        .arg(dir.as_os_str())
+        .env("GWEN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gwen init template failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("masters").join("a.toml").is_file(),
+        "template master copied"
+    );
+    assert!(
+        dir.join("slides").join("a.toml").is_file(),
+        "template slide copied"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("media").join("keep.txt")).unwrap(),
+        "payload\n"
+    );
+    let main = std::fs::read_to_string(dir.join("main.toml")).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(main.contains(&format!("title = \"{name}\"")), "{main}");
+    gwen::build(&dir).unwrap();
+}

@@ -14,7 +14,8 @@ and needs neither Node nor an embedded JavaScript runtime.
 ## Quick start
 
 ```sh
-gwen new <deck>          # scaffold a project
+gwen new <deck>          # scaffold a project in a new directory
+gwen init [deck]         # initialize the current/existing directory
 gwen update <deck>       # sync an existing project with the installed template
 gwen fmt <deck>          # normalize the project's TOML whitespace
 gwen fmt <deck> --check  # report only; exits 1 if a file would change
@@ -35,6 +36,13 @@ is copied from it - `template/main.toml` (required, with its
 recursively when present). Without a template, a small built-in starter deck is
 used. Pass `--no-template` to force the built-in scaffold even when a template
 is installed.
+
+`gwen init [dir]` initializes a project in an existing directory, defaulting to
+the current one, and creates the directory if it does not exist. Unrelated files
+are kept, and existing scaffold files are never overwritten: only missing
+`main.toml`, `masters/`, `slides/`, `media/` and skill files are written. It
+refuses a directory that already contains `main.toml`. Use `gwen new` when you
+want a fresh directory instead.
 
 `gwen update <deck>` brings an existing project up to date with that template:
 `masters/`, `media/` and the template's skills are refreshed, and the template's

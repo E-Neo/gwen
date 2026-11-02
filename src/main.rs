@@ -5,7 +5,7 @@ mod fmt;
 mod scaffold;
 mod update;
 
-use std::path::Path;
+use std::path::{Component, Path};
 
 use clap::{Parser, Subcommand};
 
@@ -29,6 +29,16 @@ enum Commands {
     /// Create a new gwen project (from GWEN_HOME/template when it exists).
     New {
         /// Project directory to create.
+        project: String,
+        /// Ignore the user template and use the built-in scaffold.
+        #[arg(long)]
+        no_template: bool,
+    },
+    /// Initialize a gwen project in an existing directory (defaults to the
+    /// current directory). Existing files are kept.
+    Init {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
         project: String,
         /// Ignore the user template and use the built-in scaffold.
         #[arg(long)]
@@ -101,6 +111,10 @@ fn main() -> miette::Result<()> {
             project,
             no_template,
         } => new_project(&project, no_template),
+        Commands::Init {
+            project,
+            no_template,
+        } => init_project(&project, no_template),
         Commands::Update {
             project,
             dry_run,
@@ -158,4 +172,40 @@ fn new_project(project: &str, no_template: bool) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| project.to_string());
     scaffold::scaffold(root, &name, no_template)
+}
+
+fn init_project(project: &str, no_template: bool) -> Result<()> {
+    let root = Path::new(project);
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(miette::miette!("`{project}` is not a directory"));
+        }
+        if root.join("main.toml").exists() {
+            return Err(miette::miette!("`{project}` is already a gwen project"));
+        }
+    }
+    let name = project_name(root)?;
+    scaffold::init(root, &name, no_template)
+}
+
+/// The directory name used as the deck title. For `.`, this is the current
+/// directory's name; for a missing path, the last normal component.
+fn project_name(root: &Path) -> Result<String> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| miette::miette!("cannot determine the current directory: {e}"))?
+            .join(root)
+    };
+    let absolute = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+    absolute
+        .components()
+        .rev()
+        .find_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| miette::miette!("cannot determine a project name for `{}`", root.display()))
 }

@@ -1,11 +1,14 @@
-//! `gwen new` scaffolding: copy a user template from the gwen home when one
-//! exists, otherwise fall back to the built-in starter deck.
+//! `gwen new` and `gwen init` scaffolding: copy a user template from the gwen
+//! home when one exists, otherwise fall back to the built-in starter deck.
 //!
 //! The gwen home is `$GWEN_HOME` if set, else `~/.gwen`. A `template/`
 //! directory there provides `main.toml` (required) plus optional
 //! `masters/`, `slides/` and `media/` trees that are copied verbatim. The
 //! `[presentation] title` of the copied `main.toml` is always overwritten
-//! with the directory name given to `gwen new`.
+//! with the directory name given to the command.
+//!
+//! `gwen new` requires a fresh directory. `gwen init` works in an existing
+//! directory and only writes files that do not exist yet.
 
 use std::path::{Path, PathBuf};
 
@@ -29,30 +32,61 @@ pub fn template_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    New,
+    Init,
+}
+
+impl Mode {
+    fn overwrite(self) -> bool {
+        matches!(self, Mode::New)
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Mode::New => "created",
+            Mode::Init => "initialized",
+        }
+    }
+}
+
 /// Scaffold a new project into `root` (which must not exist yet). `name` is
 /// the directory name, written into `[presentation] title`. The project comes
 /// from the template when one is installed, otherwise from the built-in
 /// starter deck.
 pub fn scaffold(root: &Path, name: &str, no_template: bool) -> Result<()> {
+    run(root, name, no_template, Mode::New)
+}
+
+/// Initialize a project in an existing directory. Files that already exist are
+/// left untouched; only missing scaffold files are written.
+pub fn init(root: &Path, name: &str, no_template: bool) -> Result<()> {
+    run(root, name, no_template, Mode::Init)
+}
+
+fn run(root: &Path, name: &str, no_template: bool, mode: Mode) -> Result<()> {
     create_dir(root)?;
     let template = (!no_template).then(template_dir).flatten();
     if let Some(template) = template {
-        scaffold_from_template(root, &template, name)?;
+        scaffold_from_template(root, &template, name, mode)?;
         write_gitignore(root)?;
         eprintln!(
-            "created project `{}` from template `{}`",
+            "{} project `{}` from template `{}`",
+            mode.verb(),
             root.display(),
             template.display()
         );
-        eprintln!(
-            "  edit {}/main.toml and slides/*.toml, then run `gwen build {}`",
-            root.display(),
-            root.display()
-        );
-        return Ok(());
+    } else {
+        scaffold_builtin(root, name, mode)?;
+        write_gitignore(root)?;
+        eprintln!("{} project `{}`", mode.verb(), root.display());
     }
-    scaffold_builtin(root, name)?;
-    write_gitignore(root)?;
+    eprintln!(
+        "  edit {}/main.toml and slides/*.toml, then run `gwen build {}`",
+        root.display(),
+        root.display()
+    );
     Ok(())
 }
 
@@ -81,7 +115,7 @@ pub(crate) fn write_gitignore(root: &Path) -> Result<bool> {
     }
 }
 
-fn scaffold_from_template(root: &Path, template: &Path, name: &str) -> Result<()> {
+fn scaffold_from_template(root: &Path, template: &Path, name: &str, mode: Mode) -> Result<()> {
     let main_src = template.join("main.toml");
     if !main_src.is_file() {
         return Err(miette::miette!(
@@ -91,35 +125,34 @@ fn scaffold_from_template(root: &Path, template: &Path, name: &str) -> Result<()
     }
     let contents = std::fs::read_to_string(&main_src)
         .map_err(|e| miette::miette!("cannot read `{}`: {e}", main_src.display()))?;
-    write_file(&root.join("main.toml"), &set_title(&contents, name))?;
-    scaffold_project_skill(root, Some(template), name)?;
+    write_file_mode(&root.join("main.toml"), &set_title(&contents, name), mode)?;
+    scaffold_project_skill(root, Some(template), name, mode)?;
     for sub in ["masters", "slides", "media"] {
         let src = template.join(sub);
         if src.is_dir() {
-            copy_dir_all(&src, &root.join(sub))?;
+            copy_dir_all(&src, &root.join(sub), mode.overwrite())?;
         }
     }
     Ok(())
 }
 
-fn scaffold_builtin(root: &Path, name: &str) -> Result<()> {
+fn scaffold_builtin(root: &Path, name: &str, mode: Mode) -> Result<()> {
     create_dir(&root.join("slides"))?;
     create_dir(&root.join("masters"))?;
     create_dir(&root.join("media"))?;
-    write_file(
+    write_file_mode(
         &root.join("main.toml"),
         &DEFAULT_MAIN.replace("__NAME__", name),
+        mode,
     )?;
-    scaffold_project_skill(root, None, name)?;
-    write_file(&root.join("masters").join("base.toml"), DEFAULT_MASTER)?;
-    write_file(&root.join("slides").join("title.toml"), DEFAULT_TITLE)?;
-    write_file(&root.join("slides").join("intro.toml"), DEFAULT_INTRO)?;
-    eprintln!("created project `{}`", root.display());
-    eprintln!(
-        "  edit {}/main.toml and slides/*.toml, then run `gwen build {}`",
-        root.display(),
-        root.display()
-    );
+    scaffold_project_skill(root, None, name, mode)?;
+    write_file_mode(
+        &root.join("masters").join("base.toml"),
+        DEFAULT_MASTER,
+        mode,
+    )?;
+    write_file_mode(&root.join("slides").join("title.toml"), DEFAULT_TITLE, mode)?;
+    write_file_mode(&root.join("slides").join("intro.toml"), DEFAULT_INTRO, mode)?;
     Ok(())
 }
 
@@ -169,7 +202,7 @@ fn set_title(contents: &str, name: &str) -> String {
     out_lines.join("\n") + "\n"
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+fn copy_dir_all(src: &Path, dst: &Path, overwrite: bool) -> Result<()> {
     create_dir(dst)?;
     for entry in std::fs::read_dir(src)
         .map_err(|e| miette::miette!("cannot list `{}`: {e}", src.display()))?
@@ -178,8 +211,11 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if from.is_dir() {
-            copy_dir_all(&from, &to)?;
+            copy_dir_all(&from, &to, overwrite)?;
         } else {
+            if !overwrite && to.exists() {
+                continue;
+            }
             std::fs::copy(&from, &to)
                 .map_err(|e| miette::miette!("cannot copy `{}`: {e}", from.display()))?;
         }
@@ -197,10 +233,22 @@ fn write_file(path: &Path, contents: &str) -> Result<()> {
         .map_err(|e| miette::miette!("cannot write {}: {e}", path.display()))
 }
 
+fn write_file_mode(path: &Path, contents: &str, mode: Mode) -> Result<()> {
+    if !mode.overwrite() && path.exists() {
+        return Ok(());
+    }
+    write_file(path, contents)
+}
+
 /// Scaffold the project-level skill at `.agents/skills/gwen/`. A template may
 /// ship extra skills under its own `.agents/` (copied verbatim), but the
 /// `gwen` skill name is reserved by gwen itself - templates must not provide it.
-fn scaffold_project_skill(root: &Path, template: Option<&Path>, _name: &str) -> Result<()> {
+fn scaffold_project_skill(
+    root: &Path,
+    template: Option<&Path>,
+    _name: &str,
+    mode: Mode,
+) -> Result<()> {
     if let Some(template) = template {
         let reserved = template.join(".agents").join("skills").join("gwen");
         if reserved.is_dir() {
@@ -210,13 +258,13 @@ fn scaffold_project_skill(root: &Path, template: Option<&Path>, _name: &str) -> 
         }
         let agents = template.join(".agents");
         if agents.is_dir() {
-            copy_dir_all(&agents, &root.join(".agents"))?;
+            copy_dir_all(&agents, &root.join(".agents"), mode.overwrite())?;
         }
     }
     let dir = root.join(".agents").join("skills").join("gwen");
     create_dir(&dir.join("references"))?;
     for (rel, contents) in gwen_skill_files() {
-        write_file(&root.join(rel), &contents)?;
+        write_file_mode(&root.join(rel), &contents, mode)?;
     }
     Ok(())
 }
