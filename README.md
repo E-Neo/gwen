@@ -111,7 +111,9 @@ given a `.gitignore` that ignores `target/`.
 actions; the server applies them with `toml_edit`, validates the project and
 re-renders before the UI is updated.
 
-- Select, shift-select or use the Multi toggle, then move shapes by dragging.
+- Select, shift-click or use the Multi toggle, then move shapes by dragging.
+- Drag on empty canvas to marquee-select shapes. On touch screens, use one
+  finger to marquee, two fingers to pan, and pinch to zoom.
 - Drag handles to resize; use the round handle to rotate.
 - Double-click text to edit its markdown in place. Shapes with `paragraphs` are
   edited in the Properties panel.
@@ -132,8 +134,9 @@ re-renders before the UI is updated.
 - Rename sections, add or delete sections, add slides to an empty section, and
   drag slides between sections (including empty ones).
 - Press F5 (or Present) for full-screen SVG slides.
-- The editor keeps each touched geometry field in its original unit style
-  (`"1.25in"`, EMU integers, percentages); comments and untouched TOML are
+- The Properties panel geometry fields show the unit stored in TOML and accept
+  explicit units (`in`, `cm`, `mm`, `pt`, `%`) or bare EMU integers. Drag and
+  resize keep each field's current unit style; comments and untouched TOML are
   preserved. Ctrl+Z restores the previous TOML exactly.
 - If TOML changes outside the browser, the editor reloads automatically once
   it is idle; undo history is reset. Actions made during an external change are

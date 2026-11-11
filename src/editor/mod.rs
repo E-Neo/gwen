@@ -82,6 +82,10 @@ struct ShapeView {
     y: f64,
     w: f64,
     h: f64,
+    x_raw: Option<String>,
+    y_raw: Option<String>,
+    w_raw: Option<String>,
+    h_raw: Option<String>,
     rotate: f64,
     flip_h: bool,
     flip_v: bool,
@@ -191,6 +195,7 @@ impl Editor {
             Action::Move { .. }
                 | Action::Resize { .. }
                 | Action::SetShape { .. }
+                | Action::SetGeometry { .. }
                 | Action::SetParagraph { .. }
                 | Action::AddText { .. }
                 | Action::AddShape { .. }
@@ -641,6 +646,16 @@ fn shape_views(slide: &Value, source: &Slide, scene: &scene::Scene) -> Vec<Shape
             .unwrap_or_default();
         let text = source_shape.and_then(|s| s.text.clone());
         let image_src = source_shape.and_then(|s| s.src.clone());
+        let raw = |coord: Option<&crate::units::Coord>| {
+            coord.map(|coord| match coord {
+                crate::units::Coord::Emu(emu) => emu.to_string(),
+                crate::units::Coord::Text(text) => text.clone(),
+            })
+        };
+        let x_raw = raw(source_shape.and_then(|s| s.x.as_ref()));
+        let y_raw = raw(source_shape.and_then(|s| s.y.as_ref()));
+        let w_raw = raw(source_shape.and_then(|s| s.w.as_ref()));
+        let h_raw = raw(source_shape.and_then(|s| s.h.as_ref()));
         let resize_locked = placeholder.is_some() || kind == "table";
         out.push(ShapeView {
             index,
@@ -650,6 +665,10 @@ fn shape_views(slide: &Value, source: &Slide, scene: &scene::Scene) -> Vec<Shape
             y: rect.y,
             w: rect.w,
             h: rect.h,
+            x_raw,
+            y_raw,
+            w_raw,
+            h_raw,
             rotate,
             flip_h,
             flip_v,
@@ -730,6 +749,68 @@ mod tests {
         assert_eq!(before, slide_text(&dir, "a.toml"));
         editor.redo().unwrap();
         assert_eq!(after, slide_text(&dir, "a.toml"));
+    }
+
+    #[test]
+    fn set_geometry_accepts_units() {
+        let dir = project("geometry-units");
+        let mut editor = Editor::open(&dir).unwrap();
+
+        let slide = editor.slide_json(0).unwrap();
+        assert_eq!(
+            slide["slide"]["shapes"][0]["x_raw"].as_str(),
+            Some("914400")
+        );
+        assert_eq!(
+            slide["slide"]["shapes"][0]["y_raw"].as_str(),
+            Some("1.25in")
+        );
+
+        for (key, value) in [("x", "2cm"), ("w", "72pt"), ("y", "914400"), ("h", "50%")] {
+            editor
+                .apply(&Action::SetGeometry {
+                    slide: 0,
+                    index: 0,
+                    key: key.into(),
+                    value: value.into(),
+                })
+                .unwrap();
+        }
+
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shape = &doc["shapes"][0];
+        assert_eq!(shape["x"].as_str(), Some("2cm"));
+        assert_eq!(shape["w"].as_str(), Some("72pt"));
+        assert_eq!(shape["y"].as_integer(), Some(914_400));
+        assert_eq!(shape["h"].as_str(), Some("50%"));
+
+        let slide = editor.slide_json(0).unwrap();
+        let source = &slide["slide"]["shapes"][0];
+        assert_eq!(source["x_raw"].as_str(), Some("2cm"));
+        assert!((source["x"].as_f64().unwrap() - 2.0 / 2.54).abs() < 1e-6);
+
+        let before = slide_text(&dir, "a.toml");
+        assert!(
+            editor
+                .apply(&Action::SetGeometry {
+                    slide: 0,
+                    index: 0,
+                    key: "x".into(),
+                    value: "bogus".into(),
+                })
+                .is_err()
+        );
+        assert!(
+            editor
+                .apply(&Action::SetGeometry {
+                    slide: 0,
+                    index: 0,
+                    key: "x".into(),
+                    value: "-1cm".into(),
+                })
+                .is_err()
+        );
+        assert_eq!(before, slide_text(&dir, "a.toml"));
     }
 
     #[test]

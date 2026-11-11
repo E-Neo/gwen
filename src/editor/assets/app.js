@@ -14,7 +14,6 @@ const state = {
   fitScale: 1,
   multi: false,
   drag: null,
-  pan: null,
   pinch: null,
   pointers: new Map(),
   textEdit: null,
@@ -631,9 +630,15 @@ function pointerDown(event) {
   if (event.button !== undefined && event.button !== 0) return;
   if (event.pointerType === 'touch') {
     state.pointers.set(event.pointerId, event);
-    if (state.pointers.size === 2) {
-      cancelDrag();
-      startPinch();
+    if (state.pointers.size >= 2) {
+      // Capture every finger on the stage before cancelDrag() rebuilds the
+      // shape boxes. Otherwise the second finger keeps an implicit capture on
+      // a removed box and pinch/pan moves never reach the stage listener.
+      captureStagePointers();
+      if (!state.pinch) {
+        cancelDrag();
+        startPinch();
+      }
       return;
     }
   }
@@ -668,13 +673,10 @@ function pointerDown(event) {
     return;
   }
   if (event.target === $('#stage') || event.target === $('#shape-layer') || event.target === $('#slide-image')) {
-    if (event.pointerType === 'touch') {
-      clearSelection();
-      if (state.zoom > 1.01) startPan(event);
-    } else {
-      clearSelection();
-      startMarquee(event);
-    }
+    event.preventDefault();
+    state.lastTap = null;
+    clearSelection();
+    startMarquee(event);
   }
 }
 
@@ -687,12 +689,12 @@ function pointerMove(event) {
     }
   }
   if (state.drag) moveDrag(event);
-  else if (state.pan) movePan(event);
   else if (state.marquee) moveMarquee(event);
 }
 
 function pointerCancel(event) {
   if (event.pointerType === 'touch') state.pointers.delete(event.pointerId);
+  if (state.pointers.size < 2) endPinch();
   cancelDrag();
 }
 
@@ -702,13 +704,11 @@ function pointerUp(event) {
     if (state.pinch && state.pointers.size < 2) endPinch();
   }
   if (state.drag) endDrag(event);
-  else if (state.pan) endPan();
   else if (state.marquee) endMarquee(event);
 }
 
 function cancelDrag() {
   state.drag = null;
-  state.pan = null;
   state.marquee = null;
   $('#marquee').hidden = true;
   $('#guide-layer').replaceChildren();
@@ -956,6 +956,7 @@ function startMarquee(event) {
   const node = $('#marquee');
   node.hidden = false;
   updateMarqueeNode();
+  $('#stage').setPointerCapture(event.pointerId);
 }
 
 function moveMarquee(event) {
@@ -990,36 +991,34 @@ function endMarquee() {
   renderInspector();
 }
 
-function startPan(event) {
-  const wrap = $('#stage-wrap');
-  state.pan = {
-    start: { x: event.clientX, y: event.clientY },
-    left: wrap.scrollLeft,
-    top: wrap.scrollTop,
-  };
-}
-
-function movePan(event) {
-  if (!state.pan) return;
-  const wrap = $('#stage-wrap');
-  wrap.scrollLeft = state.pan.left - (event.clientX - state.pan.start.x);
-  wrap.scrollTop = state.pan.top - (event.clientY - state.pan.start.y);
-}
-
-function endPan() {
-  state.pan = null;
+function captureStagePointers() {
+  const stage = $('#stage');
+  for (const pointerId of state.pointers.keys()) {
+    try {
+      stage.setPointerCapture(pointerId);
+    } catch {
+      // The pointer may already be gone; the remaining pointers still work.
+    }
+  }
 }
 
 function startPinch() {
   const points = [...state.pointers.values()].slice(0, 2);
   if (points.length < 2) return;
   const distance = Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY);
+  const center = {
+    x: (points[0].clientX + points[1].clientX) / 2,
+    y: (points[0].clientY + points[1].clientY) / 2,
+  };
+  const stage = $('#stage').getBoundingClientRect();
   state.pinch = {
     startDistance: Math.max(1, distance),
     startZoom: state.zoom,
-    startCenter: {
-      x: (points[0].clientX + points[1].clientX) / 2,
-      y: (points[0].clientY + points[1].clientY) / 2,
+    // Slide coordinate under the two-finger center at pinch start. Keeping it
+    // under the moving center makes pinch zoom and two-finger pan coexist.
+    anchor: {
+      x: (center.x - stage.left) / state.scale,
+      y: (center.y - stage.top) / state.scale,
     },
   };
 }
@@ -1030,10 +1029,21 @@ function movePinch() {
   if (points.length < 2) return;
   const distance = Math.hypot(points[0].clientX - points[1].clientX, points[0].clientY - points[1].clientY);
   const zoom = clamp(state.pinch.startZoom * distance / state.pinch.startDistance, 0.25, 4);
-  if (Math.abs(zoom - state.zoom) < 0.005) return;
-  state.zoom = zoom;
-  layoutStage();
-  renderStage();
+  if (Math.abs(zoom - state.zoom) >= 0.005) {
+    state.zoom = zoom;
+    layoutStage();
+    renderStage();
+  }
+  const center = {
+    x: (points[0].clientX + points[1].clientX) / 2,
+    y: (points[0].clientY + points[1].clientY) / 2,
+  };
+  const wrap = $('#stage-wrap');
+  const stage = $('#stage').getBoundingClientRect();
+  const targetLeft = center.x - state.pinch.anchor.x * state.scale;
+  const targetTop = center.y - state.pinch.anchor.y * state.scale;
+  wrap.scrollLeft += stage.left - targetLeft;
+  wrap.scrollTop += stage.top - targetTop;
 }
 
 function endPinch() {
@@ -1136,6 +1146,31 @@ function numberField(label, value, onChange, disabled = false, step = '0.01') {
   return field(label, input);
 }
 
+function formatInches(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return `${Number(number.toFixed(4))}in`;
+}
+
+function coordField(label, shape, key, onChange, disabled = false) {
+  const raw = shape[`${key}_raw`];
+  const input = h('input', {
+    type: 'text',
+    value: raw ?? formatInches(shape[key]),
+    disabled,
+    placeholder: '1in, 2.5cm, 72pt, 50%',
+    title: 'Length: EMU integer, or a value with in, cm, mm, pt or %',
+    autocomplete: 'off',
+    spellcheck: 'false',
+  });
+  input.addEventListener('change', () => {
+    const text = input.value.trim();
+    if (!text) { renderInspector(); return; }
+    onChange(text);
+  });
+  return field(label, input);
+}
+
 function colorValue(value) {
   if (!value) return '';
   if (typeof value === 'string') return value;
@@ -1147,6 +1182,15 @@ function applyShapeKeys(keys) {
   const index = [...state.selection][0];
   if (index === undefined) return;
   applyAction({ type: 'set_shape', slide: state.current, index, keys }, { keepSelection: true });
+}
+
+function applyGeometry(key, value) {
+  const index = [...state.selection][0];
+  if (index === undefined) return;
+  applyAction(
+    { type: 'set_geometry', slide: state.current, index, key, value },
+    { keepSelection: true },
+  );
 }
 
 function renderInspector() {
@@ -1244,12 +1288,13 @@ function renderInspector() {
   body.append(h('div', { class: 'inspector-section' },
     h('h3', { text: 'Geometry' }),
     h('div', { class: 'field-grid' },
-      numberField('X (in)', shape.x, (v) => resizeTo({ x: v }), shape.move_locked),
-      numberField('Y (in)', shape.y, (v) => resizeTo({ y: v }), shape.move_locked),
-      numberField('W (in)', shape.w, (v) => resizeTo({ w: v }), shape.resize_locked),
-      numberField('H (in)', shape.h, (v) => resizeTo({ h: v }), shape.resize_locked),
+      coordField('X', shape, 'x', (v) => applyGeometry('x', v), shape.move_locked),
+      coordField('Y', shape, 'y', (v) => applyGeometry('y', v), shape.move_locked),
+      coordField('W', shape, 'w', (v) => applyGeometry('w', v), shape.resize_locked),
+      coordField('H', shape, 'h', (v) => applyGeometry('h', v), shape.resize_locked),
       numberField('Rotate (°)', shape.rotate || 0, (v) => applyShapeKeys({ rotate: v }), shape.move_locked || shape.kind === 'table'),
     ),
+    h('p', { class: 'note', text: 'Lengths accept in, cm, mm, pt or %; a bare integer is EMU.' }),
   ));
   const textSection = h('div', { class: 'inspector-section' }, h('h3', { text: 'Text' }));
   if (shape.paragraphs.length) {
@@ -1321,31 +1366,6 @@ function checkboxField(label, value, onChange) {
   input.checked = value;
   input.addEventListener('change', () => onChange(input.checked));
   return h('label', { class: 'inline' }, input, h('span', { text: label }));
-}
-
-function resizeTo(partial) {
-  const shape = selectedShapes()[0];
-  if (!shape) return;
-  if (shape.kind === 'table') {
-    if (partial.w !== undefined || partial.h !== undefined) {
-      toast('Table resizing is coming in the table editing phase.');
-      return;
-    }
-    const dx = (partial.x ?? shape.x) - shape.x;
-    const dy = (partial.y ?? shape.y) - shape.y;
-    if (dx || dy) {
-      applyAction({ type: 'move', slide: state.current, indices: [shape.index], dx, dy }, { keepSelection: true });
-    }
-    return;
-  }
-  const rect = {
-    x: partial.x ?? shape.x,
-    y: partial.y ?? shape.y,
-    w: partial.w ?? shape.w,
-    h: partial.h ?? shape.h,
-  };
-  if (rect.w < 0 || rect.h < 0) { toast('Width and height must not be negative.'); return; }
-  applyAction({ type: 'resize', slide: state.current, index: shape.index, ...rect }, { keepSelection: true });
 }
 
 /* ---------- shape library and images ---------- */

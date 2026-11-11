@@ -9,6 +9,7 @@ use serde_json::Value as Json;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::model::Project;
+use crate::units::Coord;
 
 const EMU_PER_IN: f64 = 914_400.0;
 /// Decoded image payloads are capped at 20 MB. The HTTP body limit is larger
@@ -36,6 +37,15 @@ pub enum Action {
         slide: usize,
         index: usize,
         keys: BTreeMap<String, Json>,
+    },
+    SetGeometry {
+        slide: usize,
+        index: usize,
+        /// `x`, `y`, `w` or `h`.
+        key: String,
+        /// A length with its unit (`1.25in`, `2cm`, `25mm`, `72pt`, `50%`) or
+        /// a bare EMU integer. The unit is written back as requested.
+        value: String,
     },
     SetParagraph {
         slide: usize,
@@ -293,6 +303,47 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
                 section: None,
             })
         }),
+        Action::SetGeometry {
+            slide,
+            index,
+            key,
+            value,
+        } => {
+            if !matches!(key.as_str(), "x" | "y" | "w" | "h") {
+                return Err(miette!("`{key}` is not a geometry field; use x, y, w or h"));
+            }
+            let (width, height) = slide_size(&project)?;
+            let slide_inches = if key == "x" || key == "w" {
+                width
+            } else {
+                height
+            };
+            let (item_value, inches) = parse_geometry_value(value, slide_inches)?;
+            if inches < 0.0 {
+                return Err(miette!("`{key}` must not be negative"));
+            }
+            edit_shapes(dir, &project, *slide, |shapes| {
+                let shape = shapes
+                    .get_mut(*index)
+                    .ok_or_else(|| miette!("shape {index} does not exist"))?;
+                if shape.get("placeholder").is_some() {
+                    return Err(miette!(
+                        "placeholder geometry cannot be changed; edit the master"
+                    ));
+                }
+                if (key == "w" || key == "h")
+                    && shape.get("type").and_then(Item::as_str) == Some("table")
+                {
+                    return Err(miette!("tables can be moved in this phase, not resized"));
+                }
+                shape.insert(key.as_str(), Item::Value(item_value));
+                Ok(Outcome {
+                    slide: Some(*slide),
+                    select: vec![*index],
+                    section: None,
+                })
+            })
+        }
         Action::SetParagraph {
             slide,
             index,
@@ -1249,6 +1300,22 @@ fn slide_size(project: &Project) -> Result<(f64, f64)> {
         .inches(0)
         .map_err(|e| miette!("invalid slide height: {e}"))?;
     Ok((width, height))
+}
+
+/// Parse a sidebar length while preserving the unit the user typed.
+fn parse_geometry_value(raw: &str, slide_inches: f64) -> Result<(Value, f64)> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err(miette!("a length must not be empty"));
+    }
+    if let Ok(emu) = text.parse::<i64>() {
+        return Ok((Value::from(emu), emu as f64 / EMU_PER_IN));
+    }
+    let slide_emu = (slide_inches * EMU_PER_IN).round() as i64;
+    let emu = Coord::Text(text.to_string())
+        .emu(slide_emu)
+        .map_err(|e| miette!("{e}"))?;
+    Ok((Value::from(text), emu as f64 / EMU_PER_IN))
 }
 
 fn json_to_edit(value: &Json) -> Result<Value> {
