@@ -381,12 +381,12 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             }
         }
         (ColorType::GrayA(8), tiff::decoder::DecodingResult::U8(v)) => {
-            for p in v.chunks_exact(2).take(n) {
+            for p in v.as_chunks::<2>().0.iter().take(n) {
                 out.extend_from_slice(&[p[0], p[0], p[0], p[1]]);
             }
         }
         (ColorType::RGB(8), tiff::decoder::DecodingResult::U8(v)) => {
-            for p in v.chunks_exact(3).take(n) {
+            for p in v.as_chunks::<3>().0.iter().take(n) {
                 out.extend_from_slice(&[p[0], p[1], p[2], 255]);
             }
         }
@@ -400,7 +400,7 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             }
         }
         (ColorType::RGB(16), tiff::decoder::DecodingResult::U16(v)) => {
-            for p in v.chunks_exact(3).take(n) {
+            for p in v.as_chunks::<3>().0.iter().take(n) {
                 out.extend_from_slice(&[
                     (p[0] >> 8) as u8,
                     (p[1] >> 8) as u8,
@@ -410,7 +410,7 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             }
         }
         (ColorType::RGBA(16), tiff::decoder::DecodingResult::U16(v)) => {
-            for p in v.chunks_exact(4).take(n) {
+            for p in v.as_chunks::<4>().0.iter().take(n) {
                 out.extend_from_slice(&[
                     (p[0] >> 8) as u8,
                     (p[1] >> 8) as u8,

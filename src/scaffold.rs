@@ -477,6 +477,8 @@ project.
   `target/render/<slide-stem>.png`; add `--html` for a self-contained slideshow
   at `target/render/index.html` (press `f` to present full screen); features
   that are still approximated are reported on stderr
+- a human can edit visually with `gwen edit .`; it writes the same TOML files,
+  so TOML stays the source of truth
 - `gwen update .` refreshes template-owned files (`masters/`, `media/`,
   `.agents/`) and merges the template's `[theme]` / `[styles.*]` into
   main.toml; slides, sections and the title are never touched

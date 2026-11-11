@@ -8,6 +8,7 @@
 
 pub mod color;
 pub mod defaults;
+pub mod editor;
 pub mod error;
 pub mod fonts;
 pub mod media;

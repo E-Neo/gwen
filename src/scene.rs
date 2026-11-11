@@ -142,6 +142,8 @@ pub struct Item {
     pub line: Option<Stroke>,
     pub shadow: Option<Shadow>,
     pub even_odd: bool,
+    /// Slide shape index this item came from. `None` for master chrome.
+    pub source: Option<usize>,
     pub kind: ItemKind,
 }
 
@@ -407,16 +409,22 @@ fn build_slide(slide: &Value, page: usize, ctx: &SceneCtx<'_>) -> Result<Scene, 
         items.push(slide_number_item(sn, page, ctx.defaults));
     }
 
-    for obj in slide
+    for (idx, obj) in slide
         .get("shapes")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
+        .iter()
+        .enumerate()
     {
         let ph = obj_get(obj, "placeholder")
             .and_then(Value::as_str)
             .and_then(|name| master.and_then(|m| m.placeholders.get(name)));
-        items.extend(resolve(obj, ph, master, ctx.defaults, ctx.dir, ctx.fonts)?);
+        let mut resolved = resolve(obj, ph, master, ctx.defaults, ctx.dir, ctx.fonts)?;
+        for item in &mut resolved {
+            item.source = Some(idx);
+        }
+        items.extend(resolved);
     }
 
     // A shape that asks for an unknown preset still needs a visible box: draw
@@ -559,6 +567,7 @@ fn resolve(
                 line: None,
                 shadow,
                 even_odd: false,
+                source: None,
                 kind: ItemKind::Image {
                     data: media::preview_data_uri(data)?,
                     sizing: sizing
@@ -582,6 +591,7 @@ fn resolve(
                 line,
                 shadow,
                 even_odd,
+                source: None,
                 kind: ItemKind::Shape {
                     preset: preset.to_string(),
                     geom: geom_opts(obj),
@@ -604,6 +614,7 @@ fn resolve(
                 line,
                 shadow,
                 even_odd: presets::uses_evenodd(preset),
+                source: None,
                 kind: ItemKind::Shape {
                     preset: preset.to_string(),
                     geom: geom_opts(obj),
@@ -622,6 +633,7 @@ fn resolve(
                 line: None,
                 shadow: None,
                 even_odd: false,
+                source: None,
                 kind: ItemKind::Text(Box::new(text)),
             };
             Ok(vec![shape, text])
@@ -640,6 +652,7 @@ fn resolve(
                 line,
                 shadow,
                 even_odd: false,
+                source: None,
                 kind: ItemKind::Text(Box::new(text)),
             }])
         }
@@ -772,6 +785,7 @@ fn table_items(obj: &Value, defaults: &Defaults, fonts: &Fonts) -> Result<Vec<It
                 line: None,
                 shadow: None,
                 even_odd: false,
+                source: None,
                 kind: ItemKind::Shape {
                     preset: "rect".into(),
                     geom: GeomOpts::default(),
@@ -818,6 +832,7 @@ fn table_items(obj: &Value, defaults: &Defaults, fonts: &Fonts) -> Result<Vec<It
                     line: Some(stroke),
                     shadow: None,
                     even_odd: false,
+                    source: None,
                     kind: ItemKind::Shape {
                         preset: "line".into(),
                         geom: GeomOpts::default(),
@@ -835,6 +850,7 @@ fn table_items(obj: &Value, defaults: &Defaults, fonts: &Fonts) -> Result<Vec<It
                 line: None,
                 shadow: None,
                 even_odd: false,
+                source: None,
                 kind: ItemKind::Text(Box::new(cell.block)),
             });
         }
@@ -1259,6 +1275,7 @@ fn slide_number_item(sn: &Value, page: usize, defaults: &Defaults) -> Item {
         line: None,
         shadow: None,
         even_odd: false,
+        source: None,
         kind: ItemKind::Text(Box::new(text)),
     }
 }

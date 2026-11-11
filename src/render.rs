@@ -665,6 +665,7 @@ fn shape_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
     let opts = to_pptxgen(&merged);
 
     let mut value = Map::new();
+    value.insert("index".into(), json!(idx));
     value.insert("x".into(), json!(geo(&shape.x, ctx.width, "x")?));
     value.insert("y".into(), json!(geo(&shape.y, ctx.height, "y")?));
     let (w_in, h_in) = if matches!(kind, Kind::Image) {
@@ -1050,6 +1051,7 @@ fn table_value(ctx: &SlideCtx, shape: &Shape, idx: usize) -> Result<Value> {
         .map_err(|e| miette!("{where_}: invalid `y`: {e}"))?
         .unwrap_or(0.5);
     let mut value = Map::new();
+    value.insert("index".into(), json!(idx));
     value.insert("kind".into(), json!("table"));
     value.insert("x".into(), json!(x));
     value.insert("y".into(), json!(y));

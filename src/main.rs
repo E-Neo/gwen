@@ -44,6 +44,18 @@ enum Commands {
         #[arg(long)]
         no_template: bool,
     },
+    /// Open the interactive editor in a local browser.
+    Edit {
+        /// Project directory (defaults to the current directory).
+        #[arg(default_value = ".")]
+        project: String,
+        /// Port for the local editor (0 picks a free port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Do not open the browser automatically.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Sync a project with the installed template: refresh `masters/`,
     /// `media/` and the template's skills, and merge its `[theme]` /
     /// `[styles.*]` into `main.toml`. Slides, sections and the presentation
@@ -115,6 +127,11 @@ fn main() -> miette::Result<()> {
             project,
             no_template,
         } => init_project(&project, no_template),
+        Commands::Edit {
+            project,
+            port,
+            no_open,
+        } => gwen::editor::serve(Path::new(&project), port, no_open),
         Commands::Update {
             project,
             dry_run,

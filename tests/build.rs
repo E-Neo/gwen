@@ -3360,3 +3360,23 @@ fn gwen_init_uses_the_template_when_one_is_installed() {
     assert!(main.contains(&format!("title = \"{name}\"")), "{main}");
     gwen::build(&dir).unwrap();
 }
+
+#[test]
+fn gwen_edit_requires_a_gwen_project() {
+    let dir = tmp("edit-no-project");
+    let out = Command::new(env!("CARGO_BIN_EXE_gwen"))
+        .arg("edit")
+        .arg(dir.as_os_str())
+        .arg("--no-open")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "edit refuses a directory without main.toml"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a gwen project"),
+        "clear error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

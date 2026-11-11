@@ -22,6 +22,7 @@ gwen fmt <deck> --check  # report only; exits 1 if a file would change
 gwen build <deck>        # render <deck>/target/<title>.pptx
 gwen render <deck>       # PNG previews in <deck>/target/render/ (no office suite)
 gwen render <deck> --html  # PNG previews plus target/render/index.html
+gwen edit <deck>         # interactive browser editor (localhost)
 gwen clean <deck>        # remove the generated <deck>/target/ directory
 ```
 
@@ -101,6 +102,36 @@ TOML DSL (`SKILL.md` overview + `references/toml-dsl.md` full specification).
 A template may ship extra skills under its own `.agents/skills/`, copied
 verbatim; the `gwen` skill name itself is reserved. Every project is also
 given a `.gitignore` that ignores `target/`.
+
+## Editing visually
+
+`gwen edit [project] [--port N] [--no-open]` starts a browser editor on
+`127.0.0.1` and renders slides with the same scene and SVG pipeline as
+`gwen render`. TOML remains the source of truth. The browser sends semantic
+actions; the server applies them with `toml_edit`, validates the project and
+re-renders before the UI is updated.
+
+- Select, shift-select or use the Multi toggle, then move shapes by dragging.
+- Drag handles to resize; use the round handle to rotate.
+- Double-click text to edit its markdown in place. Shapes with `paragraphs` are
+  edited in the Properties panel.
+- The Properties panel edits geometry, text style, fill and line.
+- Undo/redo and auto-save are built in. There is no Save button.
+- Add text boxes, duplicate/delete shapes, change z-order, and add/duplicate/
+  delete/reorder slides.
+- Press F5 (or Present) for full-screen SVG slides.
+- The editor keeps each touched geometry field in its original unit style
+  (`"1.25in"`, EMU integers, percentages); comments and untouched TOML are
+  preserved. Ctrl+Z restores the previous TOML exactly.
+- If TOML changes outside the browser, the next action is refused and the
+  editor reloads rather than overwriting the manual edit.
+- Master chrome is read-only. Placeholders can be styled and edited, but their
+  geometry stays inherited.
+- This phase edits existing shapes and adds text boxes; the shape library,
+  image insertion, alignment tools and table editing are later phases. Tables
+  can be moved but not resized yet.
+- `gwen edit` binds localhost only. It is designed for desktop, tablet and
+  phone browsers running on the same device as the gwen binary.
 
 ## The gwen project format
 

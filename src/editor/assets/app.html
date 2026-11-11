@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>gwen edit</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><span class="dot"></span><span>gwen edit</span><span id="deck-title"></span></div>
+  <nav class="toolbar" aria-label="Editor toolbar">
+    <button data-cmd="undo" title="Undo">Undo</button>
+    <button data-cmd="redo" title="Redo">Redo</button>
+    <span class="sep"></span>
+    <button data-cmd="add-text" title="Add a text box">Text</button>
+    <button data-cmd="duplicate" title="Duplicate selection">Duplicate</button>
+    <button data-cmd="delete" title="Delete selection">Delete</button>
+    <span class="sep"></span>
+    <button data-cmd="front" title="Bring to front">Front</button>
+    <button data-cmd="back" title="Send to back">Back</button>
+    <button data-cmd="multi" title="Toggle multi-select">Multi</button>
+    <button data-cmd="snap" title="Toggle snapping">Snap</button>
+    <span class="sep"></span>
+    <button data-cmd="present" title="Present (F5)">Present</button>
+    <button data-cmd="reload" title="Reload from disk">Reload</button>
+  </nav>
+  <div class="top-actions">
+    <span id="status">Saved</span>
+    <button id="toggle-slides" class="mobile-only">Slides</button>
+    <button id="toggle-inspector" class="mobile-only">Format</button>
+  </div>
+</header>
+
+<main id="workspace">
+  <aside id="slides-panel" class="panel">
+    <div class="panel-head">
+      <span>Slides</span>
+      <div class="panel-tools">
+        <button data-cmd="add-slide" title="Add slide">+</button>
+        <button data-cmd="duplicate-slide" title="Duplicate slide">⧉</button>
+        <button data-cmd="delete-slide" title="Delete slide">−</button>
+      </div>
+    </div>
+    <div id="slide-list"></div>
+    <div class="slide-help">Use ↑ / ↓ to reorder the selected slide.</div>
+  </aside>
+
+  <section id="stage-wrap" aria-label="Slide canvas">
+    <div id="stage">
+      <img id="slide-image" alt="Rendered slide">
+      <div id="guide-layer"></div>
+      <div id="shape-layer"></div>
+      <div id="marquee" hidden></div>
+      <div id="text-editor" hidden>
+        <textarea id="text-input" spellcheck="false"></textarea>
+        <div class="text-bar">
+          <span class="hint">Markdown · Ctrl/Cmd+Enter to save</span>
+          <button id="text-cancel">Cancel</button>
+          <button id="text-done" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+    <div id="zoom-bar">
+      <button data-cmd="zoom-out" title="Zoom out">−</button>
+      <span id="zoom-label">100%</span>
+      <button data-cmd="zoom-in" title="Zoom in">+</button>
+      <button data-cmd="fit" title="Fit slide">Fit</button>
+    </div>
+  </section>
+
+  <aside id="inspector" class="panel">
+    <div class="panel-head"><span>Properties</span></div>
+    <div id="inspector-body"></div>
+  </aside>
+</main>
+
+<div id="scrim" hidden></div>
+<div id="toast" hidden></div>
+<div id="presentation" hidden>
+  <img id="present-image" alt="Presentation slide">
+  <div class="present-hud"><span id="present-count"></span><span>Tap or use arrows · Esc to exit</span></div>
+</div>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>
