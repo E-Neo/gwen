@@ -244,15 +244,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .shape-box {
   position: absolute;
   pointer-events: auto;
-  cursor: move;
+  cursor: pointer;
   border: 1.5px solid transparent;
   outline: none;
   transform-origin: center center;
   touch-action: none;
 }
 .shape-box:hover { border-color: rgba(47, 111, 223, .45); }
-.shape-box.selected { border-color: var(--accent); background: rgba(47, 111, 223, .04); z-index: 5; }
-.shape-box.locked { cursor: default; }
+.shape-box.selected { border-color: var(--accent); background: rgba(47, 111, 223, .04); z-index: 5; cursor: grab; }
+.shape-box.selected:active { cursor: grabbing; }
+.shape-box.locked { cursor: pointer; }
+.shape-box.locked.selected { cursor: default; }
 .handle {
   position: absolute;
   width: 10px;

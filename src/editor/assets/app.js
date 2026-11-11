@@ -3,6 +3,9 @@
 
 const $ = (sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
 const $$ = (sel) => [...document.querySelectorAll(sel)];
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const MOUSE_DRAG_THRESHOLD_PX = 6;
+const TOUCH_DRAG_THRESHOLD_PX = 10;
 
 const state = {
   project: null,
@@ -657,19 +660,54 @@ function pointerDown(event) {
     event.preventDefault();
     const index = Number(box.dataset.index);
     const additive = event.shiftKey;
-    if (!state.selection.has(index) || additive) selectShape(index, additive);
-    else renderStage();
+    const wasSelected = state.selection.has(index);
+
+    // Defer touch double-tap editing until pointer-up so the second press can
+    // also become a drag.
+    let pendingText = null;
     if (event.pointerType === 'touch') {
       const now = performance.now();
       if (state.lastTap && state.lastTap.index === index && now - state.lastTap.time < 350) {
         state.lastTap = null;
-        beginText(index);
+        pendingText = index;
+      } else {
+        state.lastTap = { index, time: now };
+      }
+    }
+
+    if (additive) {
+      selectShape(index, true);
+      return;
+    }
+
+    if (state.multi) {
+      if (!wasSelected) {
+        selectShape(index, true);
         return;
       }
-      state.lastTap = { index, time: now };
+      // Dragging a selected shape moves the whole selection; a tap without
+      // movement removes it instead.
+      beginMoveOrTap(index, event, null, index);
+      return;
     }
+
+    if (!wasSelected) {
+      // Strict select-first: the first press only selects.
+      selectShape(index, false);
+      return;
+    }
+
     const shape = shapeAt(index);
-    if (shape && !shape.move_locked) startMove(index, event);
+    if (shape && !shape.move_locked) {
+      beginMoveOrTap(index, event, pendingText, null);
+      return;
+    }
+
+    if (pendingText != null) {
+      beginText(index);
+      return;
+    }
+    renderStage();
     return;
   }
   if (event.target === $('#stage') || event.target === $('#shape-layer') || event.target === $('#slide-image')) {
@@ -717,7 +755,14 @@ function cancelDrag() {
 
 /* ---------- moving ---------- */
 
-function startMove(index, event) {
+function beginMoveOrTap(index, event, pendingText = null, pendingToggle = null) {
+  startMove(index, event, { pendingText, pendingToggle });
+  if (state.drag) return;
+  if (pendingText != null) beginText(pendingText);
+  else if (pendingToggle != null) selectShape(pendingToggle, true);
+}
+
+function startMove(index, event, options = {}) {
   const indices = state.multi || state.selection.has(index) ? [...state.selection] : [index];
   if (!indices.length) return;
   const shapes = indices.map(shapeAt).filter(Boolean);
@@ -734,6 +779,10 @@ function startMove(index, event) {
     origins,
     bounds,
     moved: false,
+    armed: false,
+    pointerType: event.pointerType,
+    pendingText: options.pendingText ?? null,
+    pendingToggle: options.pendingToggle ?? null,
     event,
     targetsX: snapTargets('x'),
     targetsY: snapTargets('y'),
@@ -753,6 +802,17 @@ function moveDrag(event) {
   const drag = state.drag;
   if (!drag) return;
   const point = stagePoint(event);
+  if (drag.type === 'move' && !drag.armed) {
+    const threshold = drag.pointerType === 'touch'
+      ? TOUCH_DRAG_THRESHOLD_PX
+      : MOUSE_DRAG_THRESHOLD_PX;
+    if (Math.hypot(point.px - drag.start.px, point.py - drag.start.py) < threshold) return;
+    drag.armed = true;
+    // Start from the threshold crossing so the shape does not jump. Wait for
+    // the next move event before applying any delta (and any snap).
+    drag.start = point;
+    return;
+  }
   let dx = point.x - drag.start.x;
   let dy = point.y - drag.start.y;
   let guides = [];
@@ -763,7 +823,7 @@ function moveDrag(event) {
     guides = snapped.guides;
   }
   if (drag.type === 'move') {
-    drag.moved = drag.moved || Math.abs(dx) > 0.02 || Math.abs(dy) > 0.02;
+    drag.moved = drag.moved || Math.abs(dx) > 1e-6 || Math.abs(dy) > 1e-6;
     for (const [index] of drag.origins) {
       const box = $(`.shape-box[data-index="${index}"]`);
       if (box) {
@@ -816,11 +876,19 @@ function endDrag(event) {
   state.drag = null;
   $('#guide-layer').replaceChildren();
   if (!drag) return;
-  if (drag.type === 'move' && drag.moved) {
-    applyAction({ type: 'move', slide: state.current, indices: [...drag.origins.keys()], dx: drag.dx, dy: drag.dy }, { keepSelection: true });
-  } else if (drag.type === 'move') {
-    renderStage();
-  } else if (drag.type === 'resize' && drag.rect) {
+  if (drag.type === 'move') {
+    if (drag.moved) {
+      applyAction({ type: 'move', slide: state.current, indices: [...drag.origins.keys()], dx: drag.dx, dy: drag.dy }, { keepSelection: true });
+    } else if (!drag.armed && drag.pendingText != null) {
+      beginText(drag.pendingText);
+    } else if (!drag.armed && drag.pendingToggle != null) {
+      selectShape(drag.pendingToggle, true);
+    } else {
+      renderStage();
+    }
+    return;
+  }
+  if (drag.type === 'resize' && drag.rect) {
     const rect = drag.rect;
     applyAction({ type: 'resize', slide: state.current, index: drag.index, x: rect.x, y: rect.y, w: rect.w, h: rect.h }, { keepSelection: true });
   } else if (drag.type === 'rotate' && drag.rotate !== undefined) {
@@ -1217,7 +1285,7 @@ function renderInspector() {
         h('h3', { text: 'Slide' }),
         field('Name', h('input', { value: state.project.slides[state.current]?.stem || '', disabled: true })),
         h('p', { class: 'note', text: `${state.slide.width.toFixed(2)} × ${state.slide.height.toFixed(2)} in` }),
-        h('p', { class: 'note', text: 'Select a shape to edit it. Drag shapes to move; drag handles to resize; double-click a shape to edit its text.' }),
+        h('p', { class: 'note', text: 'Select a shape to edit it. Drag a selected shape to move it; drag handles to resize; double-click a shape to edit its text.' }),
       ),
       h('div', { class: 'inspector-section' },
         h('h3', { text: 'Background' }),

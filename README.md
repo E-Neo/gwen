@@ -111,9 +111,13 @@ given a `.gitignore` that ignores `target/`.
 actions; the server applies them with `toml_edit`, validates the project and
 re-renders before the UI is updated.
 
-- Select, shift-click or use the Multi toggle, then move shapes by dragging.
-- Drag on empty canvas to marquee-select shapes. On touch screens, use one
-  finger to marquee, two fingers to pan, and pinch to zoom.
+- Select a shape first, then drag the selected shape to move it. A small
+  screen-pixel dead zone keeps clicks and finger jitter from moving shapes.
+- Shift-click or the Multi toggle adds or removes shapes from the selection
+  without moving them.
+- Drag on empty canvas to marquee-select shapes. On touch screens, tap a shape
+  to select it, then drag the selected shape to move it; one-finger empty
+  canvas drags marquee, two fingers pan, and pinch zooms.
 - Drag handles to resize; use the round handle to rotate.
 - Double-click text to edit its markdown in place. Shapes with `paragraphs` are
   edited in the Properties panel.
