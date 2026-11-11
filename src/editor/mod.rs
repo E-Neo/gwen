@@ -67,6 +67,8 @@ struct SlideView {
     width: f64,
     height: f64,
     svg: String,
+    background: Value,
+    notes: Option<String>,
     shapes: Vec<ShapeView>,
 }
 
@@ -191,6 +193,12 @@ impl Editor {
                 | Action::SetShape { .. }
                 | Action::SetParagraph { .. }
                 | Action::AddText { .. }
+                | Action::AddShape { .. }
+                | Action::AddImage { .. }
+                | Action::ReplaceImage { .. }
+                | Action::Align { .. }
+                | Action::Distribute { .. }
+                | Action::SetSlide { .. }
                 | Action::DeleteShapes { .. }
                 | Action::DuplicateShapes { .. }
                 | Action::ZOrder { .. }
@@ -333,6 +341,14 @@ impl Editor {
             width,
             height,
             svg,
+            background: slide_value
+                .get("background")
+                .cloned()
+                .unwrap_or(Value::Null),
+            notes: slide_value
+                .get("notes")
+                .and_then(Value::as_str)
+                .map(String::from),
             shapes,
         };
         self.known = read_known_files(&self.dir)?;
@@ -525,6 +541,8 @@ fn build_view(
                 width,
                 height,
                 svg,
+                background: slide.get("background").cloned().unwrap_or(Value::Null),
+                notes: slide.get("notes").and_then(Value::as_str).map(String::from),
                 shapes,
             });
             section_slides.push(index);
@@ -897,6 +915,164 @@ mod tests {
             editor.slide_json(0).unwrap()["slide"]["shapes"][0]["text"].as_str(),
             Some("external")
         );
+    }
+
+    fn inches(value: &toml::Value) -> f64 {
+        match value {
+            toml::Value::Integer(value) => *value as f64 / 914_400.0,
+            toml::Value::Float(value) => *value,
+            toml::Value::String(value) => value
+                .trim()
+                .trim_end_matches("in")
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("unexpected coordinate `{value}`")),
+            other => panic!("unexpected coordinate {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_shape_align_and_distribute() {
+        let dir = project("align");
+        let mut editor = Editor::open(&dir).unwrap();
+        for (shape_type, x, y) in [
+            ("rect", 1.0, 1.0),
+            ("ellipse", 2.0, 2.0),
+            ("triangle", 8.0, 3.0),
+        ] {
+            editor
+                .apply(&Action::AddShape {
+                    slide: 0,
+                    shape_type: shape_type.into(),
+                    x,
+                    y,
+                    w: 2.0,
+                    h: 1.0,
+                    text: None,
+                })
+                .unwrap();
+        }
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        assert_eq!(shapes.len(), 5);
+        assert_eq!(shapes[4]["type"].as_str(), Some("triangle"));
+
+        editor
+            .apply(&Action::Align {
+                slide: 0,
+                indices: vec![2, 3, 4],
+                edge: "left".into(),
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        let xs: Vec<f64> = shapes[2..]
+            .iter()
+            .map(|shape| inches(&shape["x"]))
+            .collect();
+        assert!(xs.iter().all(|x| (x - 1.0).abs() < 1e-6), "{xs:?}");
+
+        editor.undo().unwrap();
+        editor
+            .apply(&Action::Distribute {
+                slide: 0,
+                indices: vec![2, 3, 4],
+                axis: "horizontal".into(),
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        let xs: Vec<f64> = shapes[2..]
+            .iter()
+            .map(|shape| inches(&shape["x"]))
+            .collect();
+        // Shapes are 2in wide, so equal spacing leaves a 1.5in gap: 1, 4.5, 8.
+        assert!((xs[0] - 1.0).abs() < 1e-6, "{xs:?}");
+        assert!((xs[1] - 4.5).abs() < 1e-6, "{xs:?}");
+        assert!((xs[2] - 8.0).abs() < 1e-6, "{xs:?}");
+
+        editor.undo().unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        assert!((inches(&shapes[3]["x"]) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn add_and_replace_image() {
+        let dir = project("image");
+        let mut editor = Editor::open(&dir).unwrap();
+        let pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        editor
+            .apply(&Action::AddImage {
+                slide: 0,
+                name: "pixel.png".into(),
+                data: pixel.into(),
+                x: None,
+                y: None,
+                w: None,
+                h: None,
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        let added = shapes.last().unwrap();
+        assert_eq!(added["type"].as_str(), Some("image"));
+        assert_eq!(added["src"].as_str(), Some("media/pixel.png"));
+        assert!((inches(&added["w"]) - 4.5).abs() < 1e-6);
+        assert!((inches(&added["h"]) - 4.5).abs() < 1e-6);
+        assert!(dir.join("media").join("pixel.png").is_file());
+
+        editor
+            .apply(&Action::ReplaceImage {
+                slide: 0,
+                index: shapes.len() - 1,
+                name: "replacement.png".into(),
+                data: pixel.into(),
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        let shapes = doc["shapes"].as_array().unwrap();
+        assert_eq!(
+            shapes.last().unwrap()["src"].as_str(),
+            Some("media/replacement.png")
+        );
+        assert!(dir.join("media").join("pixel.png").is_file());
+        assert!(dir.join("media").join("replacement.png").is_file());
+    }
+
+    #[test]
+    fn set_slide_background_and_notes() {
+        let dir = project("slide-settings");
+        let mut editor = Editor::open(&dir).unwrap();
+        editor
+            .apply(&Action::SetSlide {
+                slide: 0,
+                background: Some(Some(json!("#ff0000"))),
+                notes: Some("hello\nworld".into()),
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        assert_eq!(doc["background"].as_str(), Some("#ff0000"));
+        assert_eq!(doc["notes"].as_str(), Some("hello\nworld"));
+        let slide = editor.slide_json(0).unwrap();
+        assert_eq!(
+            slide["slide"]["background"]["color"].as_str(),
+            Some("#ff0000")
+        );
+        assert_eq!(slide["slide"]["notes"].as_str(), Some("hello\nworld"));
+
+        editor
+            .apply(&Action::SetSlide {
+                slide: 0,
+                background: Some(None),
+                notes: Some(String::new()),
+            })
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&slide_text(&dir, "a.toml")).unwrap();
+        assert!(doc.get("background").is_none());
+        assert!(doc.get("notes").is_none());
+        let slide = editor.slide_json(0).unwrap();
+        assert!(slide["slide"]["background"].is_null());
+        assert!(slide["slide"]["notes"].is_null());
     }
 
     #[test]

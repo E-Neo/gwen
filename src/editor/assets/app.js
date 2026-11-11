@@ -86,7 +86,7 @@ async function loadSlide(index, selection = null) {
 
 async function applyAction(action, options = {}) {
   closeTextEditor(false);
-  closeSheets();
+  if (!options.keepSheet) closeSheets();
   state.actionBusy = true;
   const previousFile = state.project && state.project.slides[state.current]
     ? state.project.slides[state.current].file
@@ -1045,14 +1045,19 @@ function endPinch() {
 function beginText(index) {
   const shape = shapeAt(index);
   if (!shape) return;
-  if (shape.paragraphs.length || shape.text == null) {
+  if (shape.paragraphs.length) {
     toast('This shape uses paragraphs; edit them in Properties.');
+    return;
+  }
+  if (shape.kind === 'image' || shape.kind === 'table') {
+    toast('Only text and shape objects can hold text.');
     return;
   }
   const editor = $('#text-editor');
   const input = /** @type {HTMLTextAreaElement} */ ($('#text-input'));
-  state.textEdit = { index, original: shape.text, value: shape.text };
-  input.value = shape.text;
+  const current = shape.text ?? '';
+  state.textEdit = { index, original: current, value: current };
+  input.value = current;
   editor.hidden = false;
   positionTextEditor();
   input.focus();
@@ -1150,16 +1155,38 @@ function renderInspector() {
   const shapes = selectedShapes();
   if (!shapes.length) {
     if (!state.slide) return;
+    const colorInput = h('input', { type: 'color', value: normalizeHex(state.slide.background) || '#ffffff' });
+    colorInput.addEventListener('change', () => {
+      applyAction({ type: 'set_slide', slide: state.current, background: colorInput.value }, { keepSelection: true, keepSheet: true });
+    });
+    const clearBackground = h('button', {
+      text: 'Clear',
+      title: 'Use the master background',
+      onclick: () => applyAction({ type: 'set_slide', slide: state.current, background: null }, { keepSelection: true, keepSheet: true }),
+    });
+    const notes = h('textarea', { rows: 4, placeholder: 'Speaker notes', value: state.slide.notes || '' });
+    notes.addEventListener('change', () => {
+      applyAction({ type: 'set_slide', slide: state.current, notes: notes.value }, { keepSelection: true, keepSheet: true });
+    });
     body.append(
       h('div', { class: 'inspector-section' },
         h('h3', { text: 'Slide' }),
         field('Name', h('input', { value: state.project.slides[state.current]?.stem || '', disabled: true })),
         h('p', { class: 'note', text: `${state.slide.width.toFixed(2)} × ${state.slide.height.toFixed(2)} in` }),
-        h('p', { class: 'note', text: 'Select a shape to edit it. Drag shapes to move; drag handles to resize; double-click text to edit.' }),
+        h('p', { class: 'note', text: 'Select a shape to edit it. Drag shapes to move; drag handles to resize; double-click a shape to edit its text.' }),
+      ),
+      h('div', { class: 'inspector-section' },
+        h('h3', { text: 'Background' }),
+        h('div', { class: 'color-row' }, colorInput, clearBackground),
+        h('p', { class: 'note', text: 'Clear removes the slide override and shows the master background.' }),
+      ),
+      h('div', { class: 'inspector-section' },
+        h('h3', { text: 'Speaker notes' }),
+        notes,
       ),
       h('div', { class: 'inspector-section' },
         h('h3', { text: 'Slide actions' }),
-        h('div', { class: 'inline' },
+        h('div', { class: 'inline wrap' },
           h('button', { text: 'Duplicate slide', onclick: () => applyAction({ type: 'duplicate_slide', slide: state.current }) }),
           h('button', { text: 'Delete slide', onclick: () => applyAction({ type: 'delete_slide', slide: state.current }) }),
         ),
@@ -1168,16 +1195,38 @@ function renderInspector() {
     return;
   }
   if (shapes.length > 1) {
+    const indices = shapes.map((shape) => shape.index);
+    const align = (edge) => applyAction({ type: 'align', slide: state.current, indices, edge }, { keepSelection: true, keepSheet: true });
+    const distribute = (axis) => applyAction({ type: 'distribute', slide: state.current, indices, axis }, { keepSelection: true, keepSheet: true });
     body.append(
       h('div', { class: 'inspector-section' },
         h('h3', { text: `${shapes.length} shapes selected` }),
-        h('p', { class: 'note', text: 'Move the selection together, or use the toolbar for duplicate, delete and z-order. Alignment tools are coming in the next phase.' }),
-        h('div', { class: 'inline' },
+        h('p', { class: 'note', text: 'Move the selection together, or align and distribute it here.' }),
+        h('div', { class: 'inline wrap' },
           h('button', { text: 'Duplicate', onclick: () => bulk('duplicate') }),
           h('button', { text: 'Delete', onclick: () => bulk('delete') }),
           h('button', { text: 'Bring front', onclick: () => bulk('front') }),
           h('button', { text: 'Send back', onclick: () => bulk('back') }),
         ),
+      ),
+      h('div', { class: 'inspector-section' },
+        h('h3', { text: 'Align' }),
+        h('div', { class: 'inline wrap' },
+          h('button', { text: 'Left', onclick: () => align('left') }),
+          h('button', { text: 'Center', onclick: () => align('center') }),
+          h('button', { text: 'Right', onclick: () => align('right') }),
+          h('button', { text: 'Top', onclick: () => align('top') }),
+          h('button', { text: 'Middle', onclick: () => align('middle') }),
+          h('button', { text: 'Bottom', onclick: () => align('bottom') }),
+        ),
+      ),
+      h('div', { class: 'inspector-section' },
+        h('h3', { text: 'Distribute' }),
+        h('div', { class: 'inline wrap' },
+          h('button', { text: 'Horizontally', disabled: shapes.length < 3, onclick: () => distribute('horizontal') }),
+          h('button', { text: 'Vertically', disabled: shapes.length < 3, onclick: () => distribute('vertical') }),
+        ),
+        h('p', { class: 'note', text: 'Distribute needs at least three selected shapes.' }),
       ),
     );
     return;
@@ -1190,6 +1239,7 @@ function renderInspector() {
     shape.placeholder ? h('p', { class: 'note', text: `Placeholder “${shape.placeholder}”. Geometry comes from the master; text and styles are editable.` }) : null,
     shape.kind === 'table' ? h('p', { class: 'note', text: 'Tables can be moved in this phase; table resizing and cell editing are coming next.' }) : null,
     shape.image_src ? h('p', { class: 'note', text: `Image: ${shape.image_src}` }) : null,
+    shape.image_src ? h('div', { class: 'inline' }, h('button', { text: 'Replace image', onclick: () => pickImage() })) : null,
   ));
   body.append(h('div', { class: 'inspector-section' },
     h('h3', { text: 'Geometry' }),
@@ -1208,9 +1258,9 @@ function renderInspector() {
       const apply = h('button', { text: 'Apply', onclick: () => applyAction({ type: 'set_paragraph', slide: state.current, index: shapeIndex, paragraph: index, text: textarea.value }, { keepSelection: true }) });
       textSection.append(h('div', { class: 'para-row' }, textarea, apply));
     }
-  } else if (shape.text != null) {
-    const textarea = h('textarea', { value: shape.text, rows: 5 });
-    textarea.addEventListener('change', () => applyShapeKeys({ text: textarea.value }));
+  } else if (shape.kind !== 'image' && shape.kind !== 'table') {
+    const textarea = h('textarea', { value: shape.text || '', rows: 5, placeholder: 'Type text for this shape' });
+    textarea.addEventListener('change', () => applyShapeKeys({ text: textarea.value || null }));
     textSection.append(textarea);
   } else {
     textSection.append(h('p', { class: 'note', text: 'No text on this shape.' }));
@@ -1298,6 +1348,109 @@ function resizeTo(partial) {
   applyAction({ type: 'resize', slide: state.current, index: shape.index, ...rect }, { keepSelection: true });
 }
 
+/* ---------- shape library and images ---------- */
+
+const SHAPE_LIBRARY = [
+  { type: 'rect', label: 'Rectangle', w: 2, h: 1.35, icon: '<rect x="4" y="5" width="32" height="18" rx="2"/>' },
+  { type: 'roundRect', label: 'Rounded', w: 2, h: 1.35, icon: '<rect x="4" y="5" width="32" height="18" rx="7"/>' },
+  { type: 'ellipse', label: 'Ellipse', w: 2, h: 1.35, icon: '<ellipse cx="20" cy="14" rx="16" ry="9"/>' },
+  { type: 'triangle', label: 'Triangle', w: 2, h: 1.35, icon: '<polygon points="20,4 36,24 4,24"/>' },
+  { type: 'diamond', label: 'Diamond', w: 2, h: 1.35, icon: '<polygon points="20,3 36,14 20,25 4,14"/>' },
+  { type: 'pentagon', label: 'Pentagon', w: 2, h: 1.35, icon: '<polygon points="20,3 36,12 30,25 10,25 4,12"/>' },
+  { type: 'hexagon', label: 'Hexagon', w: 2, h: 1.35, icon: '<polygon points="11,4 29,4 37,14 29,24 11,24 3,14"/>' },
+  { type: 'star5', label: 'Star', w: 2, h: 1.35, icon: '<polygon points="20,3 23.5,12 33,12 25.5,18 28,27 20,21 12,27 14.5,18 7,12 16.5,12"/>' },
+  { type: 'rightArrow', label: 'Arrow', w: 2.2, h: 1.2, icon: '<polygon points="4,9 24,9 24,4 37,14 24,24 24,19 4,19"/>' },
+  { type: 'downArrow', label: 'Down arrow', w: 1.6, h: 1.8, icon: '<polygon points="15,3 25,3 25,16 35,16 20,26 5,16 15,16"/>' },
+  { type: 'line', label: 'Line', w: 2.5, h: 0.05, icon: '<line x1="5" y1="24" x2="35" y2="4"/>' },
+  { type: 'cloud', label: 'Cloud', w: 2, h: 1.35, icon: '<path d="M11 22a6 6 0 0 1 .6-11.9A8 8 0 0 1 27 9a6 6 0 0 1 1 12.9z"/>' },
+];
+
+const shapeIcon = (path) => '<svg viewBox="0 0 40 28" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">' + path + '</svg>';
+
+let shapePickerBuilt = false;
+function openShapePicker() {
+  if (!state.slide) return;
+  if (!shapePickerBuilt) {
+    const grid = $('#shape-grid');
+    for (const shape of SHAPE_LIBRARY) {
+      const button = h('button', { class: 'shape-choice', type: 'button', title: `Insert ${shape.label}`, onclick: () => insertShape(shape) });
+      button.innerHTML = shapeIcon(shape.icon);
+      button.append(h('span', { text: shape.label }));
+      grid.append(button);
+    }
+    shapePickerBuilt = true;
+  }
+  $('#shape-picker').hidden = false;
+}
+
+function closeShapePicker() {
+  $('#shape-picker').hidden = true;
+}
+
+function insertShape(spec) {
+  closeShapePicker();
+  if (!state.slide) return;
+  const w = Math.max(0.1, Math.min(spec.w, state.slide.width - 0.5));
+  const h = Math.max(0, Math.min(spec.h, state.slide.height - 0.5));
+  applyAction({
+    type: 'add_shape',
+    slide: state.current,
+    shape_type: spec.type,
+    x: Math.max(0.25, (state.slide.width - w) / 2),
+    y: Math.max(0.25, (state.slide.height - h) / 2),
+    w,
+    h,
+  });
+}
+
+function pickImage() {
+  if (!state.slide) return;
+  $('#image-input').click();
+}
+
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      if (comma < 0) reject(new Error('Could not read the image'));
+      else resolve(result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error('Could not read the image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleImageFile(file) {
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) {
+    toast('Images must be 20 MB or smaller.');
+    return;
+  }
+  let data;
+  try {
+    data = await readImage(file);
+  } catch (error) {
+    toast(String(error && error.message ? error.message : error));
+    return;
+  }
+  const selected = selectedShapes();
+  const target = selected.length === 1 && selected[0].kind === 'image' ? selected[0] : null;
+  if (target) {
+    await applyAction({ type: 'replace_image', slide: state.current, index: target.index, name: file.name, data }, { keepSelection: true });
+  } else {
+    await applyAction({ type: 'add_image', slide: state.current, name: file.name, data });
+  }
+}
+
+function normalizeHex(value) {
+  const raw = colorValue(value).trim();
+  if (/^#[0-9a-f]{6}$/i.test(raw)) return raw;
+  if (/^[0-9a-f]{6}$/i.test(raw)) return `#${raw}`;
+  return null;
+}
+
 /* ---------- commands ---------- */
 
 function bulk(command) {
@@ -1315,6 +1468,8 @@ async function command(name) {
     case 'reload': return reloadFromDisk();
     case 'present': return present();
     case 'add-text': return addText();
+    case 'shape': return openShapePicker();
+    case 'image': return pickImage();
     case 'duplicate': return bulk('duplicate');
     case 'delete': return bulk('delete');
     case 'front': return bulk('front');
@@ -1426,6 +1581,16 @@ function wire() {
   $('#toggle-slides').addEventListener('click', () => openSheet('slides-open'));
   $('#toggle-inspector').addEventListener('click', () => openSheet('inspector-open'));
   $('#scrim').addEventListener('click', closeSheets);
+  $('#shape-close').addEventListener('click', closeShapePicker);
+  $('#shape-picker').addEventListener('click', (event) => {
+    if (event.target === $('#shape-picker')) closeShapePicker();
+  });
+  $('#image-input').addEventListener('change', async (event) => {
+    const input = /** @type {HTMLInputElement} */ (event.target);
+    const file = input.files && input.files[0];
+    input.value = '';
+    await handleImageFile(file);
+  });
   $$('[data-cmd]').forEach((button) => {
     button.addEventListener('click', () => command(button.dataset.cmd));
   });
@@ -1453,6 +1618,10 @@ function onKeyDown(event) {
     else if (event.key === 'Home') { event.preventDefault(); state.presentIndex = 0; showPresent(); }
     else if (event.key === 'End') { event.preventDefault(); state.presentIndex = state.project.slides.length - 1; showPresent(); }
     else if (event.key === 'Escape') { event.preventDefault(); stopPresent(); }
+    return;
+  }
+  if (!$('#shape-picker').hidden) {
+    if (event.key === 'Escape') { event.preventDefault(); closeShapePicker(); }
     return;
   }
   if (editing) return;

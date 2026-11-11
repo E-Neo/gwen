@@ -14,6 +14,8 @@
     <button data-cmd="redo" title="Redo">Redo</button>
     <span class="sep"></span>
     <button data-cmd="add-text" title="Add a text box">Text</button>
+    <button data-cmd="shape" title="Insert a shape">Shape</button>
+    <button data-cmd="image" title="Insert or replace an image">Image</button>
     <button data-cmd="duplicate" title="Duplicate selection">Duplicate</button>
     <button data-cmd="delete" title="Delete selection">Delete</button>
     <span class="sep"></span>
@@ -75,6 +77,13 @@
 </main>
 
 <div id="scrim" hidden></div>
+<div id="shape-picker" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-label="Insert shape">
+    <div class="modal-head"><span>Insert shape</span><button id="shape-close" aria-label="Close">×</button></div>
+    <div id="shape-grid" class="shape-grid"></div>
+  </div>
+</div>
+<input id="image-input" type="file" accept="image/png,image/jpeg,image/gif,image/bmp,image/tiff,image/svg+xml" hidden>
 <div id="toast" hidden></div>
 <div id="presentation" hidden>
   <img id="present-image" alt="Presentation slide">

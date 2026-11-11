@@ -116,6 +116,16 @@ re-renders before the UI is updated.
 - Double-click text to edit its markdown in place. Shapes with `paragraphs` are
   edited in the Properties panel.
 - The Properties panel edits geometry, text style, fill and line.
+- Insert text boxes and common shapes (rectangle, rounded rectangle, ellipse,
+  triangle, diamond, pentagon, hexagon, star, arrows, line and cloud) from the
+  Shape palette.
+- Insert an image from the toolbar; with a single image selected, the same
+  button replaces it. Images are copied into `media/` with unique names, and
+  missing dimensions are derived from the image aspect ratio.
+- Select two or more shapes to align their edges or centers, and three or more
+  to distribute them evenly horizontally or vertically.
+- With nothing selected, the Properties panel edits the current slide's
+  background color and speaker notes.
 - Undo/redo and auto-save are built in. There is no Save button.
 - Add text boxes, duplicate/delete shapes, change z-order, and add/duplicate/
   delete/reorder slides.
@@ -131,9 +141,8 @@ re-renders before the UI is updated.
   replacing the current view.
 - Master chrome is read-only. Placeholders can be styled and edited, but their
   geometry stays inherited.
-- This phase edits existing shapes and adds text boxes; the shape library,
-  image insertion, alignment tools and table editing are later phases. Tables
-  can be moved but not resized yet.
+- Tables can be moved but not resized or edited cell by cell yet. Persistent
+  groups and master/layout editing are later phases.
 - `gwen edit` binds localhost only. It is designed for desktop, tablet and
   phone browsers running on the same device as the gwen binary.
 

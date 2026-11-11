@@ -4,13 +4,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use miette::{Result, miette};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value as Json;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::model::Project;
 
 const EMU_PER_IN: f64 = 914_400.0;
+/// Decoded image payloads are capped at 20 MB. The HTTP body limit is larger
+/// to allow for base64 overhead.
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,6 +43,16 @@ pub enum Action {
         paragraph: usize,
         text: String,
     },
+    SetSlide {
+        slide: usize,
+        /// `None` means keep the current background, `Some(None)` clears it,
+        /// and `Some(Some(value))` sets a color string or background table.
+        #[serde(default, deserialize_with = "double_option")]
+        background: Option<Option<Json>>,
+        /// `None` means keep the current notes; an empty string clears them.
+        #[serde(default)]
+        notes: Option<String>,
+    },
     AddText {
         slide: usize,
         x: f64,
@@ -48,6 +61,49 @@ pub enum Action {
         h: f64,
         #[serde(default)]
         text: Option<String>,
+    },
+    AddShape {
+        slide: usize,
+        shape_type: String,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    AddImage {
+        slide: usize,
+        /// Original file name; its extension chooses the media type.
+        name: String,
+        /// Base64 payload, with or without a `data:` prefix.
+        data: String,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
+        #[serde(default)]
+        w: Option<f64>,
+        #[serde(default)]
+        h: Option<f64>,
+    },
+    ReplaceImage {
+        slide: usize,
+        index: usize,
+        name: String,
+        data: String,
+    },
+    Align {
+        slide: usize,
+        indices: Vec<usize>,
+        /// `left`, `center`, `right`, `top`, `middle` or `bottom`.
+        edge: String,
+    },
+    Distribute {
+        slide: usize,
+        indices: Vec<usize>,
+        /// `horizontal` or `vertical`.
+        axis: String,
     },
     DeleteShapes {
         slide: usize,
@@ -209,6 +265,34 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
                 section: None,
             })
         }),
+        Action::SetSlide {
+            slide,
+            background,
+            notes,
+        } => edit_slide_doc(&project, *slide, |doc| {
+            if let Some(background) = background {
+                match background {
+                    None => {
+                        doc.remove("background");
+                    }
+                    Some(value) => {
+                        doc.insert("background", Item::Value(json_to_edit(value)?));
+                    }
+                }
+            }
+            if let Some(notes) = notes {
+                if notes.trim().is_empty() {
+                    doc.remove("notes");
+                } else {
+                    doc.insert("notes", Item::Value(Value::from(notes.as_str())));
+                }
+            }
+            Ok(Outcome {
+                slide: Some(*slide),
+                select: Vec::new(),
+                section: None,
+            })
+        }),
         Action::SetParagraph {
             slide,
             index,
@@ -239,27 +323,149 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             w,
             h,
             text,
-        } => edit_shapes(dir, &project, *slide, |shapes| {
-            let mut table = Table::new();
-            table.insert("type", Item::Value(Value::from("text")));
-            set_coord(&mut table, "x", *x, 13.333)?;
-            set_coord(&mut table, "y", *y, 7.5)?;
-            set_coord(&mut table, "w", *w, 13.333)?;
-            set_coord(&mut table, "h", *h, 7.5)?;
-            table.insert(
-                "text",
-                Item::Value(Value::from(
-                    text.clone().unwrap_or_else(|| "New text".into()),
-                )),
-            );
-            let index = shapes.len();
-            shapes.push(table);
-            Ok(Outcome {
-                slide: Some(*slide),
-                select: vec![index],
-                section: None,
+        } => {
+            let (width, height) = slide_size(&project)?;
+            edit_shapes(dir, &project, *slide, |shapes| {
+                let mut table = Table::new();
+                table.insert("type", Item::Value(Value::from("text")));
+                set_coord(&mut table, "x", *x, width)?;
+                set_coord(&mut table, "y", *y, height)?;
+                set_coord(&mut table, "w", *w, width)?;
+                set_coord(&mut table, "h", *h, height)?;
+                table.insert(
+                    "text",
+                    Item::Value(Value::from(
+                        text.clone().unwrap_or_else(|| "New text".into()),
+                    )),
+                );
+                let index = shapes.len();
+                shapes.push(table);
+                Ok(Outcome {
+                    slide: Some(*slide),
+                    select: vec![index],
+                    section: None,
+                })
             })
-        }),
+        }
+        Action::AddShape {
+            slide,
+            shape_type,
+            x,
+            y,
+            w,
+            h,
+            text,
+        } => {
+            let preset = crate::opts::canonical_preset(shape_type)
+                .ok_or_else(|| miette!("`{shape_type}` is not a shape preset"))?;
+            if *w <= 0.0 || *h < 0.0 {
+                return Err(miette!(
+                    "width must be positive and height must not be negative"
+                ));
+            }
+            let (width, height) = slide_size(&project)?;
+            edit_shapes(dir, &project, *slide, |shapes| {
+                let mut table = Table::new();
+                table.insert("type", Item::Value(Value::from(preset)));
+                set_coord(&mut table, "x", x.max(0.0), width)?;
+                set_coord(&mut table, "y", y.max(0.0), height)?;
+                set_coord(&mut table, "w", *w, width)?;
+                set_coord(&mut table, "h", *h, height)?;
+                if let Some(text) = text.as_deref().filter(|text| !text.trim().is_empty()) {
+                    table.insert("text", Item::Value(Value::from(text)));
+                }
+                let index = shapes.len();
+                shapes.push(table);
+                Ok(Outcome {
+                    slide: Some(*slide),
+                    select: vec![index],
+                    section: None,
+                })
+            })
+        }
+        Action::AddImage {
+            slide,
+            name,
+            data,
+            x,
+            y,
+            w,
+            h,
+        } => {
+            if slide_files(&project).get(*slide).is_none() {
+                return Err(miette!("slide {slide} does not exist"));
+            }
+            if w.is_some_and(|w| w <= 0.0) || h.is_some_and(|h| h <= 0.0) {
+                return Err(miette!("image width and height must be positive"));
+            }
+            let (src, aspect) = store_image(dir, name, data)?;
+            let (slide_w, slide_h) = slide_size(&project)?;
+            let (w, h) = match (*w, *h) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, w / aspect),
+                (None, Some(h)) => (h * aspect, h),
+                (None, None) => {
+                    let w = (slide_w * 0.45).clamp(1.0, 6.0);
+                    (w, w / aspect)
+                }
+            };
+            if w <= 0.0 || h <= 0.0 {
+                return Err(miette!("image width and height must be positive"));
+            }
+            let x = x.unwrap_or_else(|| ((slide_w - w) / 2.0).max(0.0));
+            let y = y.unwrap_or_else(|| ((slide_h - h) / 2.0).max(0.0));
+            edit_shapes(dir, &project, *slide, |shapes| {
+                let mut table = Table::new();
+                table.insert("type", Item::Value(Value::from("image")));
+                table.insert("src", Item::Value(Value::from(src.as_str())));
+                set_coord(&mut table, "x", x.max(0.0), slide_w)?;
+                set_coord(&mut table, "y", y.max(0.0), slide_h)?;
+                set_coord(&mut table, "w", w, slide_w)?;
+                set_coord(&mut table, "h", h, slide_h)?;
+                let index = shapes.len();
+                shapes.push(table);
+                Ok(Outcome {
+                    slide: Some(*slide),
+                    select: vec![index],
+                    section: None,
+                })
+            })
+        }
+        Action::ReplaceImage {
+            slide,
+            index,
+            name,
+            data,
+        } => {
+            if slide_files(&project).get(*slide).is_none() {
+                return Err(miette!("slide {slide} does not exist"));
+            }
+            let (src, _) = store_image(dir, name, data)?;
+            edit_shapes(dir, &project, *slide, |shapes| {
+                let shape = shapes
+                    .get_mut(*index)
+                    .ok_or_else(|| miette!("shape {index} does not exist"))?;
+                if shape.get("type").and_then(Item::as_str) != Some("image") {
+                    return Err(miette!("shape {index} is not an image"));
+                }
+                shape.insert("src", Item::Value(Value::from(src.as_str())));
+                Ok(Outcome {
+                    slide: Some(*slide),
+                    select: vec![*index],
+                    section: None,
+                })
+            })
+        }
+        Action::Align {
+            slide,
+            indices,
+            edge,
+        } => align_shapes(dir, &project, *slide, indices, edge),
+        Action::Distribute {
+            slide,
+            indices,
+            axis,
+        } => distribute_shapes(dir, &project, *slide, indices, axis),
         Action::DeleteShapes { slide, indices } => edit_shapes(dir, &project, *slide, |shapes| {
             let mut sorted = indices.clone();
             sorted.sort_unstable();
@@ -684,6 +890,264 @@ where
         .map_err(|e| miette!("cannot write `{}`: {e}", path.display()))?;
     let _ = dir;
     Ok(outcome)
+}
+
+fn edit_slide_doc<F>(project: &Project, slide: usize, f: F) -> Result<Outcome>
+where
+    F: FnOnce(&mut DocumentMut) -> Result<Outcome>,
+{
+    let file = slide_files(project)
+        .get(slide)
+        .ok_or_else(|| miette!("slide {slide} does not exist"))?
+        .1
+        .clone();
+    let path = project.slide_path(&file);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| miette!("cannot read `{}`: {e}", path.display()))?;
+    let mut doc: DocumentMut = raw
+        .parse()
+        .map_err(|e| miette!("cannot parse `{}`: {e}", path.display()))?;
+    let outcome = f(&mut doc)?;
+    std::fs::write(&path, doc.to_string())
+        .map_err(|e| miette!("cannot write `{}`: {e}", path.display()))?;
+    Ok(outcome)
+}
+
+#[derive(Clone, Copy)]
+struct Bounds {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+fn shape_bounds(shapes: &ArrayOfTables, index: usize, width: f64, height: f64) -> Result<Bounds> {
+    let shape = shapes
+        .get(index)
+        .ok_or_else(|| miette!("shape {index} does not exist"))?;
+    if shape.get("placeholder").is_some() {
+        return Err(miette!(
+            "placeholder shapes get their geometry from the master and cannot be moved"
+        ));
+    }
+    let x = coord_inches(shape.get("x"), width)
+        .ok_or_else(|| miette!("shape {index} needs an explicit x coordinate"))?;
+    let y = coord_inches(shape.get("y"), height)
+        .ok_or_else(|| miette!("shape {index} needs an explicit y coordinate"))?;
+    let w = coord_inches(shape.get("w"), width)
+        .ok_or_else(|| miette!("shape {index} needs an explicit width"))?;
+    let h = coord_inches(shape.get("h"), height)
+        .ok_or_else(|| miette!("shape {index} needs an explicit height"))?;
+    Ok(Bounds { x, y, w, h })
+}
+
+fn align_shapes(
+    dir: &Path,
+    project: &Project,
+    slide: usize,
+    indices: &[usize],
+    edge: &str,
+) -> Result<Outcome> {
+    let (width, height) = slide_size(project)?;
+    let mut chosen: Vec<usize> = indices.to_vec();
+    chosen.sort_unstable();
+    chosen.dedup();
+    if chosen.len() < 2 {
+        return Err(miette!("select at least two shapes to align"));
+    }
+    edit_shapes(dir, project, slide, |shapes| {
+        let rects = chosen
+            .iter()
+            .map(|&index| shape_bounds(shapes, index, width, height).map(|bounds| (index, bounds)))
+            .collect::<Result<Vec<_>>>()?;
+        let left = rects.iter().fold(f64::INFINITY, |acc, (_, b)| acc.min(b.x));
+        let right = rects
+            .iter()
+            .fold(f64::NEG_INFINITY, |acc, (_, b)| acc.max(b.x + b.w));
+        let top = rects.iter().fold(f64::INFINITY, |acc, (_, b)| acc.min(b.y));
+        let bottom = rects
+            .iter()
+            .fold(f64::NEG_INFINITY, |acc, (_, b)| acc.max(b.y + b.h));
+        let center_x = (left + right) / 2.0;
+        let center_y = (top + bottom) / 2.0;
+        for &(index, bounds) in &rects {
+            let shape = shapes
+                .get_mut(index)
+                .ok_or_else(|| miette!("shape {index} does not exist"))?;
+            match edge {
+                "left" => set_coord(shape, "x", left, width)?,
+                "center" => set_coord(shape, "x", center_x - bounds.w / 2.0, width)?,
+                "right" => set_coord(shape, "x", right - bounds.w, width)?,
+                "top" => set_coord(shape, "y", top, height)?,
+                "middle" => set_coord(shape, "y", center_y - bounds.h / 2.0, height)?,
+                "bottom" => set_coord(shape, "y", bottom - bounds.h, height)?,
+                other => {
+                    return Err(miette!(
+                        "unknown align edge `{other}`; use left, center, right, top, middle or bottom"
+                    ));
+                }
+            }
+        }
+        Ok(Outcome {
+            slide: Some(slide),
+            select: chosen,
+            section: None,
+        })
+    })
+}
+
+fn distribute_shapes(
+    dir: &Path,
+    project: &Project,
+    slide: usize,
+    indices: &[usize],
+    axis: &str,
+) -> Result<Outcome> {
+    let (width, height) = slide_size(project)?;
+    let mut chosen: Vec<usize> = indices.to_vec();
+    chosen.sort_unstable();
+    chosen.dedup();
+    if chosen.len() < 3 {
+        return Err(miette!(
+            "select at least three shapes to distribute them evenly"
+        ));
+    }
+    if axis != "horizontal" && axis != "vertical" {
+        return Err(miette!(
+            "unknown distribute axis `{axis}`; use horizontal or vertical"
+        ));
+    }
+    edit_shapes(dir, project, slide, |shapes| {
+        let mut rects = chosen
+            .iter()
+            .map(|&index| shape_bounds(shapes, index, width, height).map(|bounds| (index, bounds)))
+            .collect::<Result<Vec<_>>>()?;
+        let horizontal = axis == "horizontal";
+        if horizontal {
+            rects.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+        } else {
+            rects.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
+        }
+        let first = rects
+            .first()
+            .map(|(_, b)| *b)
+            .ok_or_else(|| miette!("no shapes to distribute"))?;
+        let last = rects
+            .last()
+            .map(|(_, b)| *b)
+            .ok_or_else(|| miette!("no shapes to distribute"))?;
+        let span = if horizontal {
+            (last.x + last.w) - first.x
+        } else {
+            (last.y + last.h) - first.y
+        };
+        let total: f64 = rects
+            .iter()
+            .map(|(_, b)| if horizontal { b.w } else { b.h })
+            .sum();
+        let gap = (span - total) / (rects.len() - 1) as f64;
+        let mut cursor = if horizontal {
+            first.x + first.w + gap
+        } else {
+            first.y + first.h + gap
+        };
+        for (position, &(index, bounds)) in rects.iter().enumerate() {
+            if position == 0 || position == rects.len() - 1 {
+                continue;
+            }
+            let shape = shapes
+                .get_mut(index)
+                .ok_or_else(|| miette!("shape {index} does not exist"))?;
+            if horizontal {
+                set_coord(shape, "x", cursor, width)?;
+                cursor += bounds.w + gap;
+            } else {
+                set_coord(shape, "y", cursor, height)?;
+                cursor += bounds.h + gap;
+            }
+        }
+        Ok(Outcome {
+            slide: Some(slide),
+            select: chosen,
+            section: None,
+        })
+    })
+}
+
+fn store_image(dir: &Path, name: &str, data: &str) -> Result<(String, f64)> {
+    let clean_name = Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| miette!("`{name}` is not a valid image file name"))?;
+    crate::media::mime_for(clean_name).map_err(|e| miette!("{e}"))?;
+    let payload = data.split_once(',').map(|(_, bytes)| bytes).unwrap_or(data);
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .map_err(|e| miette!("invalid image data: {e}"))?;
+    if bytes.is_empty() {
+        return Err(miette!("the image is empty"));
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(miette!("the image is too large (maximum 20 MB)"));
+    }
+    let media_dir = dir.join("media");
+    std::fs::create_dir_all(&media_dir)
+        .map_err(|e| miette!("cannot create `{}`: {e}", media_dir.display()))?;
+    let file = unique_media_name(&media_dir, clean_name);
+    let path = media_dir.join(&file);
+    std::fs::write(&path, &bytes).map_err(|e| miette!("cannot write `{}`: {e}", path.display()))?;
+    let aspect = match crate::media::image_aspect(&path) {
+        Ok(aspect) => aspect,
+        Err(err) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(miette!("{err}"));
+        }
+    };
+    Ok((format!("media/{file}"), aspect))
+}
+
+fn unique_media_name(dir: &Path, name: &str) -> String {
+    let path = Path::new(name);
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("image");
+    let sane: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let sane = sane.trim_matches('-');
+    let base = if sane.is_empty() { "image" } else { sane };
+    for n in 1.. {
+        let name = if n == 1 {
+            format!("{base}.{ext}")
+        } else {
+            format!("{base}-{n}.{ext}")
+        };
+        if !dir.join(&name).exists() {
+            return name;
+        }
+    }
+    unreachable!()
+}
+
+fn double_option<'de, D>(deserializer: D) -> std::result::Result<Option<Option<Json>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Json>::deserialize(deserializer).map(Some)
 }
 
 fn edit_main<F>(dir: &Path, f: F) -> Result<()>

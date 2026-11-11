@@ -314,6 +314,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .field > span { font-size: 11px; color: var(--muted); }
 .field.wide { grid-column: 1 / -1; }
 .inline { display: flex; align-items: center; gap: .35rem; }
+.inline.wrap { flex-wrap: wrap; }
 .inline input[type="checkbox"] { width: auto; min-height: auto; }
 .note { color: var(--muted); font-size: 12px; margin: .35rem 0 0; }
 .para-list { display: flex; flex-direction: column; gap: .4rem; }
@@ -349,6 +350,60 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
   background: rgba(18, 21, 27, .35);
   z-index: 25;
 }
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(18, 21, 27, .38);
+}
+.modal-card {
+  width: min(520px, 94vw);
+  max-height: min(82dvh, 640px);
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: .9rem;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  font-weight: 650;
+  margin-bottom: .7rem;
+}
+.modal-head button { min-width: 34px; padding: .1rem .45rem; font-size: 18px; line-height: 1; }
+.shape-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: .5rem;
+}
+.shape-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .3rem;
+  min-height: 82px;
+  padding: .55rem .35rem;
+}
+.shape-choice svg { width: 44px; height: 30px; color: var(--accent); }
+.shape-choice span { font-size: 12px; color: var(--muted); }
+.color-row { display: flex; align-items: center; gap: .4rem; }
+.color-row input[type="color"] {
+  width: 46px;
+  min-width: 46px;
+  height: 34px;
+  min-height: 34px;
+  padding: .1rem;
+  cursor: pointer;
+}
+.color-row .grow { flex: 1; min-width: 0; }
 #toast {
   position: fixed;
   left: 50%;

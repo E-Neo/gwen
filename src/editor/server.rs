@@ -15,7 +15,9 @@ use super::{Action, Editor};
 const HTML: &str = include_str!("assets/app.html");
 const CSS: &str = include_str!("assets/app.css");
 const JS: &str = include_str!("assets/app.js");
-const MAX_BODY: usize = 8 * 1024 * 1024;
+// Image uploads arrive as base64 JSON, which is about a third larger than the
+// decoded file. The action handler enforces the 20 MB decoded limit.
+const MAX_BODY: usize = 32 * 1024 * 1024;
 
 struct Request {
     method: String,
@@ -333,6 +335,36 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(response.contains("application/json"), "{response}");
         assert!(response.contains("\"slides\""), "{response}");
+    }
+
+    #[test]
+    fn action_endpoint_applies_shape_actions() {
+        let dir = project();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let editor = Arc::new(Mutex::new(Editor::open(&dir).unwrap()));
+        let worker = editor.clone();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle(stream, &worker).unwrap();
+        });
+        let body =
+            r#"{"type":"add_shape","slide":0,"shape_type":"ellipse","x":2,"y":2,"w":1,"h":1}"#;
+        let request = format!(
+            "POST /api/action HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("\"selection\":[1]"), "{response}");
+        assert!(response.contains("\"slides\""), "{response}");
+        let slide = std::fs::read_to_string(dir.join("slides").join("a.toml")).unwrap();
+        assert!(slide.contains("type = \"ellipse\""), "{slide}");
     }
 }
 
