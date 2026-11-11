@@ -43,9 +43,10 @@ pub fn render(scene: &Scene, fonts: &Fonts) -> String {
         }
         Background::Image { data, transparency } => {
             body.push_str(&format!(
-                "<image x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{}\"{}/>",
+                "<image x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{}\" xlink:href=\"{}\"{}/>",
                 num(w),
                 num(h),
+                escape_attr(data),
                 escape_attr(data),
                 opacity_attr("opacity", 1.0 - transparency / 100.0)
             ));
@@ -57,7 +58,7 @@ pub fn render(scene: &Scene, fonts: &Fonts) -> String {
     }
 
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{wpt}pt\" height=\"{hpt}pt\" viewBox=\"0 0 {wpt} {hpt}\">\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{wpt}pt\" height=\"{hpt}pt\" viewBox=\"0 0 {wpt} {hpt}\">\
          <defs>{defs}</defs>{body}</svg>",
         wpt = num(w),
         hpt = num(h),
@@ -409,7 +410,7 @@ fn paint_image(item: &Item, out: &mut String, defs: &mut Defs) {
     defs.push(&clip);
     let _ = write!(
         out,
-        "<g clip-path=\"url(#{clip_id})\"{}{}><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"{}\" href=\"{}\"/></g>",
+        "<g clip-path=\"url(#{clip_id})\"{}{}><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"{}\" href=\"{}\" xlink:href=\"{}\"/></g>",
         filter,
         opacity_attr("opacity", 1.0 - transparency / 100.0),
         num(image_rect.x * PT_PER_IN),
@@ -417,6 +418,7 @@ fn paint_image(item: &Item, out: &mut String, defs: &mut Defs) {
         num(image_rect.w * PT_PER_IN),
         num(image_rect.h * PT_PER_IN),
         preserve,
+        escape_attr(data),
         escape_attr(data)
     );
 }

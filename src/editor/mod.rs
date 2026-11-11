@@ -14,7 +14,7 @@ use miette::{Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::defaults;
+use crate::defaults::{self, Defaults};
 use crate::fonts::Fonts;
 use crate::model::{Project, Slide};
 use crate::render;
@@ -34,6 +34,8 @@ pub struct Editor {
     history: Vec<Snapshot>,
     cursor: usize,
     known: BTreeMap<PathBuf, Vec<u8>>,
+    fonts: Fonts,
+    defaults: std::sync::Arc<defaults::Defaults>,
 }
 
 #[derive(Clone, Default)]
@@ -62,6 +64,8 @@ struct SlideView {
     file: String,
     stem: String,
     section: usize,
+    width: f64,
+    height: f64,
     svg: String,
     shapes: Vec<ShapeView>,
 }
@@ -98,7 +102,13 @@ impl Editor {
     /// Open a project, render it, and prepare the initial history snapshot.
     pub fn open(dir: &Path) -> Result<Self> {
         let dir = dir.to_path_buf();
-        let view = build_view(&dir)?;
+        let project = Project::load(&dir)?;
+        let fonts = Fonts::load(&dir);
+        let defaults = defaults::get(
+            &project.main.theme.major_font,
+            &project.main.theme.minor_font,
+        )?;
+        let view = build_view(&dir, &project, &fonts, &defaults)?;
         let known = read_known_files(&dir)?;
         let mut editor = Editor {
             dir,
@@ -107,6 +117,8 @@ impl Editor {
             history: Vec::new(),
             cursor: 0,
             known,
+            fonts,
+            defaults,
         };
         let snapshot = editor.snapshot()?;
         editor.history.push(snapshot);
@@ -172,7 +184,26 @@ impl Editor {
                 return Err(err);
             }
         };
-        if let Err(err) = self.reload() {
+        let single_slide = matches!(
+            action,
+            Action::Move { .. }
+                | Action::Resize { .. }
+                | Action::SetShape { .. }
+                | Action::SetParagraph { .. }
+                | Action::AddText { .. }
+                | Action::DeleteShapes { .. }
+                | Action::DuplicateShapes { .. }
+                | Action::ZOrder { .. }
+        );
+        let refreshed = if single_slide {
+            match outcome.slide {
+                Some(index) => self.refresh_slide(index),
+                None => self.reload().map(|_| ()),
+            }
+        } else {
+            self.reload().map(|_| ())
+        };
+        if let Err(err) = refreshed {
             self.restore(&before)?;
             let _ = self.reload();
             return Err(err);
@@ -205,8 +236,19 @@ impl Editor {
         Ok(self.action_response(actions::Outcome::default()))
     }
 
+    /// Read-only check used by the browser auto-reload poll. Does not rebuild
+    /// the deck or touch history.
+    pub fn disk_status(&self) -> Result<Value> {
+        let now = read_known_files(&self.dir)?;
+        Ok(json!({
+            "revision": self.revision,
+            "changed": now != self.known,
+        }))
+    }
+
     pub fn reload(&mut self) -> Result<Value> {
-        self.view = build_view(&self.dir)?;
+        let project = Project::load(&self.dir)?;
+        self.view = build_view(&self.dir, &project, &self.fonts, &self.defaults)?;
         self.known = read_known_files(&self.dir)?;
         self.revision += 1;
         Ok(self.project_json())
@@ -214,6 +256,12 @@ impl Editor {
 
     /// Discard history and reload from disk after an external edit.
     pub fn reload_external(&mut self) -> Result<Value> {
+        let project = Project::load(&self.dir)?;
+        self.fonts = Fonts::load(&self.dir);
+        self.defaults = defaults::get(
+            &project.main.theme.major_font,
+            &project.main.theme.minor_font,
+        )?;
         self.reload()?;
         let snapshot = self.snapshot()?;
         self.history.clear();
@@ -222,14 +270,84 @@ impl Editor {
         Ok(self.project_json())
     }
 
+    /// Rebuild only one slide after a shape-level action. Section actions and
+    /// slide structure changes still go through `reload`.
+    fn refresh_slide(&mut self, index: usize) -> Result<()> {
+        let project = Project::load(&self.dir)?;
+        let spec_text = render::spec_json(&project)?;
+        let spec: Value = serde_json::from_str(&spec_text)
+            .map_err(|e| miette!("the built spec is invalid JSON: {e}"))?;
+        let slide_value = spec
+            .get("sections")
+            .and_then(Value::as_array)
+            .and_then(|sections| {
+                sections
+                    .iter()
+                    .flat_map(|section| {
+                        section
+                            .get("slides")
+                            .and_then(Value::as_array)
+                            .map(|slides| slides.iter())
+                            .into_iter()
+                            .flatten()
+                    })
+                    .nth(index)
+            })
+            .cloned()
+            .ok_or_else(|| miette!("slide {index} was not rendered"))?;
+        let file = slide_value
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let source = load_slide(&project, &file)?;
+        let width = spec.get("width").and_then(Value::as_f64).unwrap_or(13.333);
+        let height = spec.get("height").and_then(Value::as_f64).unwrap_or(7.5);
+        let mut mini = spec.clone();
+        mini["sections"] = json!([{ "title": "", "slides": [slide_value.clone()] }]);
+        let scenes = scene::build(&mini, &self.defaults, &self.dir, &self.fonts)
+            .map_err(|e| miette!("{e}"))?;
+        let scene = scenes
+            .first()
+            .ok_or_else(|| miette!("slide {index} was not rendered"))?;
+        let svg = svg::render(scene, &self.fonts);
+        let shapes = shape_views(&slide_value, &source, scene);
+        let stem = Path::new(&file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("slide-{}", index + 1));
+        let section = self
+            .view
+            .slides
+            .get(index)
+            .map(|slide| slide.section)
+            .unwrap_or(0);
+        let Some(slot) = self.view.slides.get_mut(index) else {
+            return Err(miette!("slide {index} does not exist"));
+        };
+        *slot = SlideView {
+            index,
+            file,
+            stem,
+            section,
+            width,
+            height,
+            svg,
+            shapes,
+        };
+        self.known = read_known_files(&self.dir)?;
+        self.revision += 1;
+        Ok(())
+    }
+
     fn action_response(&self, outcome: actions::Outcome) -> Value {
         let slide = outcome
             .slide
-            .unwrap_or_default()
-            .min(self.view.slides.len().saturating_sub(1));
+            .map(|slide| slide.min(self.view.slides.len().saturating_sub(1)));
         json!({
             "revision": self.revision,
             "slide": slide,
+            "section": outcome.section,
             "selection": outcome.select,
             "project": self.project_json(),
         })
@@ -347,17 +465,16 @@ fn read_known_files(dir: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     Ok(out)
 }
 
-fn build_view(dir: &Path) -> Result<DeckView> {
-    let project = Project::load(dir)?;
-    let spec_text = render::spec_json(&project)?;
+fn build_view(
+    dir: &Path,
+    project: &Project,
+    fonts: &Fonts,
+    defaults: &Defaults,
+) -> Result<DeckView> {
+    let spec_text = render::spec_json(project)?;
     let spec: Value = serde_json::from_str(&spec_text)
         .map_err(|e| miette!("the built spec is invalid JSON: {e}"))?;
-    let fonts = Fonts::load(dir);
-    let defaults = defaults::get(
-        &project.main.theme.major_font,
-        &project.main.theme.minor_font,
-    )?;
-    let scenes = scene::build(&spec, &defaults, dir, &fonts).map_err(|e| miette!("{e}"))?;
+    let scenes = scene::build(&spec, defaults, dir, fonts).map_err(|e| miette!("{e}"))?;
 
     let width = spec.get("width").and_then(Value::as_f64).unwrap_or(13.333);
     let height = spec.get("height").and_then(Value::as_f64).unwrap_or(7.5);
@@ -393,8 +510,8 @@ fn build_view(dir: &Path) -> Result<DeckView> {
             let scene = scenes
                 .get(index)
                 .ok_or_else(|| miette!("slide {index} was not rendered"))?;
-            let svg = svg::render(scene, &fonts);
-            let source = load_slide(&project, &file)?;
+            let svg = svg::render(scene, fonts);
+            let source = load_slide(project, &file)?;
             let shapes = shape_views(slide, &source, scene);
             let stem = Path::new(&file)
                 .file_stem()
@@ -405,6 +522,8 @@ fn build_view(dir: &Path) -> Result<DeckView> {
                 file,
                 stem,
                 section: section_index,
+                width,
+                height,
                 svg,
                 shapes,
             });
@@ -670,7 +789,12 @@ mod tests {
     fn slide_structure_actions_work() {
         let dir = project("slides");
         let mut editor = Editor::open(&dir).unwrap();
-        editor.apply(&Action::AddSlide { after: 0 }).unwrap();
+        editor
+            .apply(&Action::AddSlide {
+                after: Some(0),
+                section: None,
+            })
+            .unwrap();
         assert_eq!(editor.project_json()["slides"].as_array().unwrap().len(), 3);
         let added = editor.project_json()["slides"][1]["file"]
             .as_str()
@@ -679,11 +803,41 @@ mod tests {
         assert!(dir.join("slides").join(&added).is_file());
         editor.apply(&Action::DuplicateSlide { slide: 0 }).unwrap();
         assert_eq!(editor.project_json()["slides"].as_array().unwrap().len(), 4);
-        editor.apply(&Action::MoveSlide { from: 0, to: 2 }).unwrap();
+        editor
+            .apply(&Action::MoveSlide {
+                from: 0,
+                to: 2,
+                section: None,
+            })
+            .unwrap();
         editor.apply(&Action::DeleteSlide { slide: 1 }).unwrap();
         assert_eq!(editor.project_json()["slides"].as_array().unwrap().len(), 3);
         editor.undo().unwrap();
         assert_eq!(editor.project_json()["slides"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn disk_status_detects_external_changes() {
+        let dir = project("disk-status");
+        let mut editor = Editor::open(&dir).unwrap();
+        assert_eq!(
+            editor.disk_status().unwrap()["changed"].as_bool(),
+            Some(false)
+        );
+        std::fs::write(
+            dir.join("slides").join("a.toml"),
+            "master = \"base\"\n\n[[shapes]]\ntype = \"text\"\ntext = \"changed\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            editor.disk_status().unwrap()["changed"].as_bool(),
+            Some(true)
+        );
+        editor.reload_external().unwrap();
+        assert_eq!(
+            editor.disk_status().unwrap()["changed"].as_bool(),
+            Some(false)
+        );
     }
 
     #[test]
@@ -746,6 +900,115 @@ mod tests {
     }
 
     #[test]
+    fn section_actions_add_rename_move_and_delete() {
+        let dir = project("sections");
+        let mut editor = Editor::open(&dir).unwrap();
+
+        editor
+            .apply(&Action::AddSection {
+                after: Some(0),
+                title: Some("Second".into()),
+            })
+            .unwrap();
+        let project = editor.project_json();
+        let sections = project["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 2, "{sections:?}");
+        assert_eq!(sections[1]["title"].as_str(), Some("Second"));
+        assert!(sections[1]["slides"].as_array().unwrap().is_empty());
+
+        editor
+            .apply(&Action::RenameSection {
+                section: 1,
+                title: "Renamed".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            editor.project_json()["sections"][1]["title"].as_str(),
+            Some("Renamed")
+        );
+
+        // Add a slide into the empty section.
+        editor
+            .apply(&Action::AddSlide {
+                after: None,
+                section: Some(1),
+            })
+            .unwrap();
+        assert_eq!(
+            editor.project_json()["sections"][1]["slides"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Move a slide from section 0 into section 1.
+        editor
+            .apply(&Action::MoveSlide {
+                from: 0,
+                to: 0,
+                section: Some(1),
+            })
+            .unwrap();
+        let project = editor.project_json();
+        assert_eq!(
+            project["sections"][0]["slides"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            project["sections"][1]["slides"].as_array().unwrap().len(),
+            2
+        );
+
+        // Deleting a section keeps its remaining slides by moving them into
+        // the surviving section.
+        editor.apply(&Action::DeleteSection { section: 0 }).unwrap();
+        let project = editor.project_json();
+        assert_eq!(project["sections"].as_array().unwrap().len(), 1);
+        assert_eq!(project["slides"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            project["sections"][0]["slides"].as_array().unwrap().len(),
+            3
+        );
+
+        editor.undo().unwrap();
+        assert_eq!(
+            editor.project_json()["sections"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn section_drag_targets_are_addressable_after_reorder() {
+        let dir = project("sections-drag");
+        let mut editor = Editor::open(&dir).unwrap();
+        editor
+            .apply(&Action::AddSection {
+                after: Some(0),
+                title: Some("Empty".into()),
+            })
+            .unwrap();
+        // Moving the first slide of section 0 to the start of the empty
+        // section must work even though that section has no slide index.
+        editor
+            .apply(&Action::MoveSlide {
+                from: 0,
+                to: 0,
+                section: Some(1),
+            })
+            .unwrap();
+        let project = editor.project_json();
+        assert_eq!(
+            project["sections"][0]["slides"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            project["sections"][1]["slides"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn slide_metadata_has_source_bounds() {
         let dir = project("metadata");
         let editor = Editor::open(&dir).unwrap();
@@ -753,6 +1016,8 @@ mod tests {
         let shapes = value["slide"]["shapes"].as_array().unwrap();
         assert_eq!(shapes.len(), 2);
         assert_eq!(shapes[0]["index"].as_u64(), Some(0));
+        assert!((value["slide"]["width"].as_f64().unwrap() - 10.0).abs() < 1e-6);
+        assert!((value["slide"]["height"].as_f64().unwrap() - 7.5).abs() < 1e-6);
         assert_eq!(shapes[0]["text"].as_str(), Some("hello"));
         assert!((shapes[0]["x"].as_f64().unwrap() - 1.0).abs() < 1e-6);
         assert!((shapes[0]["y"].as_f64().unwrap() - 1.25).abs() < 1e-6);

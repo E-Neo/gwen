@@ -110,13 +110,62 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .panel-tools { display: flex; gap: .25rem; }
 .panel-tools button { min-height: 26px; padding: .1rem .45rem; }
 #slide-list { padding: .55rem; display: flex; flex-direction: column; gap: .55rem; }
-.section-label {
-  font-size: 11px;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin: .35rem .15rem 0;
+.section-block { border-radius: 8px; padding: .2rem .15rem .35rem; }
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: .25rem;
+  padding: .1rem .1rem .2rem;
 }
+.section-title-input {
+  min-width: 0;
+  flex: 1;
+  min-height: 26px;
+  padding: .18rem .3rem;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .02em;
+  color: var(--muted);
+}
+.section-title-input:hover { border-color: var(--line); }
+.section-title-input:focus {
+  border-color: var(--accent);
+  background: #fff;
+  color: var(--ink);
+}
+.section-tools { display: flex; gap: .15rem; }
+.section-tools button {
+  min-height: 24px;
+  min-width: 24px;
+  padding: .05rem .3rem;
+  line-height: 1;
+}
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+  border: 1px dashed transparent;
+  border-radius: 7px;
+  padding: .1rem;
+  min-height: .5rem;
+}
+.section-body.drop-into {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.section-empty {
+  padding: .8rem .5rem;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.section-add-row { padding: .5rem .15rem .8rem; }
+.section-add-row button { width: 100%; }
 .thumb {
   display: block;
   width: 100%;
@@ -129,6 +178,16 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 }
 .thumb.active { border-color: var(--accent); background: var(--accent-soft); }
 .thumb-row { display: flex; gap: .4rem; align-items: center; }
+.thumb-frame {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.thumb-frame svg { display: block; width: 100%; height: 100%; }
 .thumb img {
   display: block;
   width: 100%;
@@ -140,8 +199,19 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 }
 .thumb-meta { display: flex; align-items: center; justify-content: space-between; gap: .3rem; margin-top: .25rem; }
 .thumb-name { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thumb-move { display: flex; gap: .1rem; }
-.thumb-move button { min-height: 22px; padding: 0 .3rem; font-size: 12px; }
+.thumb-grip {
+  color: var(--muted);
+  cursor: grab;
+  padding: .05rem .35rem;
+  border-radius: 4px;
+  touch-action: none;
+  user-select: none;
+}
+.thumb-grip:active { cursor: grabbing; }
+.thumb-grip:hover { background: var(--accent-soft); color: var(--accent); }
+.thumb.dragging { opacity: .45; }
+.thumb.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+.thumb.drop-after { box-shadow: 0 3px 0 var(--accent); }
 .slide-help { padding: .4rem .8rem 1rem; color: var(--muted); font-size: 11px; }
 #stage-wrap {
   position: relative;
@@ -168,6 +238,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
   user-select: none;
 }
 #slide-image { display: block; width: 100%; height: 100%; pointer-events: none; }
+#slide-image > svg { display: block; width: 100%; height: 100%; }
 #shape-layer, #guide-layer { position: absolute; inset: 0; }
 #shape-layer { pointer-events: none; }
 .shape-box {
@@ -304,6 +375,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
   justify-content: center;
 }
 #presentation img { max-width: 100vw; max-height: 100vh; width: 100%; height: 100%; object-fit: contain; }
+#present-image { width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
+#present-image > svg { width: 100%; height: 100%; display: block; }
 .present-hud {
   position: absolute;
   left: 50%;

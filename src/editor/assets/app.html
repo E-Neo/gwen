@@ -19,8 +19,7 @@
     <span class="sep"></span>
     <button data-cmd="front" title="Bring to front">Front</button>
     <button data-cmd="back" title="Send to back">Back</button>
-    <button data-cmd="multi" title="Toggle multi-select">Multi</button>
-    <button data-cmd="snap" title="Toggle snapping">Snap</button>
+    <button data-cmd="multi" title="Select multiple shapes: tap shapes to add or remove them" aria-pressed="false">Multi-select</button>
     <span class="sep"></span>
     <button data-cmd="present" title="Present (F5)">Present</button>
     <button data-cmd="reload" title="Reload from disk">Reload</button>
@@ -43,12 +42,12 @@
       </div>
     </div>
     <div id="slide-list"></div>
-    <div class="slide-help">Use ↑ / ↓ to reorder the selected slide.</div>
+    <div class="slide-help">Drag the grip beside a slide name to reorder slides.</div>
   </aside>
 
   <section id="stage-wrap" aria-label="Slide canvas">
     <div id="stage">
-      <img id="slide-image" alt="Rendered slide">
+      <div id="slide-image" aria-label="Rendered slide"></div>
       <div id="guide-layer"></div>
       <div id="shape-layer"></div>
       <div id="marquee" hidden></div>

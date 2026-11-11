@@ -63,7 +63,10 @@ pub enum Action {
         op: String,
     },
     AddSlide {
-        after: usize,
+        #[serde(default)]
+        after: Option<usize>,
+        #[serde(default)]
+        section: Option<usize>,
     },
     DeleteSlide {
         slide: usize,
@@ -74,6 +77,21 @@ pub enum Action {
     MoveSlide {
         from: usize,
         to: usize,
+        #[serde(default)]
+        section: Option<usize>,
+    },
+    AddSection {
+        #[serde(default)]
+        after: Option<usize>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    RenameSection {
+        section: usize,
+        title: String,
+    },
+    DeleteSection {
+        section: usize,
     },
 }
 
@@ -81,6 +99,7 @@ pub enum Action {
 pub struct Outcome {
     pub slide: Option<usize>,
     pub select: Vec<usize>,
+    pub section: Option<usize>,
 }
 
 pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
@@ -109,6 +128,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
                 Ok(Outcome {
                     slide: Some(*slide),
                     select: indices.clone(),
+                    section: None,
                 })
             })
         }
@@ -141,6 +161,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
                 Ok(Outcome {
                     slide: Some(*slide),
                     select: vec![*index],
+                    section: None,
                 })
             })
         }
@@ -185,6 +206,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*slide),
                 select: vec![*index],
+                section: None,
             })
         }),
         Action::SetParagraph {
@@ -207,6 +229,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*slide),
                 select: vec![*index],
+                section: None,
             })
         }),
         Action::AddText {
@@ -234,6 +257,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*slide),
                 select: vec![index],
+                section: None,
             })
         }),
         Action::DeleteShapes { slide, indices } => edit_shapes(dir, &project, *slide, |shapes| {
@@ -249,6 +273,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*slide),
                 select: Vec::new(),
+                section: None,
             })
         }),
         Action::DuplicateShapes { slide, indices } => {
@@ -277,6 +302,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
                 Ok(Outcome {
                     slide: Some(*slide),
                     select,
+                    section: None,
                 })
             })
         }
@@ -318,15 +344,43 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*slide),
                 select,
+                section: None,
             })
         }),
-        Action::AddSlide { after } => {
+        Action::AddSlide { after, section } => {
             let files = slide_files(&project);
             if files.is_empty() {
                 return Err(miette!("cannot add a slide to an empty deck"));
             }
-            let after = (*after).min(files.len() - 1);
-            let source_file = files[after].1.clone();
+            let (target_section, insert_at, source_index) = if let Some(section) = section {
+                let section = *section;
+                if section >= project.main.sections.len() {
+                    return Err(miette!("section {section} does not exist"));
+                }
+                let source_index = after.unwrap_or_else(|| {
+                    if project.main.sections[section].slides.is_empty() {
+                        0
+                    } else {
+                        project
+                            .main
+                            .sections
+                            .iter()
+                            .take(section)
+                            .map(|section| section.slides.len())
+                            .sum::<usize>()
+                    }
+                });
+                (
+                    section,
+                    project.main.sections[section].slides.len(),
+                    source_index.min(files.len() - 1),
+                )
+            } else {
+                let after = after.unwrap_or(files.len() - 1).min(files.len() - 1);
+                let (section, relative) = slide_position(&project, after)?;
+                (section, relative + 1, after)
+            };
+            let source_file = files[source_index].1.clone();
             let source: crate::model::Slide = load_slide(&project, &source_file)?;
             let master = source
                 .master
@@ -343,19 +397,28 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             let path = project.slide_path(&file);
             std::fs::write(&path, format!("master = \"{master}\"\n"))
                 .map_err(|e| miette!("cannot write `{}`: {e}", path.display()))?;
-            let (section, relative) = slide_position(&project, after)?;
             edit_main(dir, |doc| {
                 let sections = sections_mut(doc)?;
                 let section = sections
-                    .get_mut(section)
-                    .ok_or_else(|| miette!("section {section} does not exist"))?;
+                    .get_mut(target_section)
+                    .ok_or_else(|| miette!("section {target_section} does not exist"))?;
                 let slides = slides_array(section)?;
-                slides.insert(relative + 1, Value::from(file.as_str()));
+                let at = insert_at.min(slides.len());
+                slides.insert(at, Value::from(file.as_str()));
                 Ok(())
             })?;
+            let flat = project
+                .main
+                .sections
+                .iter()
+                .take(target_section)
+                .map(|section| section.slides.len())
+                .sum::<usize>()
+                + insert_at;
             Ok(Outcome {
-                slide: Some(after + 1),
+                slide: Some(flat),
                 select: Vec::new(),
+                section: Some(target_section),
             })
         }
         Action::DeleteSlide { slide } => {
@@ -386,6 +449,7 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some((*slide).min(files.len() - 2)),
                 select: Vec::new(),
+                section: None,
             })
         }
         Action::DuplicateSlide { slide } => {
@@ -418,11 +482,61 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(slide + 1),
                 select: Vec::new(),
+                section: None,
             })
         }
-        Action::MoveSlide { from, to } => {
+        Action::MoveSlide { from, to, section } => {
             let files = slide_files(&project);
-            if *from >= files.len() || *to >= files.len() {
+            if *from >= files.len() {
+                return Err(miette!("slide index out of range"));
+            }
+            if let Some(target_section) = section {
+                let target_section = *target_section;
+                if target_section >= project.main.sections.len() {
+                    return Err(miette!("section {target_section} does not exist"));
+                }
+                let (source_section, source_relative) = slide_position(&project, *from)?;
+                let file = files[*from].1.clone();
+                let mut groups: Vec<Vec<String>> = project
+                    .main
+                    .sections
+                    .iter()
+                    .map(|section| section.slides.clone())
+                    .collect();
+                groups[source_section].remove(source_relative);
+                let at = (*to).min(groups[target_section].len());
+                groups[target_section].insert(at, file);
+                edit_main(dir, |doc| {
+                    let sections = sections_mut(doc)?;
+                    let count = sections.len();
+                    if count != groups.len() {
+                        return Err(miette!("section count changed while editing"));
+                    }
+                    for (index, group) in groups.iter().enumerate() {
+                        let table = sections
+                            .get_mut(index)
+                            .ok_or_else(|| miette!("section {index} does not exist"))?;
+                        let slides = slides_array(table)?;
+                        slides.clear();
+                        for file in group {
+                            slides.push(Value::from(file.as_str()));
+                        }
+                    }
+                    Ok(())
+                })?;
+                let flat = groups
+                    .iter()
+                    .take(target_section)
+                    .map(|group| group.len())
+                    .sum::<usize>()
+                    + at;
+                return Ok(Outcome {
+                    slide: Some(flat),
+                    select: Vec::new(),
+                    section: Some(target_section),
+                });
+            }
+            if *to >= files.len() {
                 return Err(miette!("slide index out of range"));
             }
             let mut flat = files;
@@ -451,6 +565,95 @@ pub(crate) fn apply(dir: &Path, action: &Action) -> Result<Outcome> {
             Ok(Outcome {
                 slide: Some(*to),
                 select: Vec::new(),
+                section: None,
+            })
+        }
+        Action::AddSection { after, title } => {
+            let at = after
+                .map(|section| (section + 1).min(project.main.sections.len()))
+                .unwrap_or(project.main.sections.len());
+            let title = title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("New section")
+                .to_string();
+            edit_main(dir, |doc| {
+                let sections = sections_mut(doc)?;
+                let mut table = Table::new();
+                table.insert("title", Item::Value(Value::from(title.as_str())));
+                table.insert("slides", Item::Value(Value::Array(Array::new())));
+                sections.insert(at.min(sections.len()), table);
+                Ok(())
+            })?;
+            Ok(Outcome {
+                slide: None,
+                select: Vec::new(),
+                section: Some(at),
+            })
+        }
+        Action::RenameSection { section, title } => {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err(miette!("a section title must not be empty"));
+            }
+            edit_main(dir, |doc| {
+                let sections = sections_mut(doc)?;
+                let table = sections
+                    .get_mut(*section)
+                    .ok_or_else(|| miette!("section {section} does not exist"))?;
+                table.insert("title", Item::Value(Value::from(title)));
+                Ok(())
+            })?;
+            Ok(Outcome {
+                slide: None,
+                select: Vec::new(),
+                section: Some(*section),
+            })
+        }
+        Action::DeleteSection { section } => {
+            if project.main.sections.len() <= 1 {
+                return Err(miette!("cannot delete the last section"));
+            }
+            let section = *section;
+            if section >= project.main.sections.len() {
+                return Err(miette!("section {section} does not exist"));
+            }
+            edit_main(dir, |doc| {
+                let sections = sections_mut(doc)?;
+                let removed = sections.remove(section);
+                let moved: Vec<Value> = removed
+                    .get("slides")
+                    .and_then(Item::as_array)
+                    .map(|array| array.iter().cloned().collect())
+                    .unwrap_or_default();
+                if !moved.is_empty() {
+                    let destination = if section > 0 { section - 1 } else { 0 };
+                    let table = sections
+                        .get_mut(destination)
+                        .ok_or_else(|| miette!("section {destination} does not exist"))?;
+                    let slides = slides_array(table)?;
+                    if section == 0 {
+                        let existing: Vec<Value> = slides.iter().cloned().collect();
+                        slides.clear();
+                        for file in moved {
+                            slides.push(file);
+                        }
+                        for file in existing {
+                            slides.push(file);
+                        }
+                    } else {
+                        for file in moved {
+                            slides.push(file);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            Ok(Outcome {
+                slide: None,
+                select: Vec::new(),
+                section: Some(section.min(project.main.sections.len().saturating_sub(2))),
             })
         }
     }

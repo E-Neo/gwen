@@ -93,6 +93,13 @@ fn handle(mut stream: TcpStream, editor: &Arc<Mutex<Editor>>) -> Result<()> {
                 .project_json();
             json_response(&mut stream, 200, &body)
         }
+        ("GET", "/api/status") => {
+            let result = editor
+                .lock()
+                .map_err(|_| miette!("editor lock poisoned"))?
+                .disk_status();
+            result_response(&mut stream, result)
+        }
         ("GET", "/api/present") => {
             let body = editor
                 .lock()
@@ -118,7 +125,16 @@ fn handle(mut stream: TcpStream, editor: &Arc<Mutex<Editor>>) -> Result<()> {
             let result = editor
                 .lock()
                 .map_err(|_| miette!("editor lock poisoned"))?
-                .reload_external();
+                .reload_external()
+                .map(|project| {
+                    json!({
+                        "revision": project.get("revision").cloned().unwrap_or(json!(0)),
+                        "slide": null,
+                        "selection": [],
+                        "section": null,
+                        "project": project,
+                    })
+                });
             result_response(&mut stream, result)
         }
         ("POST", "/api/action") => {
@@ -317,5 +333,64 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(response.contains("application/json"), "{response}");
         assert!(response.contains("\"slides\""), "{response}");
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn project() -> std::path::PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "gwen-edit-reload-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("slides")).unwrap();
+        std::fs::create_dir_all(dir.join("masters")).unwrap();
+        std::fs::write(
+            dir.join("main.toml"),
+            "[presentation]\ntitle = \"server\"\nwidth = \"10in\"\nheight = \"7.5in\"\n\n[theme]\nmajor_font = \"Arial\"\nminor_font = \"Arial\"\n\n[[sections]]\ntitle = \"S\"\nslides = [\"a.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("masters").join("base.toml"),
+            "background = { color = \"FFFFFF\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("slides").join("a.toml"),
+            "master = \"base\"\n\n[[shapes]]\ntype = \"text\"\nx = \"1in\"\ny = \"1in\"\nw = \"2in\"\nh = \"1in\"\ntext = \"hi\"\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn reload_returns_the_action_envelope() {
+        let dir = project();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let editor = Arc::new(Mutex::new(Editor::open(&dir).unwrap()));
+        let worker = editor.clone();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle(stream, &worker).unwrap();
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"POST /api/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("\"project\""), "{response}");
+        assert!(response.contains("\"slides\""), "{response}");
+        assert!(response.contains("\"sections\""), "{response}");
     }
 }

@@ -119,12 +119,16 @@ re-renders before the UI is updated.
 - Undo/redo and auto-save are built in. There is no Save button.
 - Add text boxes, duplicate/delete shapes, change z-order, and add/duplicate/
   delete/reorder slides.
+- Rename sections, add or delete sections, add slides to an empty section, and
+  drag slides between sections (including empty ones).
 - Press F5 (or Present) for full-screen SVG slides.
 - The editor keeps each touched geometry field in its original unit style
   (`"1.25in"`, EMU integers, percentages); comments and untouched TOML are
   preserved. Ctrl+Z restores the previous TOML exactly.
-- If TOML changes outside the browser, the next action is refused and the
-  editor reloads rather than overwriting the manual edit.
+- If TOML changes outside the browser, the editor reloads automatically once
+  it is idle; undo history is reset. Actions made during an external change are
+  still refused. Partial or invalid external writes are retried without
+  replacing the current view.
 - Master chrome is read-only. Placeholders can be styled and edited, but their
   geometry stays inherited.
 - This phase edits existing shapes and adds text boxes; the shape library,

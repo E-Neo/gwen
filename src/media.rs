@@ -60,7 +60,7 @@ fn png_aspect(b: &[u8]) -> Option<f64> {
     }
 }
 
-fn jpeg_aspect(b: &[u8]) -> Option<f64> {
+fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
     let mut i = 2;
     while i + 9 <= b.len() {
         if b[i] != 0xff {
@@ -88,7 +88,10 @@ fn jpeg_aspect(b: &[u8]) -> Option<f64> {
         {
             let h = (b[i + 5] as u32) << 8 | b[i + 6] as u32;
             let w = (b[i + 7] as u32) << 8 | b[i + 8] as u32;
-            return ratio(w, h);
+            if w == 0 || h == 0 {
+                return None;
+            }
+            return Some((w, h));
         }
         if len < 2 {
             return None;
@@ -96,6 +99,10 @@ fn jpeg_aspect(b: &[u8]) -> Option<f64> {
         i += 2 + len;
     }
     None
+}
+
+fn jpeg_aspect(b: &[u8]) -> Option<f64> {
+    jpeg_size(b).and_then(|(w, h)| ratio(w, h))
 }
 
 fn gif_aspect(b: &[u8]) -> Option<f64> {
@@ -240,9 +247,10 @@ pub fn svg_to_png(bytes: &[u8], target: Option<(f64, f64)>) -> Result<Vec<u8>, S
     pixmap.encode_png().map_err(|e| e.to_string())
 }
 
-/// Make an image data URI safe for `usvg`'s decoder. PNG/JPEG/GIF/SVG pass
+/// Make an image data URI safe for browser SVG previews. PNG/GIF/SVG pass
 /// through; BMP and TIFF are transcoded to PNG because usvg does not decode
-/// those formats.
+/// those formats, and JPEG is transcoded to PNG because browser support for
+/// JPEG data URIs inside SVG images is inconsistent.
 pub fn preview_data_uri(uri: &str) -> Result<String, String> {
     let rest = uri
         .strip_prefix("data:")
@@ -251,6 +259,21 @@ pub fn preview_data_uri(uri: &str) -> Result<String, String> {
         .split_once(',')
         .ok_or_else(|| "image data URI has no comma".to_string())?;
     let mime = meta.split(';').next().unwrap_or("");
+    if matches!(mime, "image/jpeg" | "image/jpg") {
+        if meta.ends_with(";base64") {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload)
+                && let Some((width, height)) = jpeg_size(&bytes)
+                && let Ok(png) = rasterize_image(&bytes, mime, width, height)
+            {
+                return Ok(format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(png)
+                ));
+            }
+        }
+        return Ok(uri.to_string());
+    }
     if !matches!(
         mime,
         "image/bmp" | "image/x-ms-bmp" | "image/tiff" | "image/tif"
@@ -276,6 +299,36 @@ pub fn preview_data_uri(uri: &str) -> Result<String, String> {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(png)
     ))
+}
+
+/// Rasterize a JPEG through usvg/resvg into PNG bytes. Browsers are
+/// inconsistent about JPEG data URIs inside SVG images; a PNG preview is
+/// portable. The source is scaled down when it is very large.
+fn rasterize_image(bytes: &[u8], mime: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let max = 2048.0_f64;
+    let scale = (max / f64::from(width))
+        .min(max / f64::from(height))
+        .min(1.0);
+    let w = (f64::from(width) * scale).max(1.0).round();
+    let h = (f64::from(height) * scale).max(1.0).round();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\"><image width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"none\" href=\"data:{mime};base64,{encoded}\"/></svg>"
+    );
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default())
+        .map_err(|e| e.to_string())?;
+    let size = tree.size();
+    let ow = (size.width().round() as u32).max(1);
+    let oh = (size.height().round() as u32).max(1);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(ow, oh)
+        .ok_or_else(|| format!("cannot allocate a {ow}x{oh} pixmap"))?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(1.0, 1.0),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().map_err(|e| e.to_string())
 }
 
 /// Decode an uncompressed or BI_BITFIELDS BMP (8/24/32 bits per pixel) to
@@ -449,6 +502,8 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDn6KKK/YT8qP/Z";
+
     #[test]
     fn png_header() {
         let mut b = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -492,5 +547,16 @@ mod tests {
         assert_eq!(png_aspect(&png), Some(2.0));
         // Malformed SVG is an error.
         assert!(svg_to_png(b"<svg", None).is_err());
+    }
+    #[test]
+    fn jpeg_preview_is_transcoded_to_png() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(JPEG)
+            .unwrap();
+        let uri = format!("data:image/jpeg;base64,{JPEG}");
+        let preview = preview_data_uri(&uri).unwrap();
+        assert!(preview.starts_with("data:image/png;base64,"), "{preview}");
+        assert!(jpeg_size(&bytes).is_some());
     }
 }

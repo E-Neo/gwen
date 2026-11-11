@@ -13,7 +13,6 @@ const state = {
   scale: 1,
   fitScale: 1,
   multi: false,
-  snap: true,
   drag: null,
   pan: null,
   pinch: null,
@@ -22,6 +21,12 @@ const state = {
   presenting: false,
   presentIndex: 0,
   lastTap: null,
+  slideDrag: null,
+  actionBusy: false,
+  pollBusy: false,
+  autoReloadBusy: false,
+  autoReloadTimer: 0,
+  reloadBlockedUntil: 0,
 };
 
 function setStatus(text, error = false) {
@@ -70,9 +75,10 @@ async function loadSlide(index, selection = null) {
   const result = await api(`/api/slide/${index_}`);
   state.current = index_;
   state.slide = result.slide;
+  renderSlideSvg();
   if (selection) state.selection = new Set(selection);
   else state.selection = new Set([...state.selection].filter((n) => n < state.slide.shapes.length));
-  renderSlideList();
+  updateActiveThumb();
   layoutStage();
   renderStage();
   renderInspector();
@@ -81,47 +87,144 @@ async function loadSlide(index, selection = null) {
 async function applyAction(action, options = {}) {
   closeTextEditor(false);
   closeSheets();
+  state.actionBusy = true;
+  const previousFile = state.project && state.project.slides[state.current]
+    ? state.project.slides[state.current].file
+    : null;
   setStatus('Saving...');
   try {
     const result = await api('/api/action', { method: 'POST', body: JSON.stringify(action) });
     state.project = result.project;
     if (!options.keepSlide && typeof result.slide === 'number') {
       state.current = Math.max(0, Math.min(result.slide, result.project.slides.length - 1));
+    } else if (previousFile) {
+      const found = result.project.slides.findIndex((slide) => slide.file === previousFile);
+      if (found >= 0) state.current = found;
     }
     const selection = Array.isArray(result.selection) && result.selection.length
       ? result.selection
       : options.keepSelection ? [...state.selection] : [];
     await loadSlide(state.current, selection);
+    if (structuralAction(action.type)) renderSlideList();
+    else refreshThumbnail(state.current);
     setStatus('Saved');
   } catch (error) {
     await handleError(error);
+  } finally {
+    state.actionBusy = false;
   }
 }
 
 async function historyAction(kind) {
   closeTextEditor(false);
+  state.actionBusy = true;
+  const previousFile = state.project && state.project.slides[state.current]
+    ? state.project.slides[state.current].file
+    : null;
   setStatus(kind === 'undo' ? 'Undoing...' : 'Redoing...');
   try {
     const result = await api(`/api/${kind}`, { method: 'POST' });
     state.project = result.project;
-    const current = Math.min(state.current, result.project.slides.length - 1);
+    let current = Math.min(state.current, result.project.slides.length - 1);
+    if (previousFile) {
+      const found = result.project.slides.findIndex((slide) => slide.file === previousFile);
+      if (found >= 0) current = found;
+    }
     await loadSlide(current);
+    renderSlideList();
     setStatus('Saved');
   } catch (error) {
     await handleError(error);
+  } finally {
+    state.actionBusy = false;
   }
 }
 
 async function reloadFromDisk() {
   closeTextEditor(false);
+  state.actionBusy = true;
+  const previousFile = state.project && state.project.slides[state.current]
+    ? state.project.slides[state.current].file
+    : null;
   setStatus('Reloading...');
   try {
     const result = await api('/api/reload', { method: 'POST' });
-    state.project = result.project;
-    await loadSlide(Math.min(state.current, result.project.slides.length - 1));
+    state.project = result.project ?? result;
+    let current = Math.min(state.current, state.project.slides.length - 1);
+    if (previousFile) {
+      const found = state.project.slides.findIndex((slide) => slide.file === previousFile);
+      if (found >= 0) current = found;
+    }
+    await loadSlide(current);
+    renderSlideList();
     setStatus('Saved');
   } catch (error) {
     await handleError(error, false);
+  } finally {
+    state.actionBusy = false;
+  }
+}
+
+function isUserEditing() {
+  const active = document.activeElement;
+  return !!active && (
+    active.matches('input, textarea, select') || active.isContentEditable
+  );
+}
+
+function startAutoReload() {
+  if (state.autoReloadTimer) return;
+  state.autoReloadTimer = window.setInterval(pollDiskStatus, 1500);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) pollDiskStatus();
+  });
+}
+
+async function pollDiskStatus() {
+  if (!state.project || document.hidden) return;
+  if (state.pollBusy || state.actionBusy || state.autoReloadBusy) return;
+  if (state.drag || state.textEdit || state.presenting) return;
+  if (isUserEditing()) return;
+  if (Date.now() < state.reloadBlockedUntil) return;
+  state.pollBusy = true;
+  try {
+    const status = await api('/api/status');
+    if (status.changed) await autoReload();
+  } catch {
+    // A transient read failure is retried on the next tick.
+  } finally {
+    state.pollBusy = false;
+  }
+}
+
+async function autoReload() {
+  if (state.autoReloadBusy) return;
+  state.autoReloadBusy = true;
+  const previousFile = state.project && state.project.slides[state.current]
+    ? state.project.slides[state.current].file
+    : null;
+  try {
+    const result = await api('/api/reload', { method: 'POST' });
+    state.project = result.project ?? result;
+    let current = Math.min(state.current, state.project.slides.length - 1);
+    if (previousFile) {
+      const found = state.project.slides.findIndex((slide) => slide.file === previousFile);
+      if (found >= 0) current = found;
+    }
+    state.selection.clear();
+    await loadSlide(current, []);
+    renderSlideList();
+    setStatus('Saved');
+    toast('Reloaded changes from disk', false);
+  } catch (error) {
+    // Keep the last valid editor state while an external write is partial or
+    // invalid, then retry.
+    state.reloadBlockedUntil = Date.now() + 3000;
+    setStatus('Reload failed', true);
+    const message = String(error && error.message ? error.message : error);
+    toast(`Project changed on disk but could not be loaded: ${message}`);
+  } finally {
+    state.autoReloadBusy = false;
   }
 }
 
@@ -151,70 +254,274 @@ function selectedShapes() {
   return [...state.selection].map(shapeAt).filter(Boolean);
 }
 
+function structuralAction(type) {
+  return [
+    'add_slide',
+    'delete_slide',
+    'duplicate_slide',
+    'move_slide',
+    'add_section',
+    'rename_section',
+    'delete_section',
+  ].includes(type);
+}
+
+function updateActiveThumb() {
+  $$('.thumb').forEach((thumb) => {
+    thumb.classList.toggle('active', Number(thumb.dataset.slide) === state.current);
+  });
+}
+
+function refreshThumbnail(index) {
+  const img = document.querySelector(`.thumb[data-slide="${index}"] img`);
+  if (img) img.src = `/api/slide/${index}.svg?rev=${state.project.revision}`;
+}
+
 function renderSlideList() {
   const list = $('#slide-list');
   if (!state.project) return;
   list.replaceChildren();
   for (const [sectionIndex, section] of state.project.sections.entries()) {
-    const label = document.createElement('div');
-    label.className = 'section-label';
-    label.textContent = section.title || `Section ${sectionIndex + 1}`;
-    list.append(label);
-    for (const slideIndex of section.slides) {
-      const slide = state.project.slides[slideIndex];
-      if (!slide) continue;
-      const button = document.createElement('div');
-      button.className = 'thumb' + (slideIndex === state.current ? ' active' : '');
-      button.tabIndex = 0;
-      button.setAttribute('role', 'button');
-      button.dataset.slide = String(slideIndex);
-      const img = document.createElement('img');
-      img.alt = slide.stem;
-      img.src = `/api/slide/${slideIndex}.svg?rev=${state.project.revision}`;
-      button.append(img);
-      const meta = document.createElement('div');
-      meta.className = 'thumb-meta';
-      const name = document.createElement('span');
-      name.className = 'thumb-name';
-      name.textContent = slide.stem;
-      const move = document.createElement('span');
-      move.className = 'thumb-move';
-      const up = document.createElement('button');
-      up.type = 'button';
-      up.textContent = '↑';
-      up.title = 'Move slide up';
-      up.disabled = slideIndex === 0;
-      up.addEventListener('click', (event) => {
-        event.stopPropagation();
-        applyAction({ type: 'move_slide', from: slideIndex, to: slideIndex - 1 });
-      });
-      const down = document.createElement('button');
-      down.type = 'button';
-      down.textContent = '↓';
-      down.title = 'Move slide down';
-      down.disabled = slideIndex === state.project.slides.length - 1;
-      down.addEventListener('click', (event) => {
-        event.stopPropagation();
-        applyAction({ type: 'move_slide', from: slideIndex, to: slideIndex + 1 });
-      });
-      move.append(up, down);
-      meta.append(name, move);
-      button.append(meta);
-      button.addEventListener('click', () => {
-        closeSheets();
-        loadSlide(slideIndex);
-      });
-      button.addEventListener('keydown', (event) => {
-        if (event.target !== button) return;
-        if (event.key === 'Enter' || event.key === ' ') {
+    const block = document.createElement('div');
+    block.className = 'section-block';
+    block.dataset.section = String(sectionIndex);
+    const head = document.createElement('div');
+    head.className = 'section-head';
+    const title = document.createElement('input');
+    title.className = 'section-title-input';
+    title.value = section.title || `Section ${sectionIndex + 1}`;
+    title.dataset.old = title.value;
+    title.setAttribute('aria-label', 'Section name');
+    title.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); title.blur(); }
+      else if (event.key === 'Escape') { title.value = title.dataset.old; title.blur(); }
+    });
+    title.addEventListener('change', () => {
+      const value = title.value.trim();
+      if (!value) {
+        title.value = title.dataset.old;
+        toast('Section names cannot be empty.');
+        return;
+      }
+      if (value !== title.dataset.old) {
+        applyAction({ type: 'rename_section', section: sectionIndex, title: value });
+      }
+    });
+    const tools = document.createElement('div');
+    tools.className = 'section-tools';
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = 'Add a slide to this section';
+    add.addEventListener('click', (event) => {
+      event.stopPropagation();
+      applyAction({ type: 'add_slide', section: sectionIndex });
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.title = 'Delete this section';
+    remove.disabled = state.project.sections.length <= 1;
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const name = section.title || `Section ${sectionIndex + 1}`;
+      if (!window.confirm(`Delete section "${name}"? Its slides move to the previous section.`)) return;
+      applyAction({ type: 'delete_section', section: sectionIndex });
+    });
+    tools.append(add, remove);
+    head.append(title, tools);
+    block.append(head);
+
+    const body = document.createElement('div');
+    body.className = 'section-body';
+    body.dataset.sectionBody = String(sectionIndex);
+    if (section.slides.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'section-empty';
+      empty.textContent = 'Drop a slide here';
+      body.append(empty);
+    } else {
+      for (const slideIndex of section.slides) {
+        const slide = state.project.slides[slideIndex];
+        if (!slide) continue;
+        const thumb = document.createElement('div');
+        thumb.className = 'thumb' + (slideIndex === state.current ? ' active' : '');
+        thumb.tabIndex = 0;
+        thumb.setAttribute('role', 'button');
+        thumb.dataset.slide = String(slideIndex);
+        thumb.dataset.section = String(sectionIndex);
+        const img = document.createElement('img');
+        img.alt = slide.stem;
+        img.src = `/api/slide/${slideIndex}.svg?rev=${state.project.revision}`;
+        thumb.append(img);
+        const meta = document.createElement('div');
+        meta.className = 'thumb-meta';
+        const name = document.createElement('span');
+        name.className = 'thumb-name';
+        name.textContent = slide.stem;
+        const grip = document.createElement('span');
+        grip.className = 'thumb-grip';
+        grip.textContent = '⠿';
+        grip.title = 'Drag to reorder';
+        grip.setAttribute('aria-label', 'Drag to reorder');
+        grip.addEventListener('pointerdown', (event) => {
           event.preventDefault();
+          event.stopPropagation();
+          startSlideDrag(event, slideIndex, thumb);
+        });
+        grip.addEventListener('click', (event) => event.stopPropagation());
+        meta.append(name, grip);
+        thumb.append(meta);
+        thumb.addEventListener('click', () => {
           closeSheets();
           loadSlide(slideIndex);
-        }
-      });
-      list.append(button);
+        });
+        thumb.addEventListener('keydown', (event) => {
+          if (event.target !== thumb) return;
+          if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+            event.preventDefault();
+            const to = event.key === 'ArrowUp' ? slideIndex - 1 : slideIndex + 1;
+            if (to >= 0 && to < state.project.slides.length) {
+              applyAction({ type: 'move_slide', from: slideIndex, to });
+            }
+            return;
+          }
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            closeSheets();
+            loadSlide(slideIndex);
+          }
+        });
+        body.append(thumb);
+      }
     }
+    block.append(body);
+    list.append(block);
   }
+  const addRow = document.createElement('div');
+  addRow.className = 'section-add-row';
+  const addSection = document.createElement('button');
+  addSection.type = 'button';
+  addSection.textContent = '+ Add section';
+  addSection.addEventListener('click', () => command('add-section'));
+  addRow.append(addSection);
+  list.append(addRow);
+}
+
+function startSlideDrag(event, from, thumb) {
+  const drag = {
+    from,
+    startY: event.clientY,
+    active: false,
+    target: null,
+    after: false,
+    section: null,
+    thumb,
+  };
+  state.slideDrag = drag;
+  const onMove = (moveEvent) => {
+    if (moveEvent.pointerId !== event.pointerId || state.slideDrag !== drag) return;
+    if (!drag.active && Math.abs(moveEvent.clientY - drag.startY) < 5) return;
+    if (!drag.active) {
+      drag.active = true;
+      thumb.classList.add('dragging');
+    }
+    const under = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+    clearSlideDrop();
+    drag.target = null;
+    drag.after = false;
+    drag.section = null;
+
+    const target = under && under.closest ? under.closest('.thumb') : null;
+    if (target && target !== thumb) {
+      const section = Number(target.dataset.section);
+      const index = Number(target.dataset.slide);
+      if (!Number.isFinite(section) || !Number.isFinite(index)) return;
+      const rect = target.getBoundingClientRect();
+      drag.target = index;
+      drag.section = section;
+      drag.after = moveEvent.clientY > rect.top + rect.height / 2;
+      target.classList.add(drag.after ? 'drop-after' : 'drop-before');
+      return;
+    }
+
+    const body = under && under.closest ? under.closest('[data-section-body]') : null;
+    const block = under && under.closest ? under.closest('.section-block') : null;
+    const dropBody = body || (block ? block.querySelector('[data-section-body]') : null);
+    if (dropBody) {
+      const section = Number(dropBody.dataset.sectionBody);
+      if (!Number.isFinite(section)) return;
+      drag.section = section;
+      drag.after = true;
+      dropBody.classList.add('drop-into');
+    }
+  };
+  const cleanup = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onCancel);
+    state.slideDrag = null;
+    thumb.classList.remove('dragging');
+    clearSlideDrop();
+  };
+  const onCancel = (cancelEvent) => {
+    if (cancelEvent.pointerId !== event.pointerId) return;
+    cleanup();
+  };
+  const sectionOf = (slideIndex) => {
+    const slide = state.project.slides[slideIndex];
+    return slide ? slide.section : null;
+  };
+  const positionOf = (slideIndex) => {
+    const section = sectionOf(slideIndex);
+    if (section === null) return -1;
+    return state.project.sections[section].slides.indexOf(slideIndex);
+  };
+  const onUp = (upEvent) => {
+    if (upEvent.pointerId !== event.pointerId) return;
+    const active = drag.active;
+    const target = drag.target;
+    const after = drag.after;
+    const targetSection = drag.section;
+    const fromIndex = drag.from;
+    cleanup();
+    if (!active || targetSection === null) return;
+    const sourceSection = sectionOf(fromIndex);
+    const sourcePosition = positionOf(fromIndex);
+    let to;
+    if (target !== null) {
+      const targetPosition = state.project.sections[targetSection].slides.indexOf(target);
+      if (targetPosition < 0) return;
+      to = targetPosition;
+      if (sourceSection === targetSection && sourcePosition < targetPosition) to -= 1;
+      if (after) to += 1;
+    } else {
+      to = state.project.sections[targetSection].slides.length;
+      if (sourceSection === targetSection) to -= 1;
+    }
+    to = Math.max(0, Math.min(to, state.project.sections[targetSection].slides.length));
+    if (sourceSection === targetSection && to === sourcePosition) return;
+    applyAction({
+      type: 'move_slide',
+      from: fromIndex,
+      to,
+      section: targetSection,
+    });
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onCancel);
+}
+
+function clearSlideDrop() {
+  $$('.thumb.drop-before, .thumb.drop-after').forEach((node) => {
+    node.classList.remove('drop-before', 'drop-after');
+  });
+  $$('.section-body.drop-into').forEach((node) => node.classList.remove('drop-into'));
+}
+
+function renderSlideSvg() {
+  $('#slide-image').innerHTML = state.slide ? state.slide.svg : '';
 }
 
 function layoutStage() {
@@ -230,7 +537,6 @@ function layoutStage() {
   stage.style.width = `${state.slide.width * state.scale}px`;
   stage.style.height = `${state.slide.height * state.scale}px`;
   $('#zoom-label').textContent = `${Math.round(state.zoom * 100)}%`;
-  $('#slide-image').src = `/api/slide/${state.current}.svg?rev=${state.project.revision}`;
 }
 
 function boxStyle(box, shape) {
@@ -238,6 +544,7 @@ function boxStyle(box, shape) {
   box.style.top = `${shape.y * state.scale}px`;
   box.style.width = `${shape.w * state.scale}px`;
   box.style.height = `${shape.h * state.scale}px`;
+  box.style.translate = '';
   box.style.transform = shape.rotate ? `rotate(${shape.rotate}deg)` : '';
 }
 
@@ -287,8 +594,10 @@ function addHandles() {
 
 function updateZoomBar() {
   $('#zoom-label').textContent = `${Math.round(state.zoom * 100)}%`;
-  $$('[data-cmd="snap"]').forEach((b) => b.classList.toggle('active', state.snap));
-  $$('[data-cmd="multi"]').forEach((b) => b.classList.toggle('active', state.multi));
+  $$('[data-cmd="multi"]').forEach((b) => {
+    b.classList.toggle('active', state.multi);
+    b.setAttribute('aria-pressed', String(state.multi));
+  });
 }
 
 function selectShape(index, additive = false) {
@@ -403,6 +712,7 @@ function cancelDrag() {
   state.marquee = null;
   $('#marquee').hidden = true;
   $('#guide-layer').replaceChildren();
+  if (state.slide) renderStage();
 }
 
 /* ---------- moving ---------- */
@@ -418,7 +728,16 @@ function startMove(index, event) {
   const start = stagePoint(event);
   const origins = new Map(shapes.map((shape) => [shape.index, { x: shape.x, y: shape.y }]));
   const bounds = selectionBounds(shapes);
-  state.drag = { type: 'move', start, origins, bounds, moved: false, event };
+  state.drag = {
+    type: 'move',
+    start,
+    origins,
+    bounds,
+    moved: false,
+    event,
+    targetsX: snapTargets('x'),
+    targetsY: snapTargets('y'),
+  };
   $('#stage').setPointerCapture(event.pointerId);
 }
 
@@ -437,19 +756,18 @@ function moveDrag(event) {
   let dx = point.x - drag.start.x;
   let dy = point.y - drag.start.y;
   let guides = [];
-  if (state.snap && drag.type === 'move' && !event.altKey) {
-    const snapped = snapMove(drag.bounds, dx, dy);
+  if (drag.type === 'move' && !event.altKey) {
+    const snapped = snapMove(drag.bounds, dx, dy, drag.targetsX, drag.targetsY);
     dx = snapped.dx;
     dy = snapped.dy;
     guides = snapped.guides;
   }
   if (drag.type === 'move') {
     drag.moved = drag.moved || Math.abs(dx) > 0.02 || Math.abs(dy) > 0.02;
-    for (const [index, origin] of drag.origins) {
+    for (const [index] of drag.origins) {
       const box = $(`.shape-box[data-index="${index}"]`);
       if (box) {
-        box.style.left = `${(origin.x + dx) * state.scale}px`;
-        box.style.top = `${(origin.y + dy) * state.scale}px`;
+        box.style.translate = `${dx * state.scale}px ${dy * state.scale}px`;
       }
     }
     drawGuides(guides);
@@ -466,8 +784,8 @@ function moveDrag(event) {
     if (handle.includes('e')) { w = Math.max(0.1, original.w + dx); }
     if (handle.includes('n')) { y = Math.min(original.y + dy, bottom - 0.1); h = bottom - y; }
     if (handle.includes('s')) { h = Math.max(0.1, original.h + dy); }
-    if (state.snap && !event.altKey) {
-      const snapped = snapResize({ x, y, w, h }, handle);
+    if (!event.altKey) {
+      const snapped = snapResize({ x, y, w, h }, handle, drag.targetsX, drag.targetsY);
       x = snapped.x; y = snapped.y; w = snapped.w; h = snapped.h;
       guides = snapped.guides;
     }
@@ -500,6 +818,8 @@ function endDrag(event) {
   if (!drag) return;
   if (drag.type === 'move' && drag.moved) {
     applyAction({ type: 'move', slide: state.current, indices: [...drag.origins.keys()], dx: drag.dx, dy: drag.dy }, { keepSelection: true });
+  } else if (drag.type === 'move') {
+    renderStage();
   } else if (drag.type === 'resize' && drag.rect) {
     const rect = drag.rect;
     applyAction({ type: 'resize', slide: state.current, index: drag.index, x: rect.x, y: rect.y, w: rect.w, h: rect.h }, { keepSelection: true });
@@ -520,6 +840,8 @@ function startResize(index, handle, event) {
     start: stagePoint(event),
     original: { x: shape.x, y: shape.y, w: shape.w, h: shape.h },
     rect: null,
+    targetsX: snapTargets('x'),
+    targetsY: snapTargets('y'),
   };
   $('#stage').setPointerCapture(event.pointerId);
 }
@@ -566,13 +888,13 @@ function nearest(value, targets, threshold) {
   return best;
 }
 
-function snapMove(bounds, dx, dy) {
+function snapMove(bounds, dx, dy, xTargets, yTargets) {
   const threshold = 7 / state.scale;
   const guides = [];
   const xCandidates = [bounds.x + dx, bounds.x + bounds.w / 2 + dx, bounds.x + bounds.w + dx];
   const yCandidates = [bounds.y + dy, bounds.y + bounds.h / 2 + dy, bounds.y + bounds.h + dy];
-  for (const [i, value] of xCandidates.entries()) {
-    const hit = nearest(value, snapTargets('x'), threshold);
+  for (const value of xCandidates) {
+    const hit = nearest(value, xTargets, threshold);
     if (hit) {
       dx += hit.target - value;
       guides.push({ axis: 'v', value: hit.target });
@@ -580,7 +902,7 @@ function snapMove(bounds, dx, dy) {
     }
   }
   for (const value of yCandidates) {
-    const hit = nearest(value, snapTargets('y'), threshold);
+    const hit = nearest(value, yTargets, threshold);
     if (hit) {
       dy += hit.target - value;
       guides.push({ axis: 'h', value: hit.target });
@@ -590,11 +912,9 @@ function snapMove(bounds, dx, dy) {
   return { dx, dy, guides };
 }
 
-function snapResize(rect, handle) {
+function snapResize(rect, handle, xTargets, yTargets) {
   const threshold = 7 / state.scale;
   const guides = [];
-  const xTargets = snapTargets('x');
-  const yTargets = snapTargets('y');
   if (handle.includes('w')) {
     const hit = nearest(rect.x, xTargets, threshold);
     if (hit) { const right = rect.x + rect.w; rect.x = hit.target; rect.w = right - rect.x; guides.push({ axis: 'v', value: hit.target }); }
@@ -750,7 +1070,11 @@ function positionTextEditor() {
   editor.style.top = `${shape.y * state.scale}px`;
   editor.style.width = `${Math.max(shape.w * state.scale, 160)}px`;
   editor.style.height = `${Math.max(shape.h * state.scale, 100)}px`;
-  input.style.fontSize = `${Math.max(16, (shape.effective.fontSize || 18) * state.scale)}px`;
+  const points = Number(shape.effective.fontSize) || 18;
+  input.style.fontSize = `${Math.max(8, points * state.scale / 72)}px`;
+  input.style.fontFamily = shape.effective.fontFace
+    ? `"${shape.effective.fontFace}", system-ui, sans-serif`
+    : 'system-ui, sans-serif';
 }
 function resizeTextEditor() {
   if (!state.textEdit) return;
@@ -996,12 +1320,19 @@ async function command(name) {
     case 'front': return bulk('front');
     case 'back': return bulk('back');
     case 'add-slide': return applyAction({ type: 'add_slide', after: state.current });
+    case 'add-section': {
+      const slide = state.project.slides[state.current];
+      return applyAction({
+        type: 'add_section',
+        after: slide ? slide.section : null,
+        title: 'New section',
+      });
+    }
     case 'duplicate-slide': return applyAction({ type: 'duplicate_slide', slide: state.current });
     case 'delete-slide': return applyAction({ type: 'delete_slide', slide: state.current });
     case 'zoom-in': state.zoom = clamp(state.zoom * 1.15, 0.25, 4); layoutStage(); renderStage(); return;
     case 'zoom-out': state.zoom = clamp(state.zoom / 1.15, 0.25, 4); layoutStage(); renderStage(); return;
     case 'fit': state.zoom = 1; layoutStage(); renderStage(); return;
-    case 'snap': state.snap = !state.snap; updateZoomBar(); return;
     case 'multi': state.multi = !state.multi; updateZoomBar(); return;
   }
 }
@@ -1158,6 +1489,7 @@ async function boot() {
       return;
     }
     await loadSlide(0);
+    startAutoReload();
     setStatus('Saved');
   } catch (error) {
     setStatus('Error', true);
