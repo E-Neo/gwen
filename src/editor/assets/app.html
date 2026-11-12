@@ -47,18 +47,22 @@
     <div class="slide-help">Drag the grip beside a slide name to reorder slides.</div>
   </aside>
 
-  <section id="stage-wrap" aria-label="Slide canvas">
-    <div id="stage">
-      <div id="slide-image" aria-label="Rendered slide"></div>
-      <div id="guide-layer"></div>
-      <div id="shape-layer"></div>
-      <div id="marquee" hidden></div>
-      <div id="text-editor" hidden>
-        <textarea id="text-input" spellcheck="false"></textarea>
-        <div class="text-bar">
-          <span class="hint">Markdown · Ctrl/Cmd+Enter to save</span>
-          <button id="text-cancel">Cancel</button>
-          <button id="text-done" class="primary">Done</button>
+  <section id="stage-area" aria-label="Slide canvas">
+    <div id="stage-wrap">
+      <div id="stage-canvas">
+        <div id="stage">
+          <div id="slide-image" aria-label="Rendered slide"></div>
+          <div id="guide-layer"></div>
+          <div id="shape-layer"></div>
+          <div id="marquee" hidden></div>
+          <div id="text-editor" hidden>
+            <textarea id="text-input" spellcheck="false"></textarea>
+            <div class="text-bar">
+              <span class="hint">Markdown · Ctrl/Cmd+Enter to save</span>
+              <button id="text-cancel">Cancel</button>
+              <button id="text-done" class="primary">Done</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

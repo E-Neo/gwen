@@ -115,9 +115,16 @@ re-renders before the UI is updated.
   screen-pixel dead zone keeps clicks and finger jitter from moving shapes.
 - Shift-click or the Multi toggle adds or removes shapes from the selection
   without moving them.
-- Drag on empty canvas to marquee-select shapes. On touch screens, tap a shape
-  to select it, then drag the selected shape to move it; one-finger empty
-  canvas drags marquee, two fingers pan, and pinch zooms.
+- Click or tap empty slide space, or the checkerboard around the slide, to
+  clear the selection.
+- Drag on empty canvas or the checkerboard to marquee-select shapes; only
+  shapes fully inside the marquee are selected. On touch screens, tap a shape
+  to select it, then drag the selected shape to move it. A short drag anywhere
+  pans; long-press the checkerboard, empty slide space, or an unselected shape,
+  then drag, to start a marquee. Long-press a selected shape and drag to move
+  it. Two fingers pan, and pinch zooms.
+- The workspace has a small pan margin around the slide, so it can be moved
+  vertically and horizontally even when it fits the viewport.
 - Drag handles to resize; use the round handle to rotate.
 - Double-click text to edit its markdown in place. Shapes with `paragraphs` are
   edited in the Properties panel.

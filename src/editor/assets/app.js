@@ -6,6 +6,7 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const MOUSE_DRAG_THRESHOLD_PX = 6;
 const TOUCH_DRAG_THRESHOLD_PX = 10;
+const LONG_PRESS_MS = 450;
 
 const state = {
   project: null,
@@ -17,12 +18,15 @@ const state = {
   fitScale: 1,
   multi: false,
   drag: null,
+  pan: null,
+  panFling: null,
   pinch: null,
   pointers: new Map(),
   textEdit: null,
   presenting: false,
   presentIndex: 0,
   lastTap: null,
+  touchGesture: null,
   slideDrag: null,
   actionBusy: false,
   pollBusy: false,
@@ -185,7 +189,7 @@ function startAutoReload() {
 async function pollDiskStatus() {
   if (!state.project || document.hidden) return;
   if (state.pollBusy || state.actionBusy || state.autoReloadBusy) return;
-  if (state.drag || state.textEdit || state.presenting) return;
+  if (state.drag || state.touchGesture || state.pan || state.panFling || state.marquee || state.textEdit || state.presenting) return;
   if (isUserEditing()) return;
   if (Date.now() < state.reloadBlockedUntil) return;
   state.pollBusy = true;
@@ -541,6 +545,18 @@ function layoutStage() {
   $('#zoom-label').textContent = `${Math.round(state.zoom * 100)}%`;
 }
 
+function syncTopbarHeight() {
+  const topbar = $('#topbar');
+  if (!topbar) return;
+  document.documentElement.style.setProperty('--topbar-height', `${topbar.offsetHeight}px`);
+}
+
+function centerStageScroll() {
+  const wrap = $('#stage-wrap');
+  wrap.scrollLeft = Math.max(0, (wrap.scrollWidth - wrap.clientWidth) / 2);
+  wrap.scrollTop = Math.max(0, (wrap.scrollHeight - wrap.clientHeight) / 2);
+}
+
 function boxStyle(box, shape) {
   box.style.left = `${shape.x * state.scale}px`;
   box.style.top = `${shape.y * state.scale}px`;
@@ -629,8 +645,34 @@ function stagePoint(event) {
   };
 }
 
+function startTouchGesture(event, index) {
+  clearTouchGesture();
+  const now = performance.now();
+  const wasSelected = index != null && state.selection.has(index);
+  let pendingText = null;
+  if (index != null && state.lastTap
+      && state.lastTap.index === index
+      && now - state.lastTap.time < 350) {
+    pendingText = index;
+    state.lastTap = null;
+  }
+  const shape = index != null ? shapeAt(index) : null;
+  state.touchGesture = {
+    pointerId: event.pointerId,
+    start: stagePoint(event),
+    index,
+    wasSelected,
+    multi: state.multi,
+    movable: !!shape && !shape.move_locked,
+    pendingText,
+    timer: wasSelected ? null : window.setTimeout(beginLongPressMarquee, LONG_PRESS_MS),
+  };
+  $('#stage').setPointerCapture(event.pointerId);
+}
+
 function pointerDown(event) {
   if (event.button !== undefined && event.button !== 0) return;
+  cancelPan();
   if (event.pointerType === 'touch') {
     state.pointers.set(event.pointerId, event);
     if (state.pointers.size >= 2) {
@@ -656,61 +698,68 @@ function pointerDown(event) {
     else startResize(index, handle.dataset.handle, event);
     return;
   }
+
+  if (event.target === $('#stage-wrap')) {
+    const wrap = $('#stage-wrap');
+    const rect = wrap.getBoundingClientRect();
+    // Ignore clicks on the desktop scrollbar.
+    if (event.clientX - rect.left >= wrap.clientWidth
+        || event.clientY - rect.top >= wrap.clientHeight) {
+      return;
+    }
+  }
+
+  const empty = event.target === $('#stage-wrap')
+    || event.target === $('#stage-canvas')
+    || event.target === $('#stage')
+    || event.target === $('#shape-layer')
+    || event.target === $('#slide-image');
+
+  if (event.pointerType === 'touch') {
+    if (box) {
+      event.preventDefault();
+      startTouchGesture(event, Number(box.dataset.index));
+    } else if (empty) {
+      event.preventDefault();
+      state.lastTap = null;
+      startTouchGesture(event, null);
+    }
+    return;
+  }
+
+  // Mouse and pen keep the select-first behavior. Touch taps are resolved on
+  // pointer-up so a short drag can become a pan instead of a selection.
   if (box) {
     event.preventDefault();
     const index = Number(box.dataset.index);
     const additive = event.shiftKey;
     const wasSelected = state.selection.has(index);
-
-    // Defer touch double-tap editing until pointer-up so the second press can
-    // also become a drag.
-    let pendingText = null;
-    if (event.pointerType === 'touch') {
-      const now = performance.now();
-      if (state.lastTap && state.lastTap.index === index && now - state.lastTap.time < 350) {
-        state.lastTap = null;
-        pendingText = index;
-      } else {
-        state.lastTap = { index, time: now };
-      }
-    }
-
     if (additive) {
       selectShape(index, true);
       return;
     }
-
     if (state.multi) {
       if (!wasSelected) {
         selectShape(index, true);
         return;
       }
-      // Dragging a selected shape moves the whole selection; a tap without
-      // movement removes it instead.
       beginMoveOrTap(index, event, null, index);
       return;
     }
-
     if (!wasSelected) {
       // Strict select-first: the first press only selects.
       selectShape(index, false);
       return;
     }
-
     const shape = shapeAt(index);
     if (shape && !shape.move_locked) {
-      beginMoveOrTap(index, event, pendingText, null);
-      return;
-    }
-
-    if (pendingText != null) {
-      beginText(index);
+      beginMoveOrTap(index, event, null, null);
       return;
     }
     renderStage();
     return;
   }
-  if (event.target === $('#stage') || event.target === $('#shape-layer') || event.target === $('#slide-image')) {
+  if (empty) {
     event.preventDefault();
     state.lastTap = null;
     clearSelection();
@@ -726,7 +775,34 @@ function pointerMove(event) {
       return;
     }
   }
+  if (state.touchGesture && state.touchGesture.pointerId === event.pointerId) {
+    const gesture = state.touchGesture;
+    const point = stagePoint(event);
+    const distance = Math.hypot(
+      point.px - gesture.start.px,
+      point.py - gesture.start.py,
+    );
+    if (distance < TOUCH_DRAG_THRESHOLD_PX) return;
+    clearTouchGesture();
+    state.lastTap = null;
+    if (gesture.index != null && gesture.wasSelected && gesture.movable) {
+      startMove(gesture.index, event);
+      if (state.drag) {
+        // The threshold is already crossed; start moving on the next event.
+        state.drag.armed = true;
+        state.drag.start = point;
+      } else {
+        startPan(event);
+        movePan(event);
+      }
+    } else {
+      startPan(event);
+      movePan(event);
+    }
+    return;
+  }
   if (state.drag) moveDrag(event);
+  else if (state.pan) movePan(event);
   else if (state.marquee) moveMarquee(event);
 }
 
@@ -741,11 +817,36 @@ function pointerUp(event) {
     state.pointers.delete(event.pointerId);
     if (state.pinch && state.pointers.size < 2) endPinch();
   }
+  if (state.touchGesture && state.touchGesture.pointerId === event.pointerId) {
+    const gesture = state.touchGesture;
+    clearTouchGesture();
+    if (gesture.index == null) {
+      state.lastTap = null;
+      clearSelection();
+      return;
+    }
+    if (gesture.pendingText != null) {
+      state.lastTap = null;
+      beginText(gesture.pendingText);
+      return;
+    }
+    if (gesture.multi) {
+      state.lastTap = null;
+      selectShape(gesture.index, true);
+      return;
+    }
+    state.lastTap = { index: gesture.index, time: performance.now() };
+    selectShape(gesture.index, false);
+    return;
+  }
   if (state.drag) endDrag(event);
+  else if (state.pan) endPan();
   else if (state.marquee) endMarquee(event);
 }
 
 function cancelDrag() {
+  clearTouchGesture();
+  cancelPan();
   state.drag = null;
   state.marquee = null;
   $('#marquee').hidden = true;
@@ -1051,12 +1152,143 @@ function endMarquee() {
   const x1 = Math.min(start.x, current.x), x2 = Math.max(start.x, current.x);
   const y1 = Math.min(start.y, current.y), y2 = Math.max(start.y, current.y);
   if (x2 - x1 < 0.02 && y2 - y1 < 0.02) return;
+  const eps = 1e-6;
   const hits = state.slide.shapes
-    .filter((shape) => !(shape.x > x2 || shape.x + shape.w < x1 || shape.y > y2 || shape.y + shape.h < y1))
+    .filter((shape) =>
+      shape.x >= x1 - eps
+      && shape.y >= y1 - eps
+      && shape.x + shape.w <= x2 + eps
+      && shape.y + shape.h <= y2 + eps
+    )
     .map((shape) => shape.index);
   state.selection = new Set(hits);
   renderStage();
   renderInspector();
+}
+
+function clearTouchGesture() {
+  if (!state.touchGesture) return;
+  if (state.touchGesture.timer) clearTimeout(state.touchGesture.timer);
+  state.touchGesture = null;
+}
+
+function beginLongPressMarquee() {
+  const gesture = state.touchGesture;
+  if (!gesture) return;
+  state.touchGesture = null;
+  state.lastTap = null;
+  state.marquee = { start: gesture.start, current: gesture.start };
+  const node = $('#marquee');
+  node.hidden = false;
+  updateMarqueeNode();
+}
+
+function stopPanFling() {
+  const fling = state.panFling;
+  if (!fling) return;
+  if (fling.raf) cancelAnimationFrame(fling.raf);
+  state.panFling = null;
+}
+
+function cancelPan() {
+  stopPanFling();
+  if (state.pan && state.pan.raf) cancelAnimationFrame(state.pan.raf);
+  state.pan = null;
+}
+
+function startPan(event) {
+  cancelPan();
+  const wrap = $('#stage-wrap');
+  state.pan = {
+    start: { x: event.clientX, y: event.clientY },
+    left: wrap.scrollLeft,
+    top: wrap.scrollTop,
+    targetLeft: wrap.scrollLeft,
+    targetTop: wrap.scrollTop,
+    raf: 0,
+    samples: [{ t: performance.now(), x: event.clientX, y: event.clientY }],
+  };
+}
+
+function movePan(event) {
+  const pan = state.pan;
+  if (!pan) return;
+  pan.targetLeft = pan.left - (event.clientX - pan.start.x);
+  pan.targetTop = pan.top - (event.clientY - pan.start.y);
+  pan.samples.push({ t: performance.now(), x: event.clientX, y: event.clientY });
+  while (pan.samples.length > 10) pan.samples.shift();
+  if (!pan.raf) pan.raf = requestAnimationFrame(applyPanScroll);
+}
+
+function applyPanScroll() {
+  const pan = state.pan;
+  if (!pan) return;
+  pan.raf = 0;
+  const wrap = $('#stage-wrap');
+  wrap.scrollLeft = pan.targetLeft;
+  wrap.scrollTop = pan.targetTop;
+}
+
+function endPan() {
+  const pan = state.pan;
+  if (!pan) return;
+  if (pan.raf) {
+    cancelAnimationFrame(pan.raf);
+    pan.raf = 0;
+  }
+  const wrap = $('#stage-wrap');
+  wrap.scrollLeft = pan.targetLeft;
+  wrap.scrollTop = pan.targetTop;
+
+  const now = performance.now();
+  const recent = pan.samples.filter((sample) => now - sample.t <= 100);
+  const samples = recent.length >= 2 ? recent : pan.samples.slice(-2);
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  let vx = 0;
+  let vy = 0;
+  if (last && first && last.t > first.t && now - last.t <= 80) {
+    vx = clamp((last.x - first.x) / (last.t - first.t), -3, 3);
+    vy = clamp((last.y - first.y) / (last.t - first.t), -3, 3);
+  }
+  state.pan = null;
+  if (!prefersReducedMotion() && (Math.abs(vx) > 0.05 || Math.abs(vy) > 0.05)) {
+    startPanFling(-vx, -vy);
+  }
+}
+
+function startPanFling(vx, vy) {
+  stopPanFling();
+  state.panFling = { vx, vy, last: performance.now(), raf: 0 };
+  state.panFling.raf = requestAnimationFrame(stepPanFling);
+}
+
+function stepPanFling(now) {
+  const fling = state.panFling;
+  if (!fling) return;
+  const wrap = $('#stage-wrap');
+  const dt = Math.min(50, Math.max(1, now - fling.last));
+  fling.last = now;
+  wrap.scrollLeft += fling.vx * dt;
+  wrap.scrollTop += fling.vy * dt;
+
+  const maxLeft = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
+  const maxTop = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
+  if (maxLeft === 0 || wrap.scrollLeft <= 0 || wrap.scrollLeft >= maxLeft) fling.vx = 0;
+  if (maxTop === 0 || wrap.scrollTop <= 0 || wrap.scrollTop >= maxTop) fling.vy = 0;
+
+  const decay = Math.pow(0.92, dt / 16.7);
+  fling.vx *= decay;
+  fling.vy *= decay;
+  if (Math.abs(fling.vx) < 0.02 && Math.abs(fling.vy) < 0.02) {
+    state.panFling = null;
+    return;
+  }
+  fling.raf = requestAnimationFrame(stepPanFling);
+}
+
+function prefersReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 }
 
 function captureStagePointers() {
@@ -1573,9 +1805,9 @@ async function command(name) {
     }
     case 'duplicate-slide': return applyAction({ type: 'duplicate_slide', slide: state.current });
     case 'delete-slide': return applyAction({ type: 'delete_slide', slide: state.current });
-    case 'zoom-in': state.zoom = clamp(state.zoom * 1.15, 0.25, 4); layoutStage(); renderStage(); return;
-    case 'zoom-out': state.zoom = clamp(state.zoom / 1.15, 0.25, 4); layoutStage(); renderStage(); return;
-    case 'fit': state.zoom = 1; layoutStage(); renderStage(); return;
+    case 'zoom-in': state.zoom = clamp(state.zoom * 1.15, 0.25, 4); layoutStage(); renderStage(); centerStageScroll(); return;
+    case 'zoom-out': state.zoom = clamp(state.zoom / 1.15, 0.25, 4); layoutStage(); renderStage(); centerStageScroll(); return;
+    case 'fit': state.zoom = 1; layoutStage(); renderStage(); centerStageScroll(); return;
     case 'multi': state.multi = !state.multi; updateZoomBar(); return;
   }
 }
@@ -1639,15 +1871,20 @@ function openSheet(kind) {
 /* ---------- wiring ---------- */
 
 function wire() {
-  $('#stage').addEventListener('pointerdown', pointerDown);
-  $('#stage').addEventListener('pointermove', pointerMove);
-  $('#stage').addEventListener('pointerup', pointerUp);
-  $('#stage').addEventListener('pointercancel', pointerCancel);
+  $('#stage-wrap').addEventListener('pointerdown', pointerDown);
+  $('#stage-wrap').addEventListener('pointermove', pointerMove);
+  $('#stage-wrap').addEventListener('pointerup', pointerUp);
+  $('#stage-wrap').addEventListener('pointercancel', pointerCancel);
   $('#stage').addEventListener('dblclick', (event) => {
     const box = /** @type {HTMLElement} */ (event.target).closest('.shape-box');
     if (box) beginText(Number(box.dataset.index));
   });
-  $('#stage').addEventListener('contextmenu', (event) => {
+  $('#stage-wrap').addEventListener('contextmenu', (event) => {
+    if (event.target.closest('#text-editor')) return;
+    if (state.pointers.size > 0 || state.touchGesture || state.marquee || state.pan) {
+      event.preventDefault();
+      return;
+    }
     const box = /** @type {HTMLElement} */ (event.target).closest('.shape-box');
     if (box) {
       event.preventDefault();
@@ -1686,13 +1923,15 @@ function wire() {
     if (/** @type {HTMLElement} */ (event.target).closest('.present-hud')) return;
     nextPresent(event.shiftKey ? -1 : 1);
   });
-  window.addEventListener('resize', () => { layoutStage(); renderStage(); });
+  window.addEventListener('resize', () => { syncTopbarHeight(); layoutStage(); renderStage(); centerStageScroll(); });
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', () => {
+      syncTopbarHeight();
       layoutStage();
       resizeTextEditor();
     });
   }
+  new ResizeObserver(syncTopbarHeight).observe($('#topbar'));
   new ResizeObserver(() => { layoutStage(); renderStage(); }).observe($('#stage-wrap'));
   document.addEventListener('keydown', onKeyDown);
 }
@@ -1746,6 +1985,8 @@ async function boot() {
       return;
     }
     await loadSlide(0);
+    syncTopbarHeight();
+    centerStageScroll();
     startAutoReload();
     setStatus('Saved');
   } catch (error) {
