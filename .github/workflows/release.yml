@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Check version tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          test "v$version" = "${GITHUB_REF_NAME}"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 26.04 is the requested release baseline. Replace with
+          # ubuntu-latest if the hosted image is not available yet.
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+            name: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: universal-apple-darwin
+            name: universal-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build native binary
+        if: matrix.target != 'universal-apple-darwin'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build universal macOS binary
+        if: matrix.target == 'universal-apple-darwin'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create \
+            -output gwen \
+            target/aarch64-apple-darwin/release/gwen \
+            target/x86_64-apple-darwin/release/gwen
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="gwen-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
+            cp gwen "dist/$name/gwen"
+          else
+            cp "target/${{ matrix.target }}/release/gwen" "dist/$name/gwen"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          tar -C "dist/$name" -czf "dist/$name.tar.gz" .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "gwen-${{ github.ref_name }}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/gwen.exe" "dist/$name/gwen.exe"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gwen-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

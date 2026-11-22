@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu 26.04 is the release baseline. Replace with ubuntu-latest if
+        # the hosted image is not available yet.
+        os: [ubuntu-26.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked

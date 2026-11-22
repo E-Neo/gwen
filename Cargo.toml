@@ -2,6 +2,12 @@
 name = "gwen"
 version = "0.1.0"
 edition = "2024"
+description = "Generate clean PowerPoint decks (.pptx) from TOML"
+repository = "https://github.com/E-Neo/gwen"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["pptx", "powerpoint", "toml", "slides", "presentation"]
+categories = ["command-line-utilities", "graphics"]
 
 [[bin]]
 name = "gwen"

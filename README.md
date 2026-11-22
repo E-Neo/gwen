@@ -2,6 +2,118 @@
 
 Generate clean PowerPoint decks (`.pptx`) from TOML.
 
+## Installation
+
+### Download a release
+
+Prebuilt binaries are published on
+[GitHub Releases](https://github.com/E-Neo/gwen/releases/latest):
+
+- Linux x86_64: `gwen-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`
+- Windows x86_64: `gwen-v0.1.0-x86_64-pc-windows-msvc.zip`
+- macOS universal (Apple Silicon and Intel):
+  `gwen-v0.1.0-universal-apple-darwin.tar.gz`
+
+The Linux binary is built on Ubuntu 26.04 and needs a recent glibc. Build from
+source on older distributions.
+
+Use `x86_64-unknown-linux-gnu` on Linux and `universal-apple-darwin` on macOS
+in place of `<platform>` below.
+
+#### Linux and macOS
+
+```sh
+tmp="$(mktemp -d)"
+tar -xzf gwen-v0.1.0-<platform>.tar.gz -C "$tmp"
+mkdir -p ~/.local/bin
+install -m 755 "$tmp/gwen" ~/.local/bin/gwen
+rm -rf "$tmp"
+export PATH="$HOME/.local/bin:$PATH"
+gwen --version
+```
+
+Add the `export PATH` line to `~/.bashrc` or `~/.zshrc` to keep it. You can also
+install to `/usr/local/bin` with `sudo`.
+
+On macOS the binary is not code-signed. If Gatekeeper blocks it, right-click
+the binary and choose **Open**, or remove the quarantine flag:
+
+```sh
+xattr -d com.apple.quarantine ~/.local/bin/gwen 2>/dev/null || true
+```
+
+#### Windows
+
+Extract the ZIP and copy `gwen.exe` into a folder on `PATH`. For a per-user
+install in PowerShell:
+
+```powershell
+Expand-Archive gwen-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\Downloads\gwen" -Force
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin" | Out-Null
+Copy-Item "$env:USERPROFILE\Downloads\gwen\gwen.exe" "$env:USERPROFILE\bin\gwen.exe"
+# Add %USERPROFILE%\bin to PATH, then:
+gwen --version
+```
+
+Windows SmartScreen may warn about the unsigned binary. Choose **More info**,
+then **Run anyway**.
+
+### Install the gwen home template
+
+`gwen new` and `gwen update` read a template from `$GWEN_HOME`, or `~/.gwen`
+when unset. The template repository is separate from the binary:
+
+```sh
+git clone https://github.com/E-Neo/.gwen ~/.gwen
+```
+
+Update it later with:
+
+```sh
+git -C ~/.gwen pull --ff-only
+```
+
+On Windows:
+
+```powershell
+git clone https://github.com/E-Neo/.gwen "$env:USERPROFILE\.gwen"
+```
+
+If `git` is unavailable, download the
+[.gwen repository ZIP](https://github.com/E-Neo/.gwen/archive/refs/heads/main.zip)
+and extract it to `~/.gwen` (or `%USERPROFILE%\.gwen`).
+
+Set `GWEN_HOME` to use a different location:
+
+```sh
+export GWEN_HOME="$HOME/.gwen"
+```
+
+Windows: `$env:GWEN_HOME = "$env:USERPROFILE\.gwen"`.
+
+Without a home template, `gwen new` falls back to the built-in starter deck.
+With it installed, new projects get the full template, fonts and agent skills;
+`gwen update <deck>` refreshes an existing project from it. Agents should run
+the clone command above before creating a project.
+
+### Build from source
+
+Requires a recent stable Rust toolchain (edition 2024):
+
+```sh
+cargo install --git https://github.com/E-Neo/gwen --tag v0.1.0
+```
+
+### Verify the install
+
+```sh
+gwen --version
+gwen new demo
+gwen build demo
+```
+
+`gwen build demo` writes `demo/target/<title>.pptx`.
+
 ## How it works
 
 A deck is a directory of TOML files - `main.toml`, `masters/*.toml` and
@@ -557,3 +669,12 @@ that plain **data** object to the native writer in `src/pptx/`. The writer
 parses the spec, builds the same slide/master/layout/notes XML pptxgenjs would,
 and packages the parts with gwen's deterministic ZIP writer. Nothing from your
 TOML is ever evaluated as code.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
