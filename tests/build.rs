@@ -31,6 +31,17 @@ fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// Diagnostic output with native path separators and miette's line wrapping
+/// normalized, so assertions do not depend on the host OS or terminal width.
+fn normalized_stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .replace('\\', "/")
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A 1x1 PNG, decoded at runtime so the repo keeps no binary fixtures.
 fn pixel_png() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
@@ -1938,7 +1949,7 @@ fn gwen_fmt_reports_invalid_toml_and_keeps_going() {
 
     let out = gwen_in(&home, &[std::ffi::OsStr::new("fmt"), dir.as_os_str()]);
     assert!(!out.status.success(), "a broken file makes the run fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = normalized_stderr(&out);
     assert!(
         stderr.contains("slides/broken.toml"),
         "stderr names the file: {stderr}"
@@ -2684,10 +2695,10 @@ fn gwen_clean_requires_a_gwen_project() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "non-gwen directories are refused");
+    let stderr = normalized_stderr(&out);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not a gwen project"),
-        "handler explains the refusal: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("not a gwen project"),
+        "handler explains the refusal: {stderr}"
     );
     assert!(
         dir.join("target").join("keep").is_file(),
@@ -3266,10 +3277,10 @@ fn gwen_init_refuses_an_existing_project() {
     assert!(run().status.success());
     let again = run();
     assert!(!again.status.success(), "second init is refused");
+    let stderr = normalized_stderr(&again);
     assert!(
-        String::from_utf8_lossy(&again.stderr).contains("already a gwen project"),
-        "clear refusal: {}",
-        String::from_utf8_lossy(&again.stderr)
+        stderr.contains("already a gwen project"),
+        "clear refusal: {stderr}"
     );
 }
 
@@ -3374,9 +3385,9 @@ fn gwen_edit_requires_a_gwen_project() {
         !out.status.success(),
         "edit refuses a directory without main.toml"
     );
+    let stderr = normalized_stderr(&out);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not a gwen project"),
-        "clear error: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("not a gwen project"),
+        "clear error: {stderr}"
     );
 }
