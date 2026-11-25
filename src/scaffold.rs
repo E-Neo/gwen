@@ -674,10 +674,15 @@ treatment as slide text):
 | `[text](url)`       | run with a hyperlink                          |
 | `\n` / `<br>`      | line break                                     |
 | `\n\n`             | new paragraph                                 |
+| fenced code block   | preformatted paragraphs; shape font            |
 
 `<br>` is a hard line break: each one adds a line, so `a<br><br>b` renders a
 blank line between `a` and `b`. Soft breaks (`\n`) are collapsible - they
 guarantee a line break but don't stack, so `a\n<br>\nb` is one line break.
+
+Fenced and indented code blocks are preformatted: each line becomes its own
+paragraph, blank lines and leading indentation are preserved, and markdown
+inside the block is not parsed. Code blocks use the shape's font and size.
 
 `- item` / `1. item` markdown lists become bulleted paragraphs; an item's
 indent level equals its nesting depth (top-level 0, nested = parent + 1).

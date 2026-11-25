@@ -5,7 +5,9 @@
 //! - a single `\n` -> a soft line break (pptxgenjs `softBreakBefore` run);
 //! - a blank line (`\n\n`) -> a new paragraph;
 //! - `- item` / `1. item` markdown lists -> bulleted paragraphs whose marker
-//!   style and indent level come from the configured list markers.
+//!   style and indent level come from the configured list markers;
+//! - fenced and indented code blocks -> one paragraph per line, raw text,
+//!   shape font and size, blank lines and indentation preserved.
 //!
 //! PPTX output is only ever produced by the pptxgenjs API; this module just
 //! decides which run options to pass to it, never any OOXML.
@@ -260,6 +262,35 @@ fn empty_break_run() -> Run {
     }
 }
 
+/// Emit raw code-block text as one paragraph per line, preserving blank lines
+/// and indentation. Runs carry no options, so the shape's font and size apply.
+fn push_code_block(paragraphs: &mut Vec<Vec<Run>>, text: &str) {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    if text.is_empty() {
+        paragraphs.push(vec![Run::new("")]);
+        return;
+    }
+    for line in text.split('\n') {
+        paragraphs.push(vec![Run::new(line)]);
+    }
+}
+
+impl Run {
+    fn new(text: &str) -> Run {
+        Run {
+            text: text.to_string(),
+            bold: false,
+            italic: false,
+            soft_break_before: None,
+            hyperlink: None,
+            bullet: None,
+            indent_level: None,
+            options: BTreeMap::new(),
+        }
+    }
+}
+
 /// Parse markdown-flavoured `text` into a list of paragraphs, each a list of
 /// runs. `ordered_markers`/`unordered_markers` are the per-indent-level
 /// display patterns for ordered lists and bullet characters for unordered
@@ -282,6 +313,8 @@ pub fn parse_paragraphs(
     let mut state = RunState::default();
     // Open `<span>` styles, innermost last.
     let mut span_stack: Vec<BTreeMap<String, serde_json::Value>> = Vec::new();
+    // Raw text collected while inside a fenced or indented code block.
+    let mut code_block: Option<String> = None;
 
     let push_text = |runs: &mut Vec<Run>,
                      hyperlink: &mut Option<String>,
@@ -341,6 +374,12 @@ pub fn parse_paragraphs(
                         indent,
                     ));
                 }
+                Tag::CodeBlock(_) => {
+                    flush(&mut paragraphs, &mut current, &mut pending);
+                    pending_soft = false;
+                    pending_hard = 0;
+                    code_block = Some(String::new());
+                }
                 other => state.push(&other),
             },
             Event::End(tag_end) => match tag_end {
@@ -351,6 +390,13 @@ pub fn parse_paragraphs(
                     flush(&mut paragraphs, &mut current, &mut pending);
                     open_items -= 1;
                     pending = None;
+                }
+                TagEnd::CodeBlock => {
+                    if let Some(text) = code_block.take() {
+                        push_code_block(&mut paragraphs, &text);
+                    }
+                    pending_soft = false;
+                    pending_hard = 0;
                 }
                 TagEnd::Paragraph => {
                     // A paragraph that is only breaks (or ends with breaks)
@@ -389,25 +435,29 @@ pub fn parse_paragraphs(
                 }
             }
             Event::Text(t) => {
-                let breaks = if pending_soft || pending_hard > 0 {
-                    pending_hard.max(1)
+                if let Some(code) = code_block.as_mut() {
+                    code.push_str(&t);
                 } else {
-                    0
-                };
-                pending_soft = false;
-                pending_hard = 0;
-                for _ in 1..breaks {
-                    current.push(empty_break_run());
+                    let breaks = if pending_soft || pending_hard > 0 {
+                        pending_hard.max(1)
+                    } else {
+                        0
+                    };
+                    pending_soft = false;
+                    pending_hard = 0;
+                    for _ in 1..breaks {
+                        current.push(empty_break_run());
+                    }
+                    push_text(
+                        &mut current,
+                        &mut state.hyperlink,
+                        state.bold,
+                        state.italic,
+                        &t,
+                        breaks > 0,
+                        span_stack.last().unwrap_or(&BTreeMap::new()),
+                    );
                 }
-                push_text(
-                    &mut current,
-                    &mut state.hyperlink,
-                    state.bold,
-                    state.italic,
-                    &t,
-                    breaks > 0,
-                    span_stack.last().unwrap_or(&BTreeMap::new()),
-                );
             }
             Event::Code(t) => {
                 let breaks = if pending_soft || pending_hard > 0 {
@@ -720,6 +770,43 @@ mod tests {
             p.iter().map(|par| par[0].text.as_str()).collect::<Vec<_>>(),
             vec!["a", "", "b"]
         );
+    }
+
+    #[test]
+    fn fenced_code_block_preserves_lines_and_shape_font() {
+        let p = parse("Before\n\n```rust\nlet x = 1;\n\n  let y = 2;\n**not bold**\n```\n\nAfter");
+        assert_eq!(
+            p.iter().map(|par| par[0].text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "Before",
+                "let x = 1;",
+                "",
+                "  let y = 2;",
+                "**not bold**",
+                "After"
+            ]
+        );
+        for par in &p[1..p.len() - 1] {
+            assert!(par[0].options.is_empty());
+            assert!(!par[0].bold);
+            assert!(!par[0].italic);
+        }
+    }
+
+    #[test]
+    fn empty_fenced_code_block_is_one_empty_paragraph() {
+        let p = parse("```\n```");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0][0].text, "");
+        assert!(p[0][0].options.is_empty());
+    }
+
+    #[test]
+    fn indented_code_block_is_preserved() {
+        let p = parse("    let x = 1;\n    let y = 2;\n");
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0][0].text, "let x = 1;");
+        assert_eq!(p[1][0].text, "let y = 2;");
     }
 
     #[test]

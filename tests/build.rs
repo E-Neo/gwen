@@ -2122,6 +2122,92 @@ fn gwen_new_no_template_flag_ignores_template() {
 }
 
 #[test]
+fn text_body_defaults_match_shape_font() {
+    let dir = sample_project("text-defaults");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "text"
+x = "1in"
+y = "1in"
+w = "8in"
+h = "3in"
+text = "a<br><br>b"
+font_face = "Microsoft YaHei"
+font_size = 14
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    let body = xml
+        .split("<p:txBody>")
+        .find(|part| part.contains("<a:t>a</a:t>"))
+        .expect("text body");
+    assert_eq!(body.matches("<a:p>").count(), 1, "{body}");
+    assert_eq!(body.matches("<a:pPr").count(), 1, "{body}");
+    assert!(body.contains("<a:br><a:rPr"), "{body}");
+    let style = body.split("<a:lstStyle>").nth(1).expect("list style");
+    assert!(style.contains("Microsoft YaHei"), "{style}");
+    assert!(style.contains("sz=\"1400\""), "{style}");
+    let end = body
+        .split("<a:endParaRPr")
+        .nth(1)
+        .expect("end paragraph properties");
+    let end = end.split("</a:endParaRPr>").next().unwrap();
+    assert!(end.contains("Microsoft YaHei"), "{end}");
+    assert!(end.contains("sz=\"1400\""), "{end}");
+}
+
+#[test]
+fn fenced_code_block_renders_separate_paragraphs() {
+    let dir = sample_project("fenced-code");
+    write(
+        &dir.join("slides").join("content.toml"),
+        r##"master = "brand"
+
+[[shapes]]
+type = "text"
+x = "1in"
+y = "1in"
+w = "8in"
+h = "3in"
+text = """Before
+
+```
+let x = 1;
+
+  let y = 2;
+```
+
+After"""
+font_face = "Microsoft YaHei"
+font_size = 14
+"##,
+    );
+    let out = gwen::build(&dir).unwrap();
+    let xml = String::from_utf8(
+        zip_member(&std::fs::read(&out).unwrap(), "ppt/slides/slide2.xml").unwrap(),
+    )
+    .unwrap();
+    let body = xml
+        .split("<p:txBody>")
+        .find(|part| part.contains("<a:t>Before</a:t>"))
+        .expect("text body");
+    assert_eq!(body.matches("<a:p>").count(), 5, "{body}");
+    assert_eq!(body.matches("<a:pPr").count(), 5, "{body}");
+    assert_eq!(body.matches("<a:t>").count(), 4, "{body}");
+    assert!(body.contains("<a:t>let x = 1;</a:t>"), "{body}");
+    assert!(body.contains("<a:t>  let y = 2;</a:t>"), "{body}");
+    assert!(body.contains("<a:t>After</a:t>"), "{body}");
+    assert!(body.contains("Microsoft YaHei"), "{body}");
+}
+
+#[test]
 fn markdown_lists_render_bullets_with_per_level_markers() {
     let dir = sample_project("listmarkers");
     write(

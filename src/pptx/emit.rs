@@ -279,6 +279,14 @@ fn gen_xml_run_properties(opts: &Opts, is_default: bool) -> String {
     out
 }
 
+/// Use the same run properties for an end-of-paragraph mark, so text typed at
+/// the end of a paragraph inherits the shape's font instead of the theme's.
+fn gen_xml_end_para_properties(opts: &Opts) -> String {
+    gen_xml_run_properties(opts, false)
+        .replace("<a:rPr", "<a:endParaRPr")
+        .replace("</a:rPr>", "</a:endParaRPr>")
+}
+
 pub(crate) fn gen_xml_paragraph_properties(opts: &Opts, is_default: bool) -> String {
     let tag = if is_default { "a:lvl1pPr" } else { "a:pPr" };
     let mut bullet_mar_l = val_to_pts(&json!(DEF_BULLET_MARGIN));
@@ -533,7 +541,7 @@ fn gen_xml_text_body(obj: &mut Obj) -> String {
         && truthy(shape_opts.get("align"))
     {
         out.push_str("<a:lstStyle><a:lvl1pPr algn=\"l\"/></a:lstStyle>");
-    } else if obj.kind == ObjKind::Placeholder {
+    } else if matches!(obj.kind, ObjKind::Placeholder | ObjKind::Text) {
         out.push_str(&format!(
             "<a:lstStyle>{}</a:lstStyle>",
             gen_xml_paragraph_properties(&shape_opts, true)
@@ -596,65 +604,42 @@ fn gen_xml_text_body(obj: &mut Obj) -> String {
     }
 
     // STEP 6: emit paragraphs.
-    for line in lines {
-        let mut reqs_closing_font_size = false;
-        out.push_str("<a:p>");
-        for (idx, mut text_obj) in line.into_iter().enumerate() {
-            if idx > 0 && truthy(text_obj.options.get("softBreakBefore")) {
-                out.push_str("<a:br/>");
-            }
-            for key in [
-                "align",
-                "lineSpacing",
-                "lineSpacingMultiple",
-                "indentLevel",
-                "paraSpaceBefore",
-                "paraSpaceAfter",
-            ] {
-                if !truthy(text_obj.options.get(key))
-                    && let Some(v) = shape_opts.get(key)
-                {
-                    text_obj.options.insert(key.into(), v.clone());
-                }
-            }
-            let ppr = gen_xml_paragraph_properties(&text_obj.options, false);
-            out.push_str(&ppr.replace("<a:pPr></a:pPr>", ""));
-            let inherited = shape_opts.clone();
-            for (key, val) in inherited {
+    for mut line in lines {
+        // Shape-level defaults apply to every run before paragraph properties
+        // are inspected, so there is exactly one pPr per paragraph.
+        for run in &mut line {
+            for (key, val) in &shape_opts {
                 if key == "bullet" {
                     continue;
                 }
-                if !truthy(text_obj.options.get(&key)) {
-                    text_obj.options.insert(key, val);
+                if !truthy(run.options.get(key)) {
+                    run.options.insert(key.clone(), val.clone());
                 }
+            }
+        }
+        let paragraph_opts = line
+            .first()
+            .map(|run| run.options.clone())
+            .unwrap_or_default();
+        out.push_str("<a:p>");
+        out.push_str(
+            &gen_xml_paragraph_properties(&paragraph_opts, false).replace("<a:pPr></a:pPr>", ""),
+        );
+        for (idx, text_obj) in line.into_iter().enumerate() {
+            if idx > 0 && truthy(text_obj.options.get("softBreakBefore")) {
+                let props = gen_xml_run_properties(&text_obj.options, false);
+                out.push_str(&format!("<a:br>{props}</a:br>"));
             }
             out.push_str(&gen_xml_text_run(&text_obj));
-            if (text_obj.text.is_empty() && truthy(shape_opts.get("fontSize")))
-                || truthy(text_obj.options.get("fontSize"))
+            if ((text_obj.text.is_empty() && truthy(shape_opts.get("fontSize")))
+                || truthy(text_obj.options.get("fontSize")))
+                && !truthy(shape_opts.get("fontSize"))
+                && let Some(v) = text_obj.options.get("fontSize")
             {
-                reqs_closing_font_size = true;
-                if !truthy(shape_opts.get("fontSize"))
-                    && let Some(v) = text_obj.options.get("fontSize")
-                {
-                    shape_opts.insert("fontSize".into(), v.clone());
-                }
+                shape_opts.insert("fontSize".into(), v.clone());
             }
         }
-        let lang = shape_opts
-            .get("lang")
-            .filter(|v| truthy(Some(v)))
-            .map(js_to_string)
-            .unwrap_or_else(|| "en-US".into());
-        if reqs_closing_font_size {
-            out.push_str(&format!(
-                "<a:endParaRPr lang=\"{lang}\"{} dirty=\"0\"/>",
-                opt_num(&shape_opts, "fontSize")
-                    .map(|n| format!(" sz=\"{}\"", js_round(n * 100.0)))
-                    .unwrap_or_default()
-            ));
-        } else {
-            out.push_str(&format!("<a:endParaRPr lang=\"{lang}\" dirty=\"0\"/>"));
-        }
+        out.push_str(&gen_xml_end_para_properties(&shape_opts));
         out.push_str("</a:p>");
     }
     if !out.contains("<a:p>") {

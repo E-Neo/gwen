@@ -563,11 +563,17 @@ for slides **and** masters/placeholders alike:
 | `[text](url)`       | run with a hyperlink                            |
 | `\n` / `<br>`      | line break                                     |
 | `\n\n`             | new paragraph                                   |
+| fenced code block   | preformatted paragraphs; shape font             |
 
 A `\n` or `<br>` is a line break (pptxgenjs `softBreakBefore`); a blank
 line starts a new paragraph. Hard breaks stack: `a<br><br>b` renders a blank
 line between `a` and `b`, while `a\n<br>\nb` collapses to one line break
 (soft breaks are collapsible, `<br>`s are not).
+
+Fenced code blocks and indented code blocks are preformatted: each line becomes
+its own paragraph, blank lines and leading indentation are preserved, and
+markdown inside the block is not parsed. Code blocks use the shape's font and
+size.
 
 A `<span class="name">` applies a `[styles.named.name]` to the runs it wraps -
 e.g. `black with <span class="red">**bold and red**</span>` colours that run
